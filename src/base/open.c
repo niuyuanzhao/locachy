@@ -346,7 +346,9 @@ static int lists(const char *mimetypes, const char *type)
 
 struct program_conf {
     int host;
+    int vm;
     char desktop[256], command[256];
+    char vm_kind[32], vm_name[OPEN_NAME];
 };
 
 static void on_program(const char *key, const char *value, void *arg)
@@ -354,10 +356,16 @@ static void on_program(const char *key, const char *value, void *arg)
     struct program_conf *c = arg;
     if (strcmp(key, "host") == 0) {
         c->host = strcmp(value, "1") == 0;
+    } else if (strcmp(key, "vm") == 0) {
+        c->vm = strcmp(value, "1") == 0;
     } else if (strcmp(key, "desktop") == 0) {
         snprintf(c->desktop, sizeof c->desktop, "%s", value);
     } else if (strcmp(key, "command") == 0) {
         snprintf(c->command, sizeof c->command, "%s", value);
+    } else if (strcmp(key, "vm_kind") == 0) {
+        snprintf(c->vm_kind, sizeof c->vm_kind, "%s", value);
+    } else if (strcmp(key, "vm_name") == 0) {
+        snprintf(c->vm_name, sizeof c->vm_name, "%s", value);
     }
 }
 
@@ -377,6 +385,16 @@ int open_host(const char *name)
     }
     program_conf(name, &c);
     return c.host;
+}
+
+int open_vm(const char *name)
+{
+    struct program_conf c;
+    if (!valid_name(name)) {
+        return 0;
+    }
+    program_conf(name, &c);
+    return c.vm;
 }
 
 /* A framebuffer program's name without "program:", or NULL if name is not
@@ -787,6 +805,104 @@ int open_window_ids(const char *name, char ids[][OPEN_WINDOW_ID], int max)
         }
     }
     return n;
+}
+
+/* A QEMU window's app id starts with "qemu": GTK's is "qemu"; SDL's falls back
+ * to the executable's name (qemu-system-x86_64) when no hint or variable sets
+ * one, and QEMU's SDL code sets none (qemu/ui/sdl2.c). Only the prefix counts. */
+int open_window_qemu(const char *app_id)
+{
+    return app_id && strncmp(app_id, "qemu", 4) == 0;
+}
+
+/* The prefixes of the -name each managed VM launcher gives QEMU, as they follow
+ * "QEMU (" in the window title: locachy-app's custom VMs "locachy-vm[NAME]",
+ * locachy-compute's "locachy-compute[VMNAME]", locachy-winmaint's "locachy-winmaint". */
+static const char *const vm_tag_prefixes[] = { "locachy-vm[", "locachy-compute[", "locachy-winmaint" };
+
+/* 1: a QEMU window of a managed VM, by its app id and title (a VM's tag). Such
+ * a window is that VM's alone; no app id claims it. */
+int open_window_vm_tagged(const char *app_id, const char *title)
+{
+    if (!open_window_qemu(app_id) || !title || strncmp(title, "QEMU (", 6) != 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < sizeof vm_tag_prefixes / sizeof *vm_tag_prefixes; i++) {
+        if (strncmp(title + 6, vm_tag_prefixes[i], strlen(vm_tag_prefixes[i])) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* VM app name's tag (its launcher's -name), or 0 if it has none: a compute
+ * VM's name (vm_name, else the app's) as locachy-compute accepts names. */
+static int vm_tag(const char *name, const struct program_conf *c, char *tag, size_t size)
+{
+    if (strcmp(c->vm_kind, "winmaint") == 0) {
+        return snprintf(tag, size, "locachy-winmaint") < (int)size;
+    }
+    if (strcmp(c->vm_kind, "compute") != 0) {
+        return snprintf(tag, size, "locachy-vm[%s]", name) < (int)size;
+    }
+    const char *vname = c->vm_name[0] ? c->vm_name : name;
+    for (const char *p = vname; *p; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-' && *p != '.') {
+            return 0;
+        }
+    }
+    return snprintf(tag, size, "locachy-compute[%s]", vname) < (int)size;
+}
+
+/* Does QEMU's window title carry exactly tag: GTK's "QEMU (TAG)", maybe
+ * followed by " [Paused]" or ": LABEL", or SDL's "QEMU (TAG-N)..." (N its
+ * console, qemu/ui/sdl2.c)? The closing bracket ends a name, so one VM's tag
+ * is never a prefix of another's (debian, debian-12). */
+static int vm_title_has_tag(const char *title, const char *tag)
+{
+    size_t len = strlen(tag);
+    if (strncmp(title, "QEMU (", 6) != 0 || strncmp(title + 6, tag, len) != 0) {
+        return 0;
+    }
+    const char *rest = title + 6 + len;
+    if (*rest == ')') {
+        return 1;
+    }
+    if (*rest == '-' && isdigit((unsigned char)rest[1])) {
+        const char *p = rest + 1;
+        while (isdigit((unsigned char)*p)) {
+            p++;
+        }
+        return *p == ')';
+    }
+    return 0;
+}
+
+int open_window_matches(const char *name, const char *app_id, const char *title)
+{
+    if (!valid_name(name)) {
+        return 0;
+    }
+    struct program_conf c;
+    program_conf(name, &c);
+    if (open_window_vm_tagged(app_id, title)) {
+        /* A managed VM's window: that VM's alone, never an app id's. */
+        char tag[OPEN_NAME + 32];
+        return c.vm && vm_tag(name, &c, tag, sizeof tag) && vm_title_has_tag(title, tag);
+    }
+    /* A VM without a command has no app id of its own (QEMU's is every
+     * VM's); a command= VM is matched by its command's, as containers are. */
+    if ((c.vm && !c.command[0]) || !app_id || !app_id[0]) {
+        return 0;
+    }
+    char ids[16][OPEN_WINDOW_ID];
+    int n = open_window_ids(name, ids, 16);
+    for (int i = 0; i < n; i++) {
+        if (strcasecmp(app_id, ids[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 void open_label(const char *name, const char *type, char *label, size_t size)

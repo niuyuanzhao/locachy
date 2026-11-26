@@ -126,7 +126,9 @@ enum check {
     C_NONE, C_PACKAGES, C_SWAP, C_KERNEL, C_ONOFF, C_SECTION, C_TARGETS, C_CONTAINER, C_CONTAINER_DATA,
     C_DEVICE, C_RELEASE, C_FILE, C_SPI_PROBE, C_SPI_BACKUP, C_SPI_VERIFY, C_SPI_WRITE,
     C_TPM, C_TPM_ENROLL, C_SECURE_BOOT, C_BOOT, C_REBUILD, C_BIOS_SET, C_SECURITY,
-    C_WINMAINT_CREATE, C_GPU_TARGET, C_GPU_MODE,
+    C_WINMAINT_CREATE, C_WINMAINT_BOOT_DEFAULT, C_WINISO_FETCH, C_GPU_TARGET, C_GPU_MODE,
+    C_STORAGE_NAME, C_STORAGE_ROLE, C_STORAGE_AUTO, C_STORAGE_COMPUTE,
+    C_STORAGE_ATTACH, C_STORAGE_FORMAT, C_STORAGE_ARRAY,
 };
 
 struct kind {
@@ -175,12 +177,23 @@ static const struct kind kinds[] = {
     { "winmaint-create", "locachy-winmaint", { "create" }, C_WINMAINT_CREATE },
     { "winmaint-reclaim", "locachy-winmaint", { "reclaim" }, C_NONE },
     { "winmaint-boot-once", "locachy-winmaint", { "boot-once" }, C_NONE },
+    { "winmaint-boot-default", "locachy-winmaint", { "boot-default" }, C_WINMAINT_BOOT_DEFAULT },
+    { "winiso-fetch", "locachy-winiso", { "fetch", "windows" }, C_WINISO_FETCH },
     { "winmaint-heal-boot", "locachy-winmaint", { "heal-boot" }, C_NONE },
     { "gpu-unlock-install", "locachy-gpu-unlock", { "install", "--target" }, C_GPU_TARGET },
     { "gpu-unlock-set", "locachy-gpu-unlock", { "set" }, C_GPU_TARGET },
     { "gpu-unlock-remove", "locachy-gpu-unlock", { "remove" }, C_NONE },
     { "gpu-power-apply", "locachy-gpu-power", { "apply" }, C_GPU_MODE },
     { "gpu-powerd", "locachy-gpu-power", { "nvidia-powerd" }, C_ONOFF },
+    { "storage-mount", "locachy-storage", { "mount" }, C_STORAGE_NAME },
+    { "storage-umount", "locachy-storage", { "umount" }, C_STORAGE_NAME },
+    { "storage-set-role", "locachy-storage", { "set-role" }, C_STORAGE_ROLE },
+    { "storage-set-auto", "locachy-storage", { "set-auto" }, C_STORAGE_AUTO },
+    { "storage-set-compute", "locachy-storage", { "set-compute-storage" }, C_STORAGE_COMPUTE },
+    { "storage-remove", "locachy-storage", { "remove" }, C_STORAGE_NAME },
+    { "storage-attach", "locachy-storage", { "create", "--mode", "attach" }, C_STORAGE_ATTACH },
+    { "storage-format", "locachy-storage", { "create", "--mode", "format" }, C_STORAGE_FORMAT },
+    { "storage-array", "locachy-storage", { "create", "--mode", "array" }, C_STORAGE_ARRAY },
 };
 #define NKINDS ((int)(sizeof kinds / sizeof kinds[0]))
 
@@ -219,6 +232,94 @@ static int path_of(const char *s, int dir)
 static int container_name(const char *s)
 {
     return isalnum((unsigned char)s[0]) && strncmp(s, "window-", 7) != 0 && word(s, "._-", 65);
+}
+
+/* Storage volume name: ^[a-z0-9][a-z0-9._-]{0,31}$ */
+static int storage_name(const char *s)
+{
+    size_t len = strlen(s);
+    if (len == 0 || len > 32) return 0;
+    if (!(islower((unsigned char)s[0]) || isdigit((unsigned char)s[0]))) return 0;
+    return strspn(s, "abcdefghijklmnopqrstuvwxyz0123456789._-") == len;
+}
+
+/* Single block device under /dev: ^/dev/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$ (no subdirs, no ..). */
+static int storage_dev_n(const char *s, size_t len)
+{
+    if (len < 6 || len > 69 || strncmp(s, "/dev/", 5) != 0) return 0;
+    const char *p = s + 5;
+    size_t rest = len - 5;
+    if (!isalnum((unsigned char)p[0])) return 0;
+    for (size_t i = 1; i < rest; i++) {
+        unsigned char c = (unsigned char)p[i];
+        if (!isalnum(c) && c != '_' && c != '-') return 0;
+    }
+    return 1;
+}
+
+static int storage_dev(const char *s)
+{
+    return storage_dev_n(s, strlen(s));
+}
+
+/* Comma-separated list of 2..16 distinct /dev/DEV paths for btrfs arrays. */
+static int storage_devs(const char *s)
+{
+    int count = 0;
+    const char *p = s;
+    if (!*p) return 0;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        if (!storage_dev_n(p, len)) return 0;
+        if (++count > 16) return 0;
+        if (!comma) break;
+        p = comma + 1;
+        if (!*p) return 0; /* trailing comma */
+    }
+    return count >= 2;
+}
+
+static int storage_role(const char *s)
+{
+    return strcmp(s, "data") == 0 || strcmp(s, "shared") == 0 || strcmp(s, "compute") == 0;
+}
+
+static int storage_fs(const char *s)
+{
+    return strcmp(s, "ext4") == 0 || strcmp(s, "btrfs") == 0;
+}
+
+static int storage_raid(const char *s)
+{
+    return strcmp(s, "single") == 0 || strcmp(s, "raid0") == 0 ||
+           strcmp(s, "raid1") == 0 || strcmp(s, "raid10") == 0;
+}
+
+static int storage_encrypt(const char *s)
+{
+    return strcmp(s, "none") == 0 || strcmp(s, "luks") == 0;
+}
+
+/* winmaint --disk: /dev/NAME, NAME 1..32 of letters, digits, _ and -, not
+ * starting with -: no other path, no .. (the helper's own check follows). */
+static int winmaint_disk(const char *s)
+{
+    size_t len = strlen(s);
+    if (len < 6 || len > 37 || strncmp(s, "/dev/", 5) != 0 || s[5] == '-') return 0;
+    return strspn(s + 5, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == len - 5;
+}
+
+/* winiso-fetch --lang TAG: en-US, zh-CN, es-419: 2 or 3 lowercase letters, '-', then
+ * 2 uppercase letters or 3 digits. */
+static int winiso_lang(const char *s)
+{
+    size_t lang = strspn(s, "abcdefghijklmnopqrstuvwxyz");
+    if (lang < 2 || lang > 3 || s[lang] != '-') return 0;
+    const char *region = s + lang + 1;
+    size_t len = strlen(region);
+    return (len == 2 && strspn(region, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") == 2) ||
+           (len == 3 && strspn(region, "0123456789") == 3);
 }
 
 /* flashrom's options after the positional arguments: --chip NAME,
@@ -314,13 +415,58 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
                                    strcmp(a[0], "stock") == 0 || strcmp(a[0], "eco") == 0));
         break;
     case C_WINMAINT_CREATE:
-        if (n == 2 && strcmp(a[0], "--size-gib") == 0) {
+        /* --size-gib N, and optionally --disk /dev/NAME (the disk it goes on; the system disk by default). */
+        if ((n == 2 || n == 4) && strcmp(a[0], "--size-gib") == 0 && (n == 2 || strcmp(a[2], "--disk") == 0)) {
             size_t len = strlen(a[1]);
             if (len >= 2 && len <= 4 && a[1][0] != '0' && strspn(a[1], "0123456789") == len) {
                 int gib = atoi(a[1]);
-                ok = gib >= 40 && gib <= 4096;
+                ok = gib >= 40 && gib <= 4096 && (n == 2 || winmaint_disk(a[3]));
             }
         }
+        break;
+    case C_WINMAINT_BOOT_DEFAULT:
+        /* windows [--reboot] (Windows first until switched back) or locachy (LOCachy first again). */
+        ok = (n == 1 && (strcmp(a[0], "windows") == 0 || strcmp(a[0], "locachy") == 0)) ||
+             (n == 2 && strcmp(a[0], "windows") == 0 && strcmp(a[1], "--reboot") == 0);
+        break;
+    case C_WINISO_FETCH:
+        /* After the fixed "fetch windows": optional --lang TAG. */
+        ok = n == 0 ||
+             (n == 2 && strcmp(a[0], "--lang") == 0 && winiso_lang(a[1]));
+        break;
+    case C_STORAGE_NAME:
+        ok = n == 1 && storage_name(a[0]);
+        break;
+    case C_STORAGE_ROLE:
+        ok = n == 2 && storage_name(a[0]) && storage_role(a[1]);
+        break;
+    case C_STORAGE_AUTO:
+        ok = n == 2 && storage_name(a[0]) && (strcmp(a[1], "on") == 0 || strcmp(a[1], "off") == 0);
+        break;
+    case C_STORAGE_COMPUTE:
+        ok = n == 1 && (strcmp(a[0], "none") == 0 || storage_name(a[0]));
+        break;
+    case C_STORAGE_ATTACH:
+        ok = n == 6 &&
+             strcmp(a[0], "--name") == 0 && storage_name(a[1]) &&
+             strcmp(a[2], "--dev") == 0 && storage_dev(a[3]) &&
+             strcmp(a[4], "--role") == 0 && storage_role(a[5]);
+        break;
+    case C_STORAGE_FORMAT:
+        ok = n == 10 &&
+             strcmp(a[0], "--name") == 0 && storage_name(a[1]) &&
+             strcmp(a[2], "--dev") == 0 && storage_dev(a[3]) &&
+             strcmp(a[4], "--fs") == 0 && storage_fs(a[5]) &&
+             strcmp(a[6], "--role") == 0 && storage_role(a[7]) &&
+             strcmp(a[8], "--encrypt") == 0 && storage_encrypt(a[9]);
+        break;
+    case C_STORAGE_ARRAY:
+        ok = n == 10 &&
+             strcmp(a[0], "--name") == 0 && storage_name(a[1]) &&
+             strcmp(a[2], "--devs") == 0 && storage_devs(a[3]) &&
+             strcmp(a[4], "--raid") == 0 && storage_raid(a[5]) &&
+             strcmp(a[6], "--role") == 0 && storage_role(a[7]) &&
+             strcmp(a[8], "--encrypt") == 0 && storage_encrypt(a[9]);
         break;
     case C_BIOS_SET:
         /* ATTR: letters, digits, _ . : - (from a letter or digit, 1..96 bytes);

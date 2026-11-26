@@ -631,7 +631,155 @@ def scenario_rename():
     check("the leased device came back under a free name", len(lines) == 1 and name not in ("", "extdisplay0"), str(lines))
     check("its record is gone", not [f for f in os.listdir(W + "/state") if f.startswith("lease-")])
     sh("ip", "link", "del", "extdisplay0")
+    if name:
+        sh("ip", "link", "set", "dev", name, "down")
+        sh("ip", "link", "set", "dev", name, "name", "extdisplay0")
+        sh("ip", "link", "set", "dev", "extdisplay0", "up")
     finish(b)
+
+
+def scenario_hotplug():
+    # Cable unplugged while leased (interface destroyed inside session netns),
+    # then replugged with the same MAC at a different sysfs device path and
+    # interface name/ifindex. Must settle any record, announce "changed", and
+    # pair again on the same broker without restarting or rebooting.
+    sh("ip", "link", "set", "dev", "extdisplay0", "up")
+    sh("ip", "link", "set", "dev", "extdisplaypeer", "up")
+    mac = mac_of("extdisplay0")
+    b = Broker()
+    b.send("watch")
+    listing = b.collect("< end")
+    fields = next(x.split() for x in listing if x.startswith("< iface extdisplay0 "))
+    b.send("pair " + fields[2] + " " + fields[5] + " " + fields[6])
+    lease = b.expect("< lease ").split()
+    code = b.expect("< code ")[7:]
+    pump = pump_of(b.pid)
+    c = client(None, lease[3], lease[4], decode_code(code).hex())
+    check("hotplug: paired before cable pull", b.expect("< paired") == "< paired +fd")
+    b.expect("plain< ")
+    records = [f for f in os.listdir(W + "/state") if f.startswith("lease-") and not f.endswith(".new")]
+    check("hotplug: lease record written", len(records) == 1, str(records))
+    record = W + "/state/" + records[0]
+    # Simulate a physical USB4/Thunderbolt device with a different sysfs device
+    # path before replug (e.g. a different port or dock).
+    if os.path.exists(record):
+        with open(record, "r+") as rf:
+            body = rf.read().replace("device -", "device /sys/devices/pci0000:00/0000:00:0d.2/domain0/0-0/0-1")
+            rf.seek(0)
+            rf.write(body)
+            rf.truncate()
+    # Cable pull destroys the thunderbolt-net interface inside the session netns.
+    rc, text = in_session(pump, "ip", "link", "del", "extdisplay0")
+    check("hotplug: leased device destroyed on cable pull", rc == 0, text)
+    check("hotplug: session ends with carrier-lost", b.expect("< ended ", timeout=15) == "< ended carrier-lost")
+    c.communicate(timeout=20)
+    b.send("scan")
+    empty = b.collect("< end")
+    check("hotplug: no extdisplay0 after unplug",
+          not any(x.startswith("< iface extdisplay0 ") for x in empty), str(empty))
+    # Replug: same MAC returns under a new interface name/ifindex and different
+    # sysfs device path ("-" vs the earlier PCI path in the record if any stayed).
+    rc, text = sh("ip", "link", "add", "extdisplay1", "address", mac, "type", "veth", "peer", "name", "extdisplaypeer")
+    check("hotplug: device returns with same MAC and new name", rc == 0, text)
+    sh("ip", "link", "set", "extdisplay1", "up")
+    sh("ip", "link", "set", "extdisplaypeer", "up")
+    try:
+        ev = b.expect("< changed", timeout=5)
+    except TimeoutError:
+        ev = "timeout"
+    check("hotplug: broker announces changed on replug", ev == "< changed", ev)
+    b.send("scan")
+    listing2 = b.collect("< end")
+    f2 = next((x.split() for x in listing2 if x.startswith("< iface extdisplay1 ")), None)
+    check("hotplug: returning interface visible with carrier up",
+          f2 is not None and f2[4] == "up" and f2[6] == mac, str(listing2))
+    check("hotplug: no stale lease record blocks replug", not os.path.exists(record))
+    # Re-pair on the same broker without restarting it.
+    def wait_lease_or_error(br, timeout=10):
+        deadline = time.time() + timeout
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                return "timeout"
+            line = br.expect("< ", timeout=left)
+            if line.startswith("< preparing "):
+                continue
+            return line
+
+    if f2 is not None:
+        b.send("pair " + f2[2] + " " + f2[5] + " " + f2[6])
+        reply2 = wait_lease_or_error(b, timeout=10)
+        if reply2.startswith("< lease "):
+            lease2 = reply2.split()
+            code2 = b.expect("< code ", timeout=10)[7:]
+            pair_ok = len(lease2) == 5 and lease2[2] == "extdisplay1" and lease2[3].startswith("fe80:")
+        else:
+            lease2, code2, pair_ok = [reply2], "", False
+        check("hotplug: second lease succeeds without broker restart", pair_ok, str(lease2))
+        if pair_ok:
+            c2 = client(None, lease2[3], lease2[4], decode_code(code2).hex())
+            check("hotplug: second pair succeeds after replug", b.expect("< paired", timeout=15) == "< paired +fd")
+            b.expect("plain< ")
+            b.plain("to-mac")
+            out2, _ = c2.communicate(timeout=20)
+            check("hotplug: plaintext flows after replug", "CLIENT received" in out2 and "to-mac" in out2, out2)
+            check("hotplug: second session closes cleanly", b.expect("< ended ", timeout=15) == "< ended error")
+    # Also verify kill-recovery when the device returns at a different sysfs path.
+    if home_has("extdisplay1"):
+        sh("ip", "link", "set", "extdisplay1", "up")
+        sh("ip", "link", "set", "extdisplaypeer", "up")
+    b.send("scan")
+    listing3 = b.collect("< end")
+    f3 = next((x.split() for x in listing3 if x.startswith("< iface extdisplay1 ")), None)
+    if f3 is not None and not os.path.exists(record):
+        b.send("pair " + f3[2] + " " + f3[5] + " " + f3[6])
+        b.expect("< lease ")
+        b.expect("< code ")
+        records = [f for f in os.listdir(W + "/state") if f.startswith("lease-") and not f.endswith(".new")]
+        record = W + "/state/" + records[0] if records else ""
+        if record and os.path.exists(record):
+            with open(record, "r+") as rf:
+                body = rf.read().replace("device -", "device /sys/devices/pci0000:00/0000:00:0d.3/domain1/1-0/1-1")
+                rf.seek(0)
+                rf.write(body)
+                rf.truncate()
+        os.kill(b.pid, 9)
+        b.expect("signal ")
+        b.p.stdin.close()
+        time.sleep(0.5)
+        check("hotplug: record stays after unclean broker kill", bool(record) and os.path.exists(record))
+        b3 = Broker()
+        b3.send("watch")
+        b3.collect("< end")
+        check("hotplug: record stays while device is still absent", os.path.exists(record))
+        rc, text = sh("ip", "link", "add", "extdisplay0", "address", mac, "type", "veth", "peer", "name", "extdisplaypeer")
+        check("hotplug: device returns at a different sysfs path after kill", rc == 0, text)
+        sh("ip", "link", "set", "extdisplay0", "up")
+        sh("ip", "link", "set", "extdisplaypeer", "up")
+        try:
+            ev3 = b3.expect("< changed", timeout=5)
+        except TimeoutError:
+            ev3 = "timeout"
+        check("hotplug: broker announces returning device after kill", ev3 == "< changed", ev3)
+        # Note: returning link event settles stale record even before scan.
+        time.sleep(0.1)
+        check("hotplug: stale record settled on return before rescan", not os.path.exists(record))
+        b3.send("scan")
+        l4 = b3.collect("< end")
+        f4 = next((x.split() for x in l4 if x.startswith("< iface extdisplay0 ")), None)
+        if f4 is not None:
+            b3.send("pair " + f4[2] + " " + f4[5] + " " + f4[6])
+            reply4 = wait_lease_or_error(b3, timeout=10)
+            l_ok = reply4.startswith("< lease extdisplay0 ")
+            if l_ok:
+                b3.expect("< code ", timeout=10)
+            check("hotplug: pair succeeds after different-path kill recovery", l_ok, reply4)
+            if l_ok:
+                b3.send("cancel")
+                b3.expect("< ended ")
+        finish(b3)
+    else:
+        finish(b)
 
 
 if __name__ == "__main__":
@@ -704,7 +852,7 @@ SHEOF
         -DEXTDISPLAY_BROKER_TEST_STATE_DIR=\"$lw/state\" -DEXTDISPLAY_BROKER_TEST_ATTEMPT_SECONDS=8 \
         -DEXTDISPLAY_BROKER_TEST_PROBES -o "$lw/extdisplay-broker-test" $broker_src $(pkg-config --libs openssl)
     cp "$out/test-extdisplay-broker-ctl" "$lw/test-extdisplay-broker-ctl"
-    scenarios="lease pair refuse cancel_paired timeout carrier eof protocol watch kill rename"
+    scenarios="lease pair refuse cancel_paired timeout carrier eof protocol watch kill rename hotplug"
     unshare --user --map-auto --map-root-user --net --mount --propagation private \
         sh "$lw/inner.sh" "$lw" $scenarios >"$lw/driver.log" 2>&1 || :
     grep -E '^(== |PASS: |FAIL: |SUMMARY: )' "$lw/driver.log" || :

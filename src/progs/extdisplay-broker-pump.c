@@ -251,6 +251,21 @@ static void probes(void)
 }
 #endif
 
+/* Let any queued TLS alert or close_notify reach the peer before the process
+ * exits and SO_LINGER {1,0} turns close into a TCP RST that can overtake it. */
+static void drain_peer_close(int tcp)
+{
+    if (shutdown(tcp, SHUT_WR) != 0) return;
+    char discard[4096];
+    for (long long end = extdisplay_broker_now_ms() + 250;;) {
+        long long left = end - extdisplay_broker_now_ms();
+        struct pollfd p = { tcp, POLLIN, 0 };
+        if (left <= 0 || poll(&p, 1, (int)left) <= 0) break;
+        ssize_t n = read(tcp, discard, sizeof discard);
+        if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) break;
+    }
+}
+
 void pump_main(struct pump_args *a)
 {
     sigset_t none;
@@ -312,6 +327,7 @@ void pump_main(struct pump_args *a)
     int handshake = extdisplay_broker_tls_accept(ssl, tcp, deadline);
     OPENSSL_cleanse(&a->key, sizeof a->key);
     if (handshake < 0) {
+        drain_peer_close(tcp);
         status_send(extdisplay_broker_now_ms() >= a->deadline_ms ? "timeout" : "handshake-failed");
         _exit(0);
     }
@@ -321,16 +337,7 @@ void pump_main(struct pump_args *a)
     int pumped = extdisplay_broker_pump(ssl, tcp, PUMP_PLAIN, PUMP_STATUS, detail, sizeof detail);
     /* close_notify is queued: FIN after it, then up to 250 ms for the peer
      * to close too, so the reset of the abortive close cannot overtake it. */
-    if (shutdown(tcp, SHUT_WR) == 0) {
-        char discard[4096];
-        for (long long end = extdisplay_broker_now_ms() + 250;;) {
-            long long left = end - extdisplay_broker_now_ms();
-            struct pollfd p = { tcp, POLLIN, 0 };
-            if (left <= 0 || poll(&p, 1, (int)left) <= 0) break;
-            ssize_t n = read(tcp, discard, sizeof discard);
-            if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) break;
-        }
-    }
+    drain_peer_close(tcp);
     for (size_t i = 0; detail[i]; i++) {
         unsigned char c = (unsigned char)detail[i];
         if (c < 0x20 || c > 0x7e) detail[i] = ' ';

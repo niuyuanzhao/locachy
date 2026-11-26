@@ -11,10 +11,10 @@
 # With --target-root, DIR is an empty mounted ext4 root labelled locachy-root;
 # no disk is formatted, no root/ESP is selected, and no archive is made. Boot
 # files stay in DIR/usr/local/lib/locachy/boot for the installer to commit.
-# --install-id ID marks the target as that installation's (in its work
-# directory); with --resume, a target so marked is built on where a run of
-# that installation stopped: what is there stays (packages, builds), and
-# successful software stages are reused only for identical content inputs.
+# --install-id ID marks the target in TARGET_ROOT/.locachy-installer/install-id,
+# independent of the work directory. --resume requires the matching marker:
+# what is there stays (packages, builds), and successful software stages
+# are reused only for identical content inputs.
 # A root caller uses private mount/PID/cgroup namespaces; an unprivileged
 # caller maps their /etc/subuid range, as pacstrap -N does.
 #
@@ -77,6 +77,7 @@ cpu=${cpu:-$level}
 [[ $cpu =~ ^[a-z0-9][a-z0-9._+-]*$ ]] || die "--cpu: not a CPU name: $cpu"
 [ -z "$install_id" ] || [[ $install_id =~ ^[0-9a-f]{32}$ ]] || die "--install-id: not an installation ID"
 [ -z "$resume" ] || { [ -n "$target" ] && [ -n "$install_id" ]; } || die "--resume needs --target-root and --install-id"
+[ -z "$install_id" ] || [ -n "$target" ] || die "--install-id needs --target-root"
 # Package scripts execute target code too. Refuse unsupported hardware before
 # creating namespaces, touching output directories or downloading packages.
 if [ "$level" != x86-64 ] && ! /usr/lib/ld-linux-x86-64.so.2 --help | grep -q "$level (supported"; then
@@ -101,15 +102,27 @@ if [ -n "$target" ]; then
     [ "$(findmnt -rn --mountpoint "$target" -o FSTYPE)" = ext4 ] || die "target root must be ext4"
     [ "$(findmnt -rn --mountpoint "$target" -o LABEL)" = locachy-root ] || die "target root must be labelled locachy-root"
     [ "$(stat -c %d "$target")" != "$(stat -c %d /)" ] || die "target is the running root filesystem"
-    # The installation this target is (its mark), to be built on; else empty.
-    resumed=
-    if [ -n "$resume" ] && [ -f "$target/.locachy-installer/install-id" ]; then
-        [ "$(cat "$target/.locachy-installer/install-id")" = "$install_id" ] ||
-            die "the target is another installation's; it is not built on"
-        resumed=1
+    if [ -n "${MAKE_ROOT_NS:-}" ]; then
+        # Lock the target inode, not a file in the changeable work directory.
+        # Take it in the final namespace before checking mutable target state.
+        exec {target_lock}<"$target" || die "cannot open target for locking: $target"
+        flock -n "$target_lock" || die "cannot lock target (another build may be running): $target"
+        # Do not pass the directory descriptor into the chroot or GPG agents.
+        chroot() { command chroot "$@" {target_lock}<&-; }
+        pacman() { command pacman "$@" {target_lock}<&-; }
+        pacman-key() { command pacman-key "$@" {target_lock}<&-; }
+        gpgconf() { command gpgconf "$@" {target_lock}<&-; }
+    fi
+    marker_dir=$target/.locachy-installer
+    canonical_directory "$marker_dir"
+    marker=$marker_dir/install-id
+    if [ -n "$resume" ]; then
+        [ ! -L "$marker" ] && [ -f "$marker" ] || die "resume needs a regular target installation marker: $marker"
+        cmp -s -- "$marker" <(printf '%s\n' "$install_id") ||
+            die "the target is another installation's or its marker is damaged; it is not built on"
     fi
     for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
-        [ -z "$resumed" ] || break
+        [ -z "$resume" ] || break
         [ -e "$entry" ] || [ -L "$entry" ] || continue
         case ${entry##*/} in
         lost+found) [ -d "$entry" ] && [ ! -L "$entry" ] || die "invalid lost+found in target"
@@ -149,7 +162,7 @@ if [ -n "$target" ]; then
     esac
     # Never reset an existing work directory. The empty-root check happens
     # before either reserved directory is created, including namespace reexec.
-    [ -n "$resumed" ] || [ ! -e "$work" ] || [ -z "$(find "$work" -mindepth 1 -maxdepth 1 -print -quit)" ] ||
+    [ -n "$resume" ] || [ ! -e "$work" ] || [ -z "$(find "$work" -mindepth 1 -maxdepth 1 -print -quit)" ] ||
         die "target work directory must be empty"
 else
     case "$cache/" in "$root/"*) die "cache directory must be outside target root" ;; esac
@@ -193,6 +206,28 @@ if [ -z "${MAKE_ROOT_NS:-}" ]; then
     exec unshare --fork --pid --kill-child --mount --cgroup --map-auto --map-root-user \
         --setuid 0 --setgid 0 env MAKE_ROOT_NS=1 "$0" "${arguments[@]}"
 fi
+if [ -n "$target" ]; then
+    # Pacman and older installers do not take our target lock. The database
+    # lock may belong to a live transaction in another PID namespace.
+    for lock in "$root/var/lib/pacman/db.lck" "$work/raw-db/db.lck"; do
+        [ ! -e "$lock" ] && [ ! -L "$lock" ] || die "pacman database is locked: $lock (left untouched)"
+    done
+    if [ -n "$install_id" ]; then
+        if [ -n "$resume" ]; then
+            # Older callers could pass a marker they had not synced yet.
+            sync -- "$marker" || die "could not sync the target installation marker: $marker"
+        else
+            # Flush a complete file before publishing it without replacement.
+            (
+                mkdir -m 700 -- "$marker_dir" || exit 1
+                tmp=$(mktemp -- "$marker_dir/.install-id.XXXXXX") || exit 1
+                trap 'rm -f -- "$tmp"' EXIT
+                printf '%s\n' "$install_id" >"$tmp" && sync -- "$tmp" && ln -T -- "$tmp" "$marker"
+            ) || die "could not publish the target installation marker: $marker"
+        fi
+        sync -- "$marker_dir" "$root" || die "could not sync the target installation marker directories: $marker_dir"
+    fi
+fi
 # Root this mount at the build scope, excluding all other cgroups. Package
 # builds see it read-only; only trusted contract tests receive freezer access.
 mount -t cgroup2 cgroup2 /sys/fs/cgroup
@@ -228,11 +263,9 @@ alhp_b2sum=1d12ae599d9da533aff66304f3111a19a80c1d132c933488549dd7fc7964a660d58e4
 
 grep -q '^Server' /etc/pacman.d/mirrorlist || die "/etc/pacman.d/mirrorlist has no Arch mirror"
 
-if [ -n "$resumed" ]; then
+if [ -n "$resume" ]; then
     echo "== $level: build on mounted target $root, where the installation stopped (work: $work)"
-    rm -f "$root/var/lib/pacman/db.lck" # its run's processes have all ended (a PID namespace of their own)
-    # The databases are fetched again (-Syy), each with its signature, and
-    # resolved by the stack again: the system's own pacman replaced them since.
+    # Refresh the signed databases (-Syy): the system's own pacman may have replaced them.
 elif [ -n "$target" ]; then
     echo "== $level: build mounted target $root (work: $work)"
 else
@@ -243,7 +276,6 @@ else
 fi
 mkdir -p "$root" "$cache" "$out/esp" "$work/mirrors"
 mkdir -p -m 700 "$gnupg"
-[ -z "$install_id" ] || printf '%s\n' "$install_id" >"$work/install-id"
 
 # This build's mirror lists: this machine's (the installer ranks the live
 # system's first), else the projects' own: CachyOS's is its mirrorlist
@@ -375,7 +407,7 @@ echo "== repositories: the stack's databases (log: $work/stack.log)"
 stack=$here/link/locachy_stack.py
 mkdir -p "$work/raw-db"
 pacman --root "$root" --dbpath "$work/raw-db" --gpgdir "$gnupg" --config "$work/pacman.conf" \
-    "-Sy${resumed:+y}" >"$work/stack.log" 2>&1 ||
+    "-Sy${resume:+y}" >"$work/stack.log" 2>&1 ||
     { tail -20 "$work/stack.log"; die "the repositories' databases were not fetched; the log is $work/stack.log"; }
 python3 -I "$stack" merge --config "$work/pacman.conf" --from "$work/raw-db/sync" \
     --to "$root/var/lib/pacman/sync" >>"$work/stack.log" 2>&1 ||

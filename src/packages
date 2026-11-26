@@ -52,6 +52,10 @@ pacman-contrib
 reflector
 rate-mirrors
 
+# Remote shells: the ssh client. make.sh's foot mapping for it lives in
+# /etc/ssh/ssh_config.d/50-locachy-foot-term.conf (tools/FOOT-SSH.md)
+openssh
+
 # Core network & Wi-Fi (NetworkManager + nmtui inside isolated locachy-net)
 networkmanager
 openresolv

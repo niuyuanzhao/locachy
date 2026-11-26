@@ -1,19 +1,8 @@
 #!/bin/bash
-# The live entry: locachy-install of the newest LOCachy source and app
-# presets, as the packages come from their mirrors. The source is fetched
-# (git, shallow) from the update repository and branch given (--update-repo,
-# --update-branch), else those the medium's own source came from (--resume,
-# --trust-key: those of the installation they continue). A call that may
-# install fetches it again; --describe-json, --check, --trust-key and --help
-# use what was fetched, or fetch it the first time. When it cannot be
-# fetched, what was fetched before from there runs, else the medium's own
-# source (also with updates off). LOCACHY_SOURCE tells locachy-install which,
-# and why: fetched, fetched earlier (not fetched again), fetched before: WHY,
-# bundled: WHY. The app presets (--apps-repo, --apps-branch, else the
-# medium's apps_repo, apps_branch) are fetched the same way, made a catalog by
-# that source's own helper (link/locachy_apps.py: validated, never run), else
-# the medium's catalog is used; LOCACHY_APPS_CATALOG is the catalog and
-# LOCACHY_APPS says which, as LOCACHY_SOURCE does.
+# Select the live installer's source and app presets. Standalone installs
+# fetch again; checks can reuse the cache. A live UI instead receives one
+# selection for both trees. Its backend calls reopen that selection; only a
+# new UI or an explicit live refresh may replace it.
 set -uo pipefail
 bundled=${LOCACHY_SOURCE_BUNDLED:-/usr/local/src/locachy}
 fetched=${LOCACHY_SOURCE_FETCHED:-/run/locachy-source}
@@ -23,7 +12,7 @@ origin=${LOCACHY_SOURCE_ORIGIN:-/etc/locachy/source-origin.json}
 record=${LOCACHY_RESUME_RECORD:-/run/locachy-install/resume.json}
 export GIT_ALLOW_PROTOCOL=${GIT_ALLOW_PROTOCOL:-https:ssh} GIT_TERMINAL_PROMPT=0
 
-repo= branch= apps_repo= apps_branch= again=1 prev= continued=0 live_mode=
+repo='' branch='' apps_repo='' apps_branch='' again=1 prev='' continued=0 live_mode=''
 forward=()
 for a in "$@"; do
     case $a in
@@ -31,8 +20,6 @@ for a in "$@"; do
     --ui) live_mode=ui ;;
     *) forward+=("$a") ;;
     esac
-done
-for a in "$@"; do
     case $prev in
     --update-repo) repo=$a ;;
     --update-branch) branch=$a ;;
@@ -50,8 +37,44 @@ for a in "$@"; do
     esac
     prev=$a
 done
+
+# A stopped run can be inspected even when its live selection is unavailable.
+# Do not let the exception dispatch any operation that can change the target.
+if [ "$#" = 1 ] && { [ "$1" = --resume-info ] || [ "$1" = --resume-status ]; }; then
+    exec python3 -I "$bundled/link/locachy-install" "$1"
+fi
+
+state=$(realpath -m -- "$fetched.snapshots") || exit 1
+if [ -z "$live_mode" ] && [ "${LOCACHY_INSTALL_SNAPSHOT+x}" ]; then
+    # Verify the record itself and open only absolute version paths, never
+    # latest aliases. The four options, when specified, must agree with it.
+    exec python3 -I -c '
+import hashlib, json, os, re, sys
+from pathlib import Path
+try:
+    state, token = Path(sys.argv[1]), os.environ["LOCACHY_INSTALL_SNAPSHOT"]
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        raise ValueError("invalid selection token")
+    data = (state / (token + ".json")).read_bytes()
+    if hashlib.sha256(data).hexdigest() != token:
+        raise ValueError("selection record does not match the token")
+    options, source, catalog, source_how, apps_how = json.loads(data)
+    if any(value and value != expected for value, expected in zip(sys.argv[2:6], options, strict=True)):
+        raise ValueError("repository or branch differs from the selected source or app presets; refresh first")
+    source, catalog = Path(source), Path(catalog)
+    for path, required in ((source, "link/locachy-install"), (catalog, "CATALOG")):
+        if not path.is_relative_to(state) or path.resolve(strict=True) != path or not (path / required).is_file():
+            raise ValueError("selected source or app presets are missing")
+except (OSError, TypeError, ValueError) as error:
+    sys.exit("Installer: cannot reopen the live selection: " + str(error))
+os.environ.update(LOCACHY_SOURCE=source_how, LOCACHY_APPS=apps_how, LOCACHY_APPS_CATALOG=str(catalog))
+os.execv(sys.executable, [sys.executable, "-I", str(source / "link/locachy-install"), *sys.argv[6:]])
+' "$state" "$repo" "$branch" "$apps_repo" "$apps_branch" "${forward[@]}"
+fi
+
+[ -z "$live_mode" ] || again=1
 [ "$continued" = 1 ] || record=
-read -r o_repo o_branch o_apps_repo o_apps_branch < <(python3 -I -c 'import json, sys
+read -r o_repo o_branch o_apps_repo o_apps_branch medium_repo medium_branch medium_commit medium_changed < <(python3 -I -c 'import json, sys
 def read(path):
     try:
         o = json.load(open(path, encoding="utf-8"))
@@ -61,40 +84,98 @@ def read(path):
 r = read(sys.argv[2]) if sys.argv[2] else {}
 o = read(sys.argv[1])
 print(r.get("update_repo") or o.get("repo") or "-", r.get("update_branch") or o.get("branch") or "main",
-      r.get("apps_repo") or o.get("apps_repo") or "-", r.get("apps_branch") or o.get("apps_branch") or "main")' \
+      r.get("apps_repo") or o.get("apps_repo") or "-", r.get("apps_branch") or o.get("apps_branch") or "main",
+      o.get("repo") or "-", o.get("branch") or "main", o.get("commit") or "-", int(o.get("source_changed") is True))' \
     "$origin" "$record")
 [ -n "$repo" ] || repo=$o_repo
 [ -n "$branch" ] || branch=$o_branch
 [ -n "$apps_repo" ] || apps_repo=$o_apps_repo
 [ -n "$apps_branch" ] || apps_branch=$o_apps_branch
 
-# A live interface and its checks/install use one fetched snapshot. Refresh
-# explicitly ignores that pin, so every press of c checks the repository again.
-if [ -z "$live_mode" ] && [ "${LOCACHY_INSTALL_SNAPSHOT_ROOT:-}" = "$fetched" ] &&
-   [ "$(cat "$fetched.from" 2>/dev/null)" = "$repo $branch" ] &&
-   [ -n "${LOCACHY_INSTALL_SNAPSHOT_COMMIT:-}" ] &&
-   [ "$(git -C "$fetched" rev-parse HEAD 2>/dev/null)" = "$LOCACHY_INSTALL_SNAPSHOT_COMMIT" ]; then
-    pinned=1
-    again=0
+# tty1 startup and the serial console share both caches. Hold the lock through
+# selection/publication only, not through a live build or backend command.
+if ! mkdir -p -- "$(dirname "$apps_fetched")" || ! install -d -m 700 -- "$state" ||
+   ! { exec {fetch_lock}>"$state/lock"; } || ! flock -w 600 "$fetch_lock"; then
+    echo "Installer: could not lock the live source cache" >&2
+    exit 1
 fi
-why= now=0
+
+fetched_commit() {
+    git -C "$1" rev-parse HEAD 2>/dev/null
+}
+
+# The origin tag is in the same version as its contents, so switching latest
+# is one rename. Never remove a previously published version in this boot.
+cached_version() {
+    local alias=$1 kind=$2 key=$3 content=$4 version
+    version=$(readlink -- "$alias") || return 1
+    [[ $version == "$state/$kind."*"/$content" ]] || return 1
+    version=${version%/*}
+    [ "$(cat "$version/from" 2>/dev/null)" = "$key" ] || return 1
+    printf '%s\n' "$version"
+}
+
+publish_version() {
+    local alias=$1 version=$2 key=$3 content=$4 linkdir
+    printf '%s\n' "$key" >"$version/from" || return 1
+    linkdir=$(mktemp -d "${alias}.new.XXXXXX") || return 1
+    if ln -s -- "$version/$content" "$linkdir/latest" && mv -Tf -- "$linkdir/latest" "$alias"; then
+        rmdir -- "$linkdir"
+        return 0
+    fi
+    rm -rf -- "$linkdir"
+    return 1
+}
+
+cached_source=$(cached_version "$fetched" source "$repo $branch" checkout) || cached_source=
+if [ -n "$cached_source" ] && [ ! -f "$cached_source/checkout/src/link/locachy-install" ]; then cached_source=; fi
+legacy_bundle=0
+# Older live frontends carried only the fetched checkout and commit. Keep that
+# source-only pin for compatibility when no opaque selection token is present;
+# new frontends always use the exact source+catalog token path above.
+if [ -z "$live_mode" ] && [ -z "${LOCACHY_INSTALL_SNAPSHOT+x}" ] &&
+   [ -n "${LOCACHY_INSTALL_SNAPSHOT_COMMIT:-}" ]; then
+    if [ -n "$cached_source" ] &&
+       { [ "${LOCACHY_INSTALL_SNAPSHOT_ROOT:-}" = "$cached_source/checkout" ] ||
+         [ "${LOCACHY_INSTALL_SNAPSHOT_ROOT:-}" = "$fetched" ]; } &&
+       [ "$(fetched_commit "$cached_source/checkout")" = "$LOCACHY_INSTALL_SNAPSHOT_COMMIT" ]; then
+        again=0
+    elif [ "${LOCACHY_INSTALL_SNAPSHOT_ROOT:-}" = "$bundled" ] &&
+         [ "$medium_changed" = 1 ] && [ "$medium_repo $medium_branch" = "$repo $branch" ] &&
+         [ "$medium_commit" = "${LOCACHY_INSTALL_SNAPSHOT_COMMIT}" ]; then
+        again=0
+        legacy_bundle=1
+    fi
+fi
+why='' now=0
 if [ "$repo" = off ]; then
     why="updates are off"
 elif ! [[ $repo =~ ^(https://|ssh://|git@)[^[:space:]]+$ ]] || ! [[ $branch =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
     why="no repository to fetch from ($repo, $branch)"
-elif [ "$again" = 1 ] || [ "$(cat "$fetched.from" 2>/dev/null)" != "$repo $branch" ] ||
-     [ ! -f "$fetched/src/link/locachy-install" ]; then
+elif [ "$again" = 1 ] || [ -z "$cached_source" ]; then
     echo "Fetching the newest LOCachy source: $repo ($branch)" >&2
-    rm -rf "$fetched.new"
-    err=$(timeout 300 git clone -q --depth=1 --single-branch --branch="$branch" -- "$repo" "$fetched.new" 2>&1)
-    rc=$?
-    if [ "$rc" = 0 ] && [ -f "$fetched.new/src/link/locachy-install" ]; then
-        rm -rf "$fetched"
-        mv "$fetched.new" "$fetched"
-        printf '%s\n' "$repo $branch" >"$fetched.from"
-        now=1
+    if new=$(mktemp -d "$state/source.XXXXXX" 2>&1); then
+        err=$(timeout 300 git clone -q --depth=1 --single-branch --branch="$branch" -- "$repo" "$new/checkout" 2>&1)
+        rc=$?
     else
-        rm -rf "$fetched.new"
+        err=$new
+        new=
+        rc=1
+    fi
+    if [ "$rc" = 0 ] && [ -f "$new/checkout/src/link/locachy-install" ]; then
+        if [ -n "$cached_source" ] &&
+           [ "$(fetched_commit "$cached_source/checkout")" = "$(fetched_commit "$new/checkout")" ]; then
+            rm -rf -- "$new"
+            now=1
+        elif publish_version "$fetched" "$new" "$repo $branch" checkout; then
+            cached_source=$new
+            now=1
+        else
+            rm -rf -- "$new"
+            why="could not publish the fetched LOCachy source"
+        fi
+    else
+        [ -z "$new" ] || rm -rf -- "$new"
         if [ "$rc" = 124 ]; then
             err="no answer in 300 s"
         elif [ "$rc" = 0 ]; then
@@ -107,88 +188,164 @@ fi
 
 if [ -z "$why" ]; then
     if [ "$now" = 1 ]; then LOCACHY_SOURCE=fetched; else LOCACHY_SOURCE="fetched earlier"; fi
-    entry=$fetched/src
-elif [ "$(cat "$fetched.from" 2>/dev/null)" = "$repo $branch" ] && [ -f "$fetched/src/link/locachy-install" ]; then
+    entry=$cached_source/checkout/src
+elif [ -n "$cached_source" ] && [ "$repo" != off ]; then
     LOCACHY_SOURCE="fetched before: $why"
-    entry=$fetched/src
+    entry=$cached_source/checkout/src
 else
     LOCACHY_SOURCE="bundled: $why"
     entry=$bundled
 fi
-# A development medium may contain explicitly recorded local fixes over the
-# fetched commit. Keep those bytes for that exact revision, visibly; a newer
-# remote commit still wins. Never turn repository updates off implicitly.
-if [ -z "$why" ] && python3 -I - "$origin" "$fetched" "$repo" "$branch" <<'PY'
-import json, subprocess, sys
-try:
-    with open(sys.argv[1], encoding='utf-8') as stream:
-        medium = json.load(stream)
-    commit = subprocess.check_output(['git', '-C', sys.argv[2], 'rev-parse', 'HEAD'], text=True).strip()
-    same = (medium.get('source_changed') is True and medium.get('repo') == sys.argv[3]
-            and medium.get('branch') == sys.argv[4] and medium.get('commit') == commit)
-except (OSError, ValueError, subprocess.SubprocessError):
-    same = False
-raise SystemExit(0 if same else 1)
-PY
-then
+# A medium may carry local fixes over the fetched commit. Keep those bytes
+# for that revision, visibly; a newer remote commit still wins.
+if [ -z "$why" ] && [ "$medium_changed" = 1 ] &&
+   [ "$medium_repo $medium_branch" = "$repo $branch" ] &&
+   [ "$medium_commit" = "$(fetched_commit "$cached_source/checkout")" ]; then
     LOCACHY_SOURCE="bundled: local changes over the fetched commit"
     entry=$bundled
     echo "Source: keeping this medium's recorded local changes over the same fetched commit" >&2
 fi
+if [ "$legacy_bundle" = 1 ]; then
+    LOCACHY_SOURCE="bundled: local changes over the fetched commit"
+    entry=$bundled
+fi
 export LOCACHY_SOURCE
 
-why= now=0
+if [ "$live_mode" = refresh ] && [ -n "$why" ] && [ "$repo" != off ]; then
+    echo "Installer refresh failed: the source could not be refreshed: $LOCACHY_SOURCE" >&2
+    exit 1
+fi
+
+# Catalogs are specific to the validator that built them, as well as their
+# own repository/branch. A new source can require new catalog validation.
 helper=$entry/link/locachy_apps.py
+helper_key=
+if [ -f "$helper" ]; then helper_key=$(sha256sum <"$helper") || helper_key=; fi
+apps_key="$apps_repo $apps_branch $helper_key"
+cached_apps_version=$(cached_version "$apps_fetched" apps "$apps_key" catalog) || cached_apps_version=
+if [ -n "$cached_apps_version" ] && [ ! -f "$cached_apps_version/catalog/CATALOG" ]; then cached_apps_version=; fi
+why='' now=0
 if [ "$apps_repo" = off ]; then
     why="updates are off"
 elif ! [[ $apps_repo =~ ^(https://|ssh://|git@)[^[:space:]]+$ ]] ||
      ! [[ $apps_branch =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
     why="no repository to fetch from ($apps_repo, $apps_branch)"
-elif [ ! -f "$helper" ]; then
+elif [ -z "$helper_key" ]; then
     why="this source has no app presets helper"
-elif [ "$again" = 1 ] || [ "$(cat "$apps_fetched.from" 2>/dev/null)" != "$apps_repo $apps_branch" ] ||
-     [ ! -f "$apps_fetched/CATALOG" ]; then
+elif [ "$again" = 1 ] || [ -z "$cached_apps_version" ]; then
     echo "Fetching the newest app presets: $apps_repo ($apps_branch)" >&2
-    rm -rf "$apps_fetched.git" "$apps_fetched.new"
-    err=$(timeout 300 git clone -q --depth=1 --single-branch --branch="$apps_branch" -- "$apps_repo" \
-          "$apps_fetched.git" 2>&1)
-    rc=$?
-    if [ "$rc" = 0 ]; then
-        commit=$(git -C "$apps_fetched.git" rev-parse HEAD)
-        if err=$(python3 -I "$helper" catalog "$apps_fetched.git" "$apps_fetched.new" repository \
-                 "$apps_repo" "$apps_branch" "$commit" 2>&1); then
-            rm -rf "$apps_fetched"
-            mv "$apps_fetched.new" "$apps_fetched"
-            printf '%s\n' "$apps_repo $apps_branch" >"$apps_fetched.from"
-            now=1
+    if app_work=$(mktemp -d "$state/apps.XXXXXX" 2>&1); then
+        err=$(timeout 300 git clone -q --depth=1 --single-branch --branch="$apps_branch" -- "$apps_repo" \
+              "$app_work/repo" 2>&1)
+        rc=$?
+        if [ "$rc" = 0 ]; then
+            commit=$(fetched_commit "$app_work/repo")
+            if [ -n "$cached_apps_version" ] && [ "$(cat "$cached_apps_version/commit" 2>/dev/null)" = "$commit" ]; then
+                rm -rf -- "$app_work"
+                app_work=
+                now=1
+            elif err=$(python3 -I "$helper" catalog "$app_work/repo" "$app_work/catalog" repository \
+                     "$apps_repo" "$apps_branch" "$commit" 2>&1); then
+                if [ -f "$app_work/catalog/CATALOG" ] && printf '%s\n' "$commit" >"$app_work/commit" &&
+                   rm -rf -- "$app_work/repo" && publish_version "$apps_fetched" "$app_work" "$apps_key" catalog; then
+                    now=1
+                    cached_apps_version=$app_work
+                else
+                    why="could not publish the fetched app presets"
+                fi
+            else
+                why="$apps_repo ($apps_branch): ${err##*$'\n'}"
+            fi
         else
-            why="$apps_repo ($apps_branch): ${err##*$'\n'}"
+            [ "$rc" != 124 ] || err="no answer in 300 s"
+            err=${err:-git failed ($rc)}
+            why="could not fetch $apps_repo ($apps_branch): ${err##*$'\n'}"
         fi
+        [ "$app_work" = "$cached_apps_version" ] || rm -rf -- "$app_work"
     else
-        [ "$rc" != 124 ] || err="no answer in 300 s"
-        err=${err:-git failed ($rc)}
-        why="could not fetch $apps_repo ($apps_branch): ${err##*$'\n'}"
+        why="could not stage the fetched app presets: ${app_work##*$'\n'}"
     fi
-    rm -rf "$apps_fetched.git" "$apps_fetched.new"
 fi
 
 if [ -z "$why" ]; then
     if [ "$now" = 1 ]; then LOCACHY_APPS=fetched; else LOCACHY_APPS="fetched earlier"; fi
-    LOCACHY_APPS_CATALOG=$apps_fetched
-elif [ "$(cat "$apps_fetched.from" 2>/dev/null)" = "$apps_repo $apps_branch" ] && [ -f "$apps_fetched/CATALOG" ]; then
+    LOCACHY_APPS_CATALOG=$cached_apps_version/catalog
+elif [ -n "$cached_apps_version" ] && [ "$apps_repo" != off ]; then
     LOCACHY_APPS="fetched before: $why"
-    LOCACHY_APPS_CATALOG=$apps_fetched
+    LOCACHY_APPS_CATALOG=$cached_apps_version/catalog
 else
     LOCACHY_APPS="bundled: $why"
     LOCACHY_APPS_CATALOG=$apps_bundled
 fi
 export LOCACHY_APPS LOCACHY_APPS_CATALOG
-if [ -n "$live_mode" ]; then
-    if [ ! -f "$entry/installer/live-update.py" ]; then
-        echo "Installer refresh failed: the selected source has no live updater" >&2
-        exit 1
-    fi
-    exec python3 -I "$entry/installer/live-update.py" --source "$entry" --mode "$live_mode" \
-        --update-repo "$repo" --update-branch "$branch" --apps-repo "$apps_repo" --apps-branch "$apps_branch"
+if [ -z "$live_mode" ]; then
+    exec {fetch_lock}>&-
+    exec python3 -I "$entry/link/locachy-install" "${forward[@]}"
 fi
-exec python3 -I "$entry/link/locachy-install" "${forward[@]}"
+if [ "$live_mode" = refresh ] && [ -n "$why" ] && [ "$apps_repo" != off ]; then
+    echo "Installer refresh failed: the app presets could not be refreshed: $LOCACHY_APPS" >&2
+    exit 1
+fi
+if [ ! -f "$entry/installer/live-update.py" ]; then
+    echo "Installer refresh failed: the selected source has no live updater" >&2
+    exit 1
+fi
+
+# Pin a boot-local copy of the medium if selected, including any local fixes
+# recorded by the ISO build. Normal cache versions are already private.
+bundle_version() {
+    local source=$1 kind=$2 version
+    version=$(printf '%s\0' "$source" | sha256sum) || return 1
+    version=$state/bundled-$kind.${version%% *}
+    if [ ! -d "$version" ]; then
+        local staged
+        staged=$(mktemp -d "$state/bundle.XXXXXX") || return 1
+        if ! cp -a -- "$source/." "$staged" || ! mv -T -- "$staged" "$version"; then
+            rm -rf -- "$staged"
+            return 1
+        fi
+    fi
+    printf '%s\n' "$version"
+}
+if [ "$entry" = "$bundled" ]; then
+    entry=$(bundle_version "$bundled" source) || exit 1
+fi
+if [ "$LOCACHY_APPS_CATALOG" = "$apps_bundled" ]; then
+    LOCACHY_APPS_CATALOG=$(bundle_version "$apps_bundled" apps) || exit 1
+fi
+LOCACHY_INSTALL_SNAPSHOT=$(python3 -I - "$state" "$entry" "$repo" "$branch" "$apps_repo" "$apps_branch" <<'PY'
+import hashlib, json, os, sys, tempfile
+from pathlib import Path
+state, source = map(Path, sys.argv[1:3])
+catalog = Path(os.environ['LOCACHY_APPS_CATALOG'])
+if not (source / 'link/locachy-install').is_file() or not (catalog / 'CATALOG').is_file():
+    sys.exit('Installer: the selected source or app presets are incomplete')
+data = json.dumps([sys.argv[3:], str(source), str(catalog), os.environ['LOCACHY_SOURCE'],
+                   os.environ['LOCACHY_APPS']], ensure_ascii=True).encode()
+token = hashlib.sha256(data).hexdigest()
+with tempfile.NamedTemporaryFile(dir=state, delete=False) as output:
+    output.write(data)
+os.replace(output.name, state / (token + '.json'))
+print(token)
+PY
+) || exit 1
+export LOCACHY_INSTALL_SNAPSHOT
+exec {fetch_lock}>&-
+updater=(python3 -I "$entry/installer/live-update.py" --source "$entry" --mode "$live_mode"
+         "--update-repo=$repo" "--update-branch=$branch" "--apps-repo=$apps_repo" "--apps-branch=$apps_branch")
+if [ "$live_mode" = ui ]; then
+    exec "${updater[@]}"
+fi
+
+# Old updaters do not return a selection token, and their frontends cannot
+# carry a new one through refresh. Do not report such a refresh as usable.
+result=$("${updater[@]}") || exit $?
+printf '%s\n' "$result" | python3 -I -c '
+import json, os, sys
+try:
+    result = json.load(sys.stdin)
+    if not isinstance(result, dict) or result.get("snapshot") != os.environ["LOCACHY_INSTALL_SNAPSHOT"]:
+        raise ValueError("the selected updater did not return the live selection")
+except ValueError as error:
+    sys.exit("Installer refresh failed: " + str(error))
+print(json.dumps(result))'

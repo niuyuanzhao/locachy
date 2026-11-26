@@ -36,10 +36,13 @@ ARCHISO_PATCH_CONTEXT = '''
 
 
 class InstallerProfile(unittest.TestCase):
+    APPS_URL = "https://example.invalid/locachy-apps.git"
+    APPS_EXPORT_BASE = "c" * 40
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="installer-profile-", dir=SCRATCH)
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.src = self.root / "source"
         self.src.mkdir()
         shutil.copyfile(SOURCE / "make-installer.sh", self.src / "make-installer.sh")
@@ -53,7 +56,7 @@ class InstallerProfile(unittest.TestCase):
         (self.src / "link/locachy-install").write_text("#!/usr/bin/env python3\nprint('fixture installer')\n")
         (self.src / "link/gestures").write_text("#!/usr/bin/env python3\nprint('fixture')\n")
         shutil.copyfile(SOURCE / "link/locachy_apps.py", self.src / "link/locachy_apps.py")
-        # A checkout of the app presets' repository (LOCACHY_APPS_SRC).
+        # An export of the app presets by default; checkout cases add real Git metadata.
         self.apps = self.root / "locachy-apps"
         (self.apps / "apps").mkdir(parents=True)
         (self.apps / "FORMAT").write_text("1\n")
@@ -100,18 +103,35 @@ class InstallerProfile(unittest.TestCase):
         tool.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$TEST_CALLS\"\nexit \"${TEST_RESULT:-0}\"\n" +
                         ARCHISO_PATCH_CONTEXT)
         tool.chmod(0o755)
-        # installer/make-live.sh's double: the programs it compiles, and how it was called.
+        # The builder compiles from its copied payload, including this double.
         self.live = self.root / "live-calls"
-        live = self.root / "make-live"
-        live.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >"$TEST_LIVE"\nmkdir -p "$2/usr/local/bin"\n'
+        live = self.src / "installer/make-live.sh"
+        live.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" >"$TEST_LIVE"\nmkdir -p "$2/usr/local/bin"\n'
                         'printf elf >"$2/usr/local/bin/installer"\nprintf elf >"$2/usr/local/bin/term"\n'
                         'printf elf >"$2/usr/local/bin/rescue"\n')
-        self.env = dict(os.environ, ARCHISO_BASELINE=str(self.baseline), PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
-                        TEST_CALLS=str(self.calls), LIVE_BUILD=str(live), TEST_LIVE=str(self.live),
-                        LOCACHY_APPS_SRC=str(self.apps), LOCACHY_APPS_REPO="https://example.org/locachy-apps.git",
-                        LOCACHY_APPS_BRANCH="main", LOCACHY_APPS_COMMIT="c" * 40)
-        self.work = self.root / "work"
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("GIT_", "LOCACHY_")) and key not in ("PACMAN_CACHE", "MKARCHISO")}
+        self.env.update(ARCHISO_BASELINE=str(self.baseline), PATH=str(self.bin) + os.pathsep + self.env["PATH"],
+                        TEST_CALLS=str(self.calls), TEST_LIVE=str(self.live),
+                        LOCACHY_APPS_SRC=str(self.apps), LOCACHY_APPS_REPO=self.APPS_URL,
+                        LOCACHY_APPS_BRANCH="main", LOCACHY_APPS_COMMIT=self.APPS_EXPORT_BASE,
+                        GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        self.work = self.root / "work with spaces"
         self.out = self.root / "out"
+
+    def git_apps(self, *args):
+        return subprocess.run(["git", "-C", str(self.apps), *args], env=self.env,
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def checkout_apps(self):
+        for key in ("LOCACHY_APPS_REPO", "LOCACHY_APPS_BRANCH", "LOCACHY_APPS_COMMIT"):
+            self.env.pop(key)
+        self.git_apps("init", "-q", "-b", "catalog")
+        self.git_apps("remote", "add", "origin", self.APPS_URL)
+        self.git_apps("add", "FORMAT", "apps")
+        self.git_apps("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                      "commit", "-q", "-m", "Initial presets")
+        return self.git_apps("rev-parse", "HEAD")
 
     def run_builder(self, *args):
         return subprocess.run(["bash", str(self.src / "make-installer.sh"), *map(str, args)],
@@ -178,7 +198,7 @@ class InstallerProfile(unittest.TestCase):
     def test_full_screen_installer_on_tty1_only(self):
         profile = self.profile()
         root = profile / "airootfs"
-        self.assertEqual(self.live.read_text().split(), [str(self.src), str(root)])
+        self.assertEqual(self.live.read_text().splitlines(), [str(root / "usr/local/src/locachy"), ".", str(root)])
         definition = (profile / "profiledef.sh").read_text()
         for name in ("installer", "term", "rescue", "locachy-rescue"):
             self.assertTrue((root / "usr/local/bin" / name).is_file())
@@ -237,16 +257,53 @@ class InstallerProfile(unittest.TestCase):
         origin = json.loads((self.profile() / "airootfs/etc/locachy/source-origin.json").read_text())
         self.assertEqual(origin, {"repo": "https://github.com/me/locachy.git", "branch": "next", "commit": "b" * 40,
                                   "source_changed": False,
-                                  "apps_repo": "https://example.org/locachy-apps.git", "apps_branch": "main",
-                                  "apps_commit": "c" * 40})
+                                  "apps_repo": self.APPS_URL, "apps_branch": "main", "apps_commit": "",
+                                  "apps_base_commit": self.APPS_EXPORT_BASE, "apps_source_kind": "export"})
+
+    def assert_checkout_catalog(self, base, commit, kind):
+        root = self.profile() / "airootfs"
+        origin = json.loads((root / "etc/locachy/source-origin.json").read_text())
+        self.assertEqual({key: value for key, value in origin.items() if key.startswith("apps_")},
+                         dict(apps_repo=self.APPS_URL, apps_branch="catalog", apps_commit=commit,
+                              apps_base_commit=base, apps_source_kind=kind))
+        catalog = root / "usr/local/share/locachy/apps-catalog"
+        self.assertIn(f'commit="{commit}"\n', (catalog / "CATALOG").read_text())
+        self.assertEqual((catalog / "edge.conf").read_bytes(), (self.apps / "apps/edge.conf").read_bytes())
+
+    def test_clean_checkout_records_commit(self):
+        commit = self.checkout_apps()
+        self.assert_checkout_catalog(commit, commit, "checkout")
+
+    def test_dirty_checkout_records_only_base_commit(self):
+        commit = self.checkout_apps()
+        self.env["LOCACHY_APPS_COMMIT"] = commit
+        (self.apps / "README").write_text("A local change outside the catalog\n")
+        self.assert_checkout_catalog(commit, "", "dirty-checkout")
+
+    def test_git_status_cannot_hide_uncommitted_catalog_bytes(self):
+        commit = self.checkout_apps()
+        self.git_apps("update-index", "--assume-unchanged", "apps/edge.conf")
+        recipe = self.apps / "apps/edge.conf"
+        recipe.write_text(recipe.read_text().replace("-stable-bin", "-test-bin"))
+        self.assertEqual(self.git_apps("status", "--porcelain", "--untracked-files=all"), "")
+        self.assert_checkout_catalog(commit, "", "dirty-checkout")
+
+    def test_checkout_cannot_claim_a_different_base_commit(self):
+        self.checkout_apps()
+        self.env["LOCACHY_APPS_COMMIT"] = self.APPS_EXPORT_BASE
+        result = self.run_builder("--profile-only", self.work, self.out)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match the app presets checkout HEAD", result.stderr)
+        self.assertFalse(self.work.exists())
+        self.assertFalse(self.out.exists())
+
 
     def test_the_medium_has_a_validated_catalog_of_the_app_presets(self):
         catalog = self.profile() / "airootfs/usr/local/share/locachy/apps-catalog"
         self.assertEqual(sorted(p.name for p in catalog.iterdir()), ["CATALOG", "edge.conf"])
         self.assertEqual((catalog / "edge.conf").read_bytes(), (self.apps / "apps/edge.conf").read_bytes())
         meta = (catalog / "CATALOG").read_text()
-        for line in ('format="1"', 'origin="medium"', 'repo="https://example.org/locachy-apps.git"', 'branch="main"',
-                     f'commit="{"c" * 40}"'):
+        for line in ('format="1"', 'origin="medium"', f'repo="{self.APPS_URL}"', 'branch="main"', 'commit=""'):
             self.assertIn(line + "\n", meta)
 
     def test_the_medium_preserves_format_two_host_access_recipes(self):
@@ -306,7 +363,13 @@ class InstallerProfile(unittest.TestCase):
         record = json.loads((self.out / "build.json").read_text())
         self.assertEqual(record["cpu_baseline"], "x86-64")
         self.assertTrue(record["target_built_on_install"])
-        self.assertIn("make-root.sh", record["source_sha256"])
+        self.assertEqual(record["source_sha256"]["make-root.sh"],
+                         hashlib.sha256((self.src / "make-root.sh").read_bytes()).hexdigest())
+        root = self.work / "profile/airootfs"
+        self.assertEqual(record["source_origin"], json.loads((root / "etc/locachy/source-origin.json").read_text()))
+        catalog = root / "usr/local/share/locachy/apps-catalog"
+        self.assertEqual(record["apps_catalog_sha256"], {
+            name: hashlib.sha256((catalog / name).read_bytes()).hexdigest() for name in ("CATALOG", "edge.conf")})
         self.assertIn(record["sha256"], (self.out / "SHA256SUMS").read_text())
 
     def test_upstream_builder_drift_stops_without_running_it(self):
@@ -337,6 +400,13 @@ class InstallerProfile(unittest.TestCase):
         result = self.run_builder("--profile-only", self.work, self.work)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.work.exists())
+        alias = self.root / "source-alias"
+        alias.symlink_to(self.src, target_is_directory=True)
+        result = subprocess.run(["bash", str(alias / "make-installer.sh"), "--profile-only",
+                                 str(self.src / "work"), str(self.out)], env=self.env, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside the source tree", result.stderr)
+        self.assertFalse((self.src / "work").exists())
 
     def test_real_mode_invokes_standard_mkarchiso_and_propagates_failure(self):
         self.env["TEST_RESULT"] = "19"
@@ -371,16 +441,19 @@ class LiveEntry(unittest.TestCase):
         self.repo = self.root / "repo"
         self.git("init", "-q", "-b", "main", str(self.repo))
         self.commit("v1")
-        bundled = self.root / "bundled"
-        self.fake(bundled / "link/locachy-install", "bundled")
+        self.bundled = self.root / "bundled"
+        self.fake(self.bundled / "link/locachy-install", "bundled")
         self.origin = self.root / "source-origin.json"
         self.origin.write_text(json.dumps({"repo": self.URL, "branch": "main", "commit": "0" * 40}))
         self.fetched = self.root / "run/locachy-source"
         self.fetched.parent.mkdir()
         self.apps_fetched = self.root / "run/locachy-apps"
         self.apps_bundled = self.root / "apps-catalog"
+        self.apps_bundled.mkdir()
+        (self.apps_bundled / "CATALOG").write_text('format="1"\norigin="medium"\n')
+        self.state = self.fetched.with_suffix(".snapshots")
         self.seen = self.root / "apps-seen"
-        self.env = dict(self.git_env, LOCACHY_SOURCE_BUNDLED=str(bundled), LOCACHY_SOURCE_FETCHED=str(self.fetched),
+        self.env = dict(self.git_env, LOCACHY_SOURCE_BUNDLED=str(self.bundled), LOCACHY_SOURCE_FETCHED=str(self.fetched),
                         LOCACHY_SOURCE_ORIGIN=str(self.origin), GIT_ALLOW_PROTOCOL="file", GIT_CONFIG_COUNT="1",
                         GIT_CONFIG_KEY_0=f"url.file://{self.repo}.insteadOf", GIT_CONFIG_VALUE_0=self.URL,
                         LOCACHY_APPS_FETCHED=str(self.apps_fetched), LOCACHY_APPS_BUNDLED=str(self.apps_bundled),
@@ -398,6 +471,17 @@ class LiveEntry(unittest.TestCase):
                         "open(os.environ['TEST_APPS'], 'w').write(os.environ.get('LOCACHY_APPS', '') + '\\n' + "
                         "os.environ.get('LOCACHY_APPS_CATALOG', '') + '\\n')\n")
 
+    @staticmethod
+    def updater(path, body=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body or """\
+import json, os, sys
+source = sys.argv[sys.argv.index('--source') + 1]
+print(json.dumps({'snapshot': os.environ['LOCACHY_INSTALL_SNAPSHOT'],
+                  'source': source, 'catalog': os.environ['LOCACHY_APPS_CATALOG'],
+                  'source_how': os.environ['LOCACHY_SOURCE'], 'apps_how': os.environ['LOCACHY_APPS']}))
+""")
+
     def commit(self, tag, helper=None):
         self.fake(self.repo / "src/link/locachy-install", tag)
         helper_path = self.repo / "src/link/locachy_apps.py"
@@ -412,9 +496,12 @@ class LiveEntry(unittest.TestCase):
         """(LOCACHY_APPS, LOCACHY_APPS_CATALOG) the installer was given."""
         return tuple(self.seen.read_text().splitlines())
 
+    def run_entry(self, *args):
+        return subprocess.run(["bash", str(SOURCE / "installer/locachy-install"), *args], env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
     def entry(self, *args):
-        result = subprocess.run(["bash", str(SOURCE / "installer/locachy-install"), *args], env=self.env,
-                                capture_output=True, text=True, timeout=60)
+        result = self.run_entry(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip(), result.stderr
 
@@ -434,7 +521,8 @@ class LiveEntry(unittest.TestCase):
         out, _ = self.entry("--yes")
         self.assertTrue(out.startswith(f"v2 fetched before: could not fetch {self.URL} (main): "), out)
         self.assertEqual(sorted(p.name for p in self.fetched.parent.iterdir()),
-                         ["locachy-source", "locachy-source.from"])
+                         ["locachy-source", "locachy-source.snapshots"])
+        self.assertEqual(len(list(self.state.glob("source.*"))), 2)
 
     def test_recorded_local_changes_are_kept_only_over_the_same_remote_commit(self):
         commit = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
@@ -443,9 +531,134 @@ class LiveEntry(unittest.TestCase):
         out, err = self.entry('--yes')
         self.assertTrue(out.startswith('bundled bundled: local changes over the fetched commit '), out)
         self.assertIn("keeping this medium's recorded local changes", err)
+        self.updater(self.bundled / 'installer/live-update.py')
+        selected = json.loads(self.entry('--ui')[0])
+        self.assertEqual(selected['source_how'], 'bundled: local changes over the fetched commit')
+        self.assertNotEqual(Path(selected['source']), self.bundled)
+        self.assertNotEqual(Path(selected['catalog']), self.apps_bundled)
+        self.env['LOCACHY_INSTALL_SNAPSHOT'] = selected['snapshot']
         self.commit('v2')
+        self.fake(self.bundled / 'link/locachy-install', 'changed medium')
+        out, err = self.entry('--yes')
+        self.assertEqual(out, 'bundled bundled: local changes over the fetched commit --yes')
+        self.assertEqual(err, '')
+        self.env.pop('LOCACHY_INSTALL_SNAPSHOT')
         out, _ = self.entry('--yes')
         self.assertEqual(out, 'v2 fetched --yes')
+
+    def test_ui_check_install_and_refreshed_resume_each_use_their_exact_selection(self):
+        self.apps_repository()
+        self.updater(self.repo / 'src/installer/live-update.py')
+        self.commit('v2')
+        selected = json.loads(self.entry('--ui')[0])
+        initial_catalog = Path(selected['catalog'])
+        recipe = initial_catalog / 'edge.conf'
+        original = recipe.read_text()
+        self.assertRegex(selected['snapshot'], r'^[0-9a-f]{64}$')
+        self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
+        self.commit('v3')
+        (self.apps / 'apps/edge.conf').write_text(original.replace('microsoft-edge-stable-bin', 'edge-new'))
+        self.apps_commit('Catalog update')
+        self.entry('--yes')  # A separate serial call advances both latest pointers.
+        self.assertNotEqual(self.fetched.resolve() / 'src', Path(selected['source']))
+        self.assertNotEqual(self.apps_fetched.resolve(), initial_catalog)
+        self.env['LOCACHY_INSTALL_SNAPSHOT'] = selected['snapshot']
+        for operation in ('--describe-json', '--check', '--yes'):
+            self.assertEqual(self.entry(operation), ('v2 fetched ' + operation, ''))
+            self.assertEqual(self.apps_seen(), ('fetched', str(initial_catalog)))
+            self.assertEqual(recipe.read_text(), original)
+        saved = self.root / 'resume.json'
+        saved.write_text(json.dumps({'phase': 'preflight', 'update_repo': self.URL, 'update_branch': 'main',
+                                     'apps_repo': self.APPS_URL, 'apps_branch': 'main'}))
+        self.env['LOCACHY_RESUME_RECORD'] = str(saved)
+        updated, err = self.entry('--refresh-live')
+        updated = json.loads(updated)
+        self.assertIn('Fetching the newest LOCachy source:', err)
+        self.assertIn('Fetching the newest app presets:', err)
+        self.assertNotEqual(updated['snapshot'], selected['snapshot'])
+        self.assertEqual(Path(updated['catalog']), self.apps_fetched.resolve())
+        self.assertIn('edge-new', (Path(updated['catalog']) / 'edge.conf').read_text())
+        self.commit('v4')
+        (self.apps / 'apps/edge.conf').write_text(original)
+        self.apps_commit('Another catalog update')
+        self.env.pop('LOCACHY_INSTALL_SNAPSHOT')
+        self.entry('--yes')
+        self.env['LOCACHY_INSTALL_SNAPSHOT'] = updated['snapshot']
+        self.assertEqual(self.entry('--resume', '--yes'), ('v3 fetched --resume --yes', ''))
+        self.assertEqual(self.apps_seen(), ('fetched', updated['catalog']))
+        # Deleting a selected version cannot silently fall through to latest.
+        shutil.rmtree(updated['catalog'])
+        result = self.run_entry('--resume', '--yes')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cannot reopen the live selection', result.stderr)
+        self.assertNotIn('Fetching the newest', result.stderr)
+
+    def test_invalid_or_mismatched_live_selection_fails_except_read_only_status(self):
+        self.updater(self.repo / 'src/installer/live-update.py')
+        self.commit('v2')
+        selected = json.loads(self.entry('--ui')[0])
+        self.env['LOCACHY_INSTALL_SNAPSHOT'] = selected['snapshot']
+        for option in ('--update-branch=other', '--apps-branch=other', '--apps-repo=off'):
+            result = self.run_entry('--check', option)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('refresh first', result.stderr)
+            self.assertNotIn('Fetching the newest', result.stderr)
+        selection = self.state / (selected['snapshot'] + '.json')
+        selection.write_text('{}')
+        result = self.run_entry('--check')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('selection record does not match the token', result.stderr)
+        for invalid in ('', '../resume.json', '0' * 64):
+            self.env['LOCACHY_INSTALL_SNAPSHOT'] = invalid
+            result = self.run_entry('--yes')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('cannot reopen the live selection', result.stderr)
+            self.assertNotIn('Fetching the newest', result.stderr)
+            for status in ('--resume-status', '--resume-info'):
+                out, err = self.entry(status)
+                self.assertEqual((out, err), ('bundled None ' + status, ''))
+        # A fresh UI invocation ignores even an invalid inherited token.
+        self.assertEqual(json.loads(self.entry('--ui')[0])['snapshot'], selected['snapshot'])
+
+    def test_apps_refresh_failure_leaves_initial_selection_usable(self):
+        self.apps_repository()
+        self.updater(self.repo / 'src/installer/live-update.py')
+        self.commit('v2')
+        selected = json.loads(self.entry('--ui')[0])
+        self.env['LOCACHY_INSTALL_SNAPSHOT'] = selected['snapshot']
+        self.commit('v3')
+        (self.apps / 'FORMAT').write_text('4\n')
+        self.apps_commit('Unsupported format')
+        result = self.run_entry('--refresh-live')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('the app presets could not be refreshed', result.stderr)
+        self.assertIn('not compatible: format 4', result.stderr)
+        self.assertEqual(self.entry('--check'), ('v2 fetched --check', ''))
+        self.assertEqual(self.apps_seen(), ('fetched', selected['catalog']))
+
+    def test_legacy_or_mismatched_updater_response_cannot_enable_refresh(self):
+        path = self.repo / 'src/installer/live-update.py'
+        for tag, output in (('v2', {}), ('v3', {'snapshot': 'a' * 64})):
+            self.updater(path, f'print({json.dumps(output)!r})\n')
+            self.commit(tag)
+            result = self.run_entry('--refresh-live', '--apps-repo=off')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, '')
+            self.assertIn('the selected updater did not return the live selection', result.stderr)
+
+    def test_failed_refresh_does_not_enter_cached_updater(self):
+        updater = self.repo / 'src/installer/live-update.py'
+        updater.parent.mkdir()
+        updater.write_text('raise SystemExit("cached updater must not be entered")\n')
+        self.commit('v2')
+        self.entry('--describe-json')
+        shutil.rmtree(self.repo)
+        result = self.run_entry('--refresh-live')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Installer refresh failed: the source could not be refreshed: fetched before:', result.stderr)
+        self.assertNotIn('cached updater must not be entered', result.stderr)
+        self.assertEqual(result.stdout, '')
 
     def test_updates_off_or_no_repository_run_the_medium_own(self):
         out, _ = self.entry("--yes", "--update-repo=off")
@@ -500,19 +713,19 @@ class LiveEntry(unittest.TestCase):
         out, err = self.entry("--describe-json")
         self.assertEqual(out, "v1 fetched --describe-json")
         self.assertIn(f"Fetching the newest app presets: {self.APPS_URL} (main)", err)
-        self.assertEqual(self.apps_seen(), ("fetched", str(self.apps_fetched)))
+        path = str(self.apps_fetched.resolve())
+        self.assertEqual(self.apps_seen(), ("fetched", path))
         catalog = (self.apps_fetched / "CATALOG").read_text()
         for line in ('origin="repository"', f'repo="{self.APPS_URL}"', 'branch="main"', f'commit="{first}"'):
             self.assertIn(line + "\n", catalog)
         self.assertEqual(sorted(p.name for p in self.apps_fetched.iterdir()), ["CATALOG", "edge.conf"])
         out, err = self.entry("--check")
-        self.assertEqual((err, self.apps_seen()), ("", ("fetched earlier", str(self.apps_fetched))))
+        self.assertEqual((err, self.apps_seen()), ("", ("fetched earlier", path)))
         # Content this system does not take: the one fetched before, and why.
         (self.apps / "FORMAT").write_text("4\n")
         self.apps_commit("Format four")
         self.entry("--yes")
-        self.assertEqual(self.apps_seen(), (f"fetched before: {self.APPS_URL} (main): not compatible: format 4",
-                                            str(self.apps_fetched)))
+        self.assertEqual(self.apps_seen(), (f"fetched before: {self.APPS_URL} (main): not compatible: format 4", path))
         self.assertIn(f'commit="{first}"', (self.apps_fetched / "CATALOG").read_text())
         # Another branch, never fetched from: the medium's own.
         self.entry("--yes", "--apps-branch", "other")
@@ -522,7 +735,7 @@ class LiveEntry(unittest.TestCase):
         self.entry("--yes", "--apps-repo=off")
         self.assertEqual(self.apps_seen(), ("bundled: updates are off", str(self.apps_bundled)))
         self.assertEqual(sorted(p.name for p in self.apps_fetched.parent.iterdir()),
-                         ["locachy-apps", "locachy-apps.from", "locachy-source", "locachy-source.from"])
+                         ["locachy-apps", "locachy-source", "locachy-source.snapshots"])
 
     def test_app_presets_are_made_a_catalog_by_the_fetched_source_s_own_helper(self):
         self.apps_repository()

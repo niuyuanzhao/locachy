@@ -292,13 +292,6 @@ static const char *win_container(const struct window *w)
     return "";
 }
 
-static void win_title(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *title)
-{
-    struct window *w = data;
-    (void)h;
-    snprintf(w->title, sizeof w->title, "%s", title);
-}
-
 /* Cache container -> window app_id table so opening windows doesn't rescan
  * every container's .desktop directory on every event. Invalidated on SIGHUP
  * or when open_containers() returns a different list. */
@@ -307,6 +300,7 @@ static struct {
     char names[64][OPEN_NAME];
     char ids[64][MAX_WINDOW_IDS][OPEN_WINDOW_ID];
     int nids[64];
+    int is_vm[64];
 } app_id_cache;
 
 static void app_id_cache_invalidate(void)
@@ -331,26 +325,52 @@ static void app_id_cache_refresh(void)
     app_id_cache.n = n;
     for (int i = 0; i < n; i++) {
         memcpy(app_id_cache.names[i], names[i], OPEN_NAME);
-        app_id_cache.nids[i] = open_window_ids(names[i], app_id_cache.ids[i], MAX_WINDOW_IDS);
+        app_id_cache.is_vm[i] = open_vm(names[i]);
+        app_id_cache.nids[i] = app_id_cache.is_vm[i] ? 0 :
+                               open_window_ids(names[i], app_id_cache.ids[i], MAX_WINDOW_IDS);
     }
     app_id_cache.valid = 1;
+}
+
+static void win_resolve_container(struct window *w)
+{
+    w->container[0] = '\0';
+    app_id_cache_refresh();
+    /* A managed VM's QEMU window is that VM's alone, never an app id's. */
+    int vm_tagged = open_window_vm_tagged(w->app_id, w->title);
+    for (int i = app_id_cache.n - 1; i >= 0 && !w->container[0]; i--) {
+        if (app_id_cache.is_vm[i]) {
+            if (open_window_matches(app_id_cache.names[i], w->app_id, w->title)) {
+                memcpy(w->container, app_id_cache.names[i], sizeof w->container);
+            }
+            continue;
+        }
+        for (int k = 0; k < app_id_cache.nids[i] && !vm_tagged; k++) {
+            if (strcasecmp(w->app_id, app_id_cache.ids[i][k]) == 0) {
+                memcpy(w->container, app_id_cache.names[i], sizeof w->container);
+                break;
+            }
+        }
+    }
+}
+
+static void win_title(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *title)
+{
+    struct window *w = data;
+    (void)h;
+    snprintf(w->title, sizeof w->title, "%s", title ? title : "");
+    /* Only a QEMU window's owner depends on its title (a VM's -name). */
+    if (open_window_qemu(w->app_id)) {
+        win_resolve_container(w);
+    }
 }
 
 static void win_app_id(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *id)
 {
     struct window *w = data;
     (void)h;
-    snprintf(w->app_id, sizeof w->app_id, "%s", id);
-    w->container[0] = '\0';
-    app_id_cache_refresh();
-    for (int i = app_id_cache.n - 1; i >= 0 && !w->container[0]; i--) {
-        for (int k = 0; k < app_id_cache.nids[i]; k++) {
-            if (strcasecmp(id, app_id_cache.ids[i][k]) == 0) {
-                memcpy(w->container, app_id_cache.names[i], sizeof w->container);
-                break;
-            }
-        }
-    }
+    snprintf(w->app_id, sizeof w->app_id, "%s", id ? id : "");
+    win_resolve_container(w);
 }
 
 static void win_output_enter(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, struct wl_output *o)
@@ -3914,6 +3934,8 @@ static void bar_request(void)
         answer(client, "error no container %s", name);
     } else if (tray_activate(name) == 0) {
         answer(client, "ok from the tray of %s", name);
+    } else if (open_vm(name)) {
+        answer(client, "error no window of %s is open", name);
     } else if (open_window_ids(name, ids, 1) == 0) {
         answer(client, "error %s has no .desktop file to match its windows", name);
     } else {

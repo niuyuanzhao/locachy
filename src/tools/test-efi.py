@@ -22,6 +22,8 @@ efi = importlib.util.module_from_spec(spec)
 loader.exec_module(efi)
 SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
 GUID = "8129ca5c-784a-47e7-921a-d7a952726599"
+P4 = "a1b2c3d4-e5f6-4708-9a0b-c1d2e3f45678"  # the Maintenance Windows ESP
+OTHER = "11111111-2222-3333-4444-555555555555"
 
 
 def row(number="0003", active=True, guid=GUID, loader=efi.LOADER, part=1, label=efi.LABEL):
@@ -49,6 +51,8 @@ class Registration(unittest.TestCase):
         self.records = []
         self.calls = []
         self.fail = None
+        self.bootnext = None
+        self.part_guids = {1: GUID, 4: P4}
         p = mock.patch.object(efi, "EFI_LOCK_PATH", str(self.root / "efi.lock"))
         p.start()
         self.addCleanup(p.stop)
@@ -66,7 +70,8 @@ class Registration(unittest.TestCase):
         return self.real_stat(path, *args, **kwargs)
 
     def text(self):
-        return "BootCurrent: 0001\nBootOrder: " + ",".join(self.order) + "\n" + "".join(self.records)
+        nxt = f"BootNext: {self.bootnext}\n" if self.bootnext else ""
+        return "BootCurrent: 0001\n" + nxt + "BootOrder: " + ",".join(self.order) + "\n" + "".join(self.records)
 
     def command(self, args):
         self.calls.append(args)
@@ -85,12 +90,18 @@ class Registration(unittest.TestCase):
             num = f"{3 + len(self.records):04X}"
             label = args[args.index("--label") + 1]
             ldr = args[args.index("--loader") + 1]
-            self.records.append(row(num, label=label, loader=ldr))
+            part = int(args[args.index("--part") + 1])
+            self.records.append(row(num, label=label, loader=ldr, part=part, guid=self.part_guids.get(part, GUID)))
         elif "--active" in args:
             number = args[args.index("--bootnum") + 1]
             self.records = [r.replace("Boot" + number + " ", "Boot" + number + "*") for r in self.records]
         elif "--bootorder" in args:
             self.order = args[-1].split(",")
+        elif "--delete-bootnum" in args:
+            number = args[args.index("--bootnum") + 1]
+            self.records = [r for r in self.records if not r.startswith("Boot" + number)]
+        elif "--delete-bootnext" in args:
+            self.bootnext = None
         else:
             self.fail("Unexpected mutation " + repr(args))
         return ""
@@ -291,6 +302,75 @@ class Registration(unittest.TestCase):
         self.assertNotIn("UNSAFE-WRITE", result.stdout)
         self.assertEqual(self.image.read_bytes(), b"MZ\x00test")
         self.assertLess(boot.index('# An old directory under /efi'), boot.index('cp -p "$esp/locachy/locachy.efi"'))
+
+    def windows_first(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return efi.set_windows_first("/dev/nvme0n1", 4, P4, esp=self.esp)
+
+    def ensure(self, keep):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return efi.ensure_first(self.esp, winmaint_guid=P4, keep_windows_first=keep)
+
+    def labels(self):
+        _, _, found = efi.parse_entries(self.text())
+        return {i["number"]: i["label"] for i in found}
+
+    def test_windows_first_and_back_never_remove_locachy(self):
+        """boot-default windows puts the (default) entry first and LOCachy second;
+        a keeping heal leaves it; Return to LOCachy in Windows (LOCachy added first)
+        releases it (exit 3, LOCachy first, entry out of BootOrder); switching back
+        from LOCachy heals and deletes it. LOCachy's entry is there at every step."""
+        self.records = [row("0001", label="Other OS", part=2, guid=OTHER, loader=r"\EFI\other\grub.efi"),
+                        row("0002", label="Windows Boot Manager", part=4, guid=P4, loader=efi.WINMAINT_LOADER),
+                        row("0003")]
+        self.order = ["0003", "0001", "0002"]
+        wf = self.windows_first()
+        self.assertEqual(self.labels()[wf], efi.WINFIRST_LABEL)
+        self.assertEqual(self.order, [wf, "0003", "0001"])  # Windows' own p4 entry leaves BootOrder
+        self.assertEqual(self.labels()["0003"], efi.LABEL)
+
+        self.calls.clear()
+        self.assertEqual(self.ensure(keep=True), 0)  # LOCachy's boot-time heal while the mode is set
+        self.assertEqual((self.order, self.mutations()), ([wf, "0003", "0001"], []))
+
+        self.order = ["0003", wf, "0001"]  # bcdedit /set {fwbootmgr} displayorder LOCachy /addfirst
+        self.assertEqual(self.ensure(keep=True), efi.RELEASED)
+        self.assertEqual(self.order, ["0003", "0001"])
+        self.assertEqual(self.labels()["0003"], efi.LABEL)
+
+        self.calls.clear()
+        self.assertEqual(self.windows_first(), wf)  # the same entry again, not another one
+        self.assertFalse(any("--create-only" in c for c in self.mutations()))
+        self.assertEqual(self.order, [wf, "0003", "0001"])
+        self.assertEqual(self.ensure(keep=False), 0)  # boot-default locachy
+        self.assertEqual(self.order, ["0003", "0001"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            efi.remove_entry(label=efi.WINFIRST_LABEL)
+        self.assertNotIn(wf, self.labels())
+        self.assertEqual(self.labels()["0003"], efi.LABEL)
+        self.assertEqual(self.order, ["0003", "0001"])
+
+    def test_windows_first_keeps_previous_after_locachy_and_exit_status(self):
+        prev = self.esp / "EFI/locachy/locachy-prev.efi"
+        prev.write_bytes(b"MZ\x00prev")
+        wf = self.windows_first()
+        by_label = {label: number for number, label in self.labels().items()}
+        loc, prv = by_label[efi.LABEL], by_label[efi.PREV_LABEL]
+        self.assertEqual(self.order, [wf, loc, prv, "0001", "0002"])
+        argv = ["locachy-efi", "--ensure-first", "--keep-windows-first", "--esp", str(self.esp), "--winmaint-guid", P4]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(efi.os, "geteuid", return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(efi.main(), 0)
+            self.assertEqual(self.order, [wf, loc, prv, "0001", "0002"])
+            self.order = [loc, prv, wf, "0001", "0002"]
+            self.assertEqual(efi.main(), efi.RELEASED)
+        self.assertEqual(self.order, [loc, prv, "0001", "0002"])
+
+    def test_keep_without_a_windows_first_entry_is_released(self):
+        self.records = [row("0003")]
+        self.order = ["0001", "0003"]
+        self.assertEqual(self.ensure(keep=True), efi.RELEASED)
+        self.assertEqual(self.order, ["0003", "0001"])
 
     def test_boot_repair_is_early_and_install_registers_only_after_images(self):
         boot = (SOURCE / "link/locachy-boot").read_text()

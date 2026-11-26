@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -40,6 +41,7 @@ class Install(unittest.TestCase):
         self.mounts = [self.running, self.root_fs, self.esp_fs]
         self.label = "locachy-root"
         self.fat = "FAT32"
+        self.uuids = {self.root_fs["source"]: "root-uuid", self.esp_fs["source"]: "esp-uuid"}
         patch = mock.patch.object(i, "output", self.output)
         patch.start()
         self.addCleanup(patch.stop)
@@ -102,6 +104,86 @@ class Install(unittest.TestCase):
             self.assertEqual(i.main(), 1)
         target.assert_not_called()
         partition.assert_not_called()
+
+    def test_preflight_exception_stops_before_target_write(self):
+        argv = ["locachy-install", "--disk=/dev/vdb", "--yes"]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(i.os, "geteuid", return_value=0), \
+             mock.patch.object(i, "check_choices"), mock.patch.object(i, "check_targets"), \
+             mock.patch.object(i, "preflight_keys", side_effect=RuntimeError("network unavailable")), \
+             mock.patch.object(i, "prepare_partitions") as partition, mock.patch.object(i, "run") as run, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(i.main(), 1)
+        partition.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual(json.loads(self.record.read_text())["phase"], "preflight")
+
+    def test_resume_never_replaces_an_explicit_empty_catalog_with_the_medium(self):
+        args = self.args("--disk", "/dev/vdb")
+        record = i.write_resume_record("a" * 32, "", i.safe_arguments(args), args, phase="preflight")
+        self.assertIsNone(record["apps_catalog_path"])
+        self.assertIsNone(record["apps_catalog_digest"])
+        bundled = self.make_catalog({"medium-app": 'package="hello"\ncommand="/usr/bin/hello"\n'})
+        with mock.patch.object(i, "MEDIUM_APPS_CATALOG", str(bundled)):
+            i.use_resume_catalog(record)
+            self.assertIsNone(i.apps_catalog())
+            self.assertEqual(i.apps_meta(), {})
+            self.assertNotIn("medium-app", i.presets())
+
+    def test_resume_rejects_a_changed_catalog_before_key_check(self):
+        self.make_catalog({"demo": 'package="hello"\ncommand="/usr/bin/hello"\n'})
+        args = self.args("--disk", "/dev/vdb")
+        record = i.write_resume_record("a" * 32, "", i.safe_arguments(args), args, phase="preflight")
+        (Path(record["apps_catalog_path"]) / "demo.conf").write_text('package="fish"\ncommand="/usr/bin/fish"\n')
+        with mock.patch.object(sys, "argv", ["locachy-install", "--resume"]), \
+             mock.patch.object(i.os, "geteuid", return_value=0), \
+             mock.patch.object(i, "preflight_keys") as keys, mock.patch.object(i, "prepare_partitions") as partition, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(i.main(), 1)
+        self.assertIn("pinned app catalog is missing or changed", err.getvalue())
+        keys.assert_not_called()
+        partition.assert_not_called()
+
+    def test_operation_lock_brackets_inherited_worker(self):
+        with i.installation_lock() as fd:
+            with self.assertRaisesRegex(ValueError, "already running"):
+                with i.installation_lock():
+                    self.fail("a second installer obtained the lock")
+            # Exercise the same inherited descriptor check in a fresh process.
+            script = """
+import importlib.machinery, importlib.util, os, pathlib, sys
+loader = importlib.machinery.SourceFileLoader('fixture_backend', sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+backend = importlib.util.module_from_spec(spec)
+loader.exec_module(backend)
+backend.RESUME_RECORD = pathlib.Path(sys.argv[2])
+with backend.installation_lock(private=True) as inherited:
+    assert not os.get_inheritable(inherited)
+"""
+            subprocess.run([sys.executable, "-B", "-c", script, i.__file__, str(self.record)], check=True,
+                           pass_fds=(fd,), env=dict(os.environ, LOCACHY_INSTALL_LOCK_FD=str(fd)))
+            with self.assertRaisesRegex(ValueError, "already running"):
+                with i.installation_lock():
+                    self.fail("the worker released the parent's lock")
+        with i.installation_lock():
+            self.assertTrue(self.record.with_name("operation.lock").is_file())
+
+    def test_resume_refuses_replaced_esp_before_preflight_or_build(self):
+        args = self.args("--root", str(self.root), "--esp", str(self.esp))
+        install_id = "a" * 32
+        i.INSTALL_STATE.write_text(self.root / ".locachy-installer/install-id", install_id + "\n")
+        i.write_resume_record(install_id, self.root, i.safe_arguments(args), args,
+                              mounts=i.target_identities(self.root_fs, self.esp_fs))
+        self.uuids[self.esp_fs["source"]] = "different-esp-uuid"
+        with mock.patch.object(sys, "argv", ["locachy-install", "--resume"]), \
+             mock.patch.object(i.os, "geteuid", return_value=0), mock.patch.object(i.os.path, "ismount", return_value=True), \
+             mock.patch.object(i, "preflight_keys") as keys, mock.patch.object(i, "run") as run, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(i.main(), 1)
+        self.assertIn("ESP filesystem changed", err.getvalue())
+        self.assertEqual(json.loads(self.record.read_text())["mounts"]["esp"], "esp-uuid")
+        keys.assert_not_called()
+        run.assert_not_called()
+        self.assertFalse(any(self.esp.iterdir()))
 
     def test_preflight_success_is_read_only_and_trust_works_before_target_exists(self):
         argv = ["locachy-install", "--preflight", "--disk=/dev/vdb", "--yes"]
@@ -167,6 +249,8 @@ class Install(unittest.TestCase):
                 return json.dumps({"filesystems": [m for m in self.mounts if m["target"] == path]})
             return json.dumps({"filesystems": self.mounts})
         if command[0] == "blkid":
+            if "UUID" in command:
+                return self.uuids[command[-1]]
             return self.label if "LABEL" in command else self.fat
         if command[0] == "lsblk":
             return "252:16\n252:18" if command[-1].startswith("/dev/vdb") else "8:0\n8:1"
@@ -356,7 +440,7 @@ class Install(unittest.TestCase):
         with mock.patch.object(i, "output", self.block_output):
             i.check_targets(self.args("--disk", "/dev/sda"))
             for argv, said in ((["--disk", "/dev/sdb"], "live medium"),
-                               (["--disk", "/dev/sdc"], "at least 24 GiB"),
+                               (["--disk", "/dev/sdc"], "at least 25 GiB"),
                                (["--disk", "/dev/sda1"], "not a whole disk"),
                                (["--disk", "sda"], "not a /dev/"),
                                (["--disk", "/dev/sdz"], "no such block device"),
@@ -649,7 +733,9 @@ class Install(unittest.TestCase):
         self.assertIn("--features", record["argv"])
         self.assertNotIn("--password-file", record["argv"])  # never a secret, nor where it was
         self.assertEqual(calls[-1][calls[-1].index("--install-id") + 1], install_id)
-        self.assertNotIn("--resume", calls[-1])
+        self.assertIn("--resume", calls[-1])  # first private build already has a target-local marker
+        self.assertEqual((self.root / ".locachy-installer/install-id").read_text().strip(), install_id)
+        self.assertEqual(record["mounts"], {"root": "root-uuid", "esp": "esp-uuid"})
         self.assertEqual(checked, [None])
         # --trust-key: the keys, in that target (its locachy-build asks).
         chroot = []
@@ -660,7 +746,7 @@ class Install(unittest.TestCase):
             self.assertEqual(i.main(), 0)
         self.assertEqual(chroot, [["arch-chroot", str(self.root), "/usr/local/bin/locachy-build", "--trust-key", key]])
         # The app presets it started with, kept beside its record.
-        kept = self.record.with_name("apps-catalog")
+        kept = self.record.with_name("apps-catalog." + install_id)
         self.assertEqual(i.APPS.read_meta(kept)["commit"], "d" * 40)
         # --resume before its target has a catalog: those kept, not this run's
         # (a newer one, without firefox); stopped again, both stay.
@@ -675,13 +761,13 @@ class Install(unittest.TestCase):
         self.assertEqual(os.environ["LOCACHY_APPS_CATALOG"], str(kept))
         self.assertEqual(json.loads(self.record.read_text())["apps_commit"], "d" * 40)
         self.assertEqual(i.APPS.read_meta(kept)["commit"], "d" * 40)
-        # --resume: its options as recorded, the password again; the same ID;
-        # the app presets the target has already (pinned), not this run's.
+        # --resume: its options as recorded and the password again; the same
+        # install ID and app snapshot, even after the target got its own copy.
         calls.clear()
         os.environ["LOCACHY_APPS_CATALOG"] = str(self.apps)
         shutil.rmtree(self.apps)
         self.make_catalog({}, commit="e" * 40)  # this run's: no firefox
-        pinned = self.make_catalog(firefox, commit="d" * 40, dest=self.root / i.APPS_CATALOG)
+        self.make_catalog(firefox, commit="d" * 40, dest=self.root / i.APPS_CATALOG)
         with mock.patch.object(sys, "argv", ["locachy-install", "--resume", "--yes", "--password-file", str(again)]), \
              mock.patch.object(i.os, "geteuid", lambda: 0), \
              mock.patch.object(i, "resumed_target", lambda record: Path(record["root"])), \
@@ -696,7 +782,7 @@ class Install(unittest.TestCase):
         self.assertEqual(inner[inner.index("--features") + 1], "tor")
         self.assertEqual(inner[inner.index("--update-repo") + 1], "https://example.org/l.git")
         self.assertEqual(inner[inner.index("--apps-repo") + 1], "https://example.org/a.git")
-        self.assertEqual(os.environ["LOCACHY_APPS_CATALOG"], str(pinned))  # the inner run's too
+        self.assertEqual(os.environ["LOCACHY_APPS_CATALOG"], str(kept))  # the recorded snapshot wins
         self.assertEqual(checked[-1], install_id)
         self.assertFalse(self.record.exists())
         self.assertFalse(kept.exists())
@@ -998,6 +1084,835 @@ class Install(unittest.TestCase):
         self.assertEqual(i.effective_ime(type("A", (), {"ime": "auto", "language": "zh_CN.UTF-8"})()), "zh")
         self.assertEqual(i.effective_ime(type("A", (), {"ime": "en", "language": "en_US.UTF-8"})()), "en")
         self.assertEqual(i.effective_ime(type("A", (), {"ime": "zh", "no_ime": True, "language": "zh_CN.UTF-8"})()), "off")
+
+    MULTI_BLOCK = {"blockdevices": [
+        {"path": "/dev/nvme0n1", "maj:min": "259:0", "type": "disk", "size": 512 << 30, "model": "Primary NVMe",
+         "serial": "SER-0", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": [
+             {"path": "/dev/nvme0n1p1", "maj:min": "259:1", "type": "part", "size": 512 << 20, "start": 2048,
+              "fstype": "vfat", "label": "EFI", "parttypename": "EFI System", "mountpoints": [None]},
+             {"path": "/dev/nvme0n1p2", "maj:min": "259:2", "type": "part", "size": 400 << 30, "start": 1050624,
+              "fstype": "ext4", "label": "oldroot", "parttypename": "Linux filesystem", "mountpoints": [None]}]},
+        # 708.5 GiB of partitions back to back from 1 MiB: 291.5 GiB unallocated after the last one.
+        {"path": "/dev/nvme1n1", "maj:min": "259:10", "type": "disk", "size": 1000 << 30, "model": "Data NVMe 1",
+         "serial": "SER-1", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": [
+             {"path": "/dev/nvme1n1p1", "maj:min": "259:11", "type": "part", "size": 500 << 30, "start": 2048,
+              "fstype": "ntfs", "label": "Archive", "parttypename": "Microsoft basic data", "mountpoints": [None]},
+             {"path": "/dev/nvme1n1p2", "maj:min": "259:12", "type": "part", "size": 512 << 20, "start": 1048578048,
+              "fstype": "vfat", "label": "ESP", "parttypename": "EFI System", "mountpoints": [None]},
+             {"path": "/dev/nvme1n1p3", "maj:min": "259:13", "type": "part", "size": 8 << 30, "start": 1049626624,
+              "fstype": "swap", "label": "swap", "parttypename": "Linux swap", "mountpoints": [None]},
+             {"path": "/dev/nvme1n1p4", "maj:min": "259:14", "type": "part", "size": 200 << 30, "start": 1066403840,
+              "fstype": "ext4", "label": "Projects", "parttypename": "Linux filesystem", "mountpoints": [None]}]},
+        {"path": "/dev/nvme2n1", "maj:min": "259:20", "type": "disk", "size": 1000 << 30, "model": "Data NVMe 2",
+         "serial": "SER-2", "tran": "nvme", "rm": False, "ro": False, "mountpoints": [None]},
+        {"path": "/dev/nvme3n1", "maj:min": "259:30", "type": "disk", "size": 1000 << 30, "model": "Data NVMe 3",
+         "serial": "SER-3", "tran": "nvme", "rm": False, "ro": False, "mountpoints": [None]},
+        {"path": "/dev/nvme4n1", "maj:min": "259:40", "type": "disk", "size": 1000 << 30, "model": "Data NVMe 4",
+         "serial": "SER-4", "tran": "nvme", "rm": False, "ro": False, "mountpoints": [None]},
+        {"path": "/dev/sdb", "maj:min": "8:16", "type": "disk", "size": 16 << 30, "model": "Live USB",
+         "tran": "usb", "rm": True, "ro": False, "mountpoints": [None], "children": [
+             {"path": "/dev/sdb1", "maj:min": "8:17", "type": "part", "size": 1 << 30, "fstype": "iso9660",
+              "mountpoints": ["/run/archiso/bootmnt"]}]},
+    ]}
+
+    def multi_block_output(self, command):
+        if command[0] == "findmnt":
+            return json.dumps({"filesystems": [{"target": "/", "source": "airootfs"},
+                                               {"target": "/run/archiso/bootmnt", "source": "/dev/sdb1"}]})
+        if command[:2] == ["lsblk", "--inverse"]:
+            anc = {}
+            for d in self.MULTI_BLOCK["blockdevices"]:
+                anc[d["path"]] = d["maj:min"]
+                for c in d.get("children") or []:
+                    anc[c["path"]] = f"{c['maj:min']}\n{d['maj:min']}"
+            if command[-1] not in anc:
+                raise subprocess.CalledProcessError(32, command)
+            return anc[command[-1]]
+        if command[:2] == ["lsblk", "--json"]:
+            def find(nodes, path):
+                for n in nodes:
+                    if n["path"] == path:
+                        return n
+                    got = find(n.get("children") or [], path)
+                    if got:
+                        return got
+            if not command[-1].startswith("/dev/"):
+                return json.dumps(self.MULTI_BLOCK)
+            node = find(self.MULTI_BLOCK["blockdevices"], command[-1])
+            if not node:
+                raise subprocess.CalledProcessError(32, command)
+            return json.dumps({"blockdevices": [node]})
+        return self.output(command)
+
+    def test_extra_volumes_parse_and_target_validation(self):
+        # Valid format, attach, raid1 array, raid10 with 4 disks, and auto encryption resolution.
+        vols = i.parse_extra_volumes([
+            "name=data,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared,encrypt=auto,compute_storage=1",
+            "name=archive,mode=attach,dev=/dev/nvme2n1p1,role=data",
+            "name=pool,mode=array,devs=/dev/nvme3n1+/dev/nvme4n1,raid=raid1,role=compute,encrypt=none",
+        ], encrypt_root=True)
+        self.assertEqual(vols[0]["effective_encrypt"], "luks")
+        self.assertTrue(vols[0]["compute_storage"])
+        self.assertEqual(vols[1]["effective_encrypt"], "none")
+        self.assertEqual(vols[2]["raid"], "raid1")
+        self.assertEqual(vols[2]["fs"], "btrfs")
+
+        vols_plain = i.parse_extra_volumes([
+            "name=data,mode=format,dev=/dev/nvme1n1,fs=btrfs,role=shared,encrypt=auto",
+        ], encrypt_root=False)
+        self.assertEqual(vols_plain[0]["effective_encrypt"], "none")
+
+        with mock.patch.object(i, "output", self.multi_block_output):
+            # Valid format + attach on distinct disks.
+            i.check_targets(self.args(
+                "--disk", "/dev/nvme0n1",
+                "--extra-volume", "name=archive,mode=attach,dev=/dev/nvme1n1p1,role=shared",
+                "--extra-volume", "name=projects,mode=attach,dev=/dev/nvme1n1p4,role=data",
+                "--extra-volume", "name=pool,mode=array,devs=/dev/nvme2n1+/dev/nvme3n1,raid=raid1,role=compute,compute_storage=1",
+            ))
+            # Valid raid10 with 4 distinct whole disks.
+            i.check_targets(self.args(
+                "--disk", "/dev/nvme0n1",
+                "--extra-volume", "name=pool10,mode=array,devs=/dev/nvme1n1+/dev/nvme2n1+/dev/nvme3n1+/dev/nvme4n1,raid=raid10,role=compute",
+            ))
+
+            # Reject invalid specs and conflicting targets.
+            bad_cases = (
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=data,mode=format,dev=/dev/nvme0n1,fs=ext4,role=shared"],
+                 "overlaps the primary system disk"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=a,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared",
+                  "--extra-volume", "name=b,mode=format,dev=/dev/nvme1n1,fs=btrfs,role=data"],
+                 "already used by another volume"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=a,mode=attach,dev=/dev/nvme1n1p1,role=shared",
+                  "--extra-volume", "name=b,mode=format,dev=/dev/nvme1n1,fs=ext4,role=data"],
+                 "already used by another volume"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=live,mode=format,dev=/dev/sdb,fs=ext4,role=shared"],
+                 "live medium"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=badpart,mode=format,dev=/dev/nvme1n1p1,fs=ext4,role=shared"],
+                 "not a whole disk"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=esp,mode=attach,dev=/dev/nvme1n1p2,role=shared"],
+                 "swap or EFI"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=sw,mode=attach,dev=/dev/nvme1n1p3,role=shared"],
+                 "swap or EFI"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=pool,mode=array,devs=/dev/nvme1n1,raid=raid1,role=compute"],
+                 "at least 2 disks"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=pool,mode=array,devs=/dev/nvme1n1+/dev/nvme2n1+/dev/nvme3n1,raid=raid10,role=compute"],
+                 "at least 4 disks"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=data,mode=format,dev=/dev/nvme1n1,fs=ext4,role=data,compute_storage=1"],
+                 "compute_storage=1 requires role"),
+                (["--disk", "/dev/nvme0n1",
+                  "--extra-volume", "name=a,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared,compute_storage=1",
+                  "--extra-volume", "name=b,mode=format,dev=/dev/nvme2n1,fs=ext4,role=compute,compute_storage=1"],
+                 "At most one --extra-volume"),
+                (["--disk", "/dev/nvme0n1", "--extra-volume", "name=Bad Name,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared"],
+                 "invalid volume name"),
+                (["--disk", "/dev/nvme0n1",
+                  "--extra-volume", "name=dup,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared",
+                  "--extra-volume", "name=dup,mode=format,dev=/dev/nvme2n1,fs=ext4,role=shared"],
+                 "duplicate volume name"),
+            )
+            for argv, expected in bad_cases:
+                with self.assertRaisesRegex(ValueError, expected, msg=argv):
+                    parsed = self.args(*argv)
+                    i.check_choices(parsed)
+                    i.check_targets(parsed)
+
+            # Same-parent-disk array members rejected even when device paths differ (e.g. symlink / alias).
+            def same_parent_output(command):
+                if command[:2] == ["lsblk", "--inverse"] and command[-1] in ("/dev/nvme1n1", "/dev/disk-alias"):
+                    return "259:10"
+                if command[:2] == ["lsblk", "--json"] and command[-1] == "/dev/disk-alias":
+                    return json.dumps({"blockdevices": [dict(self.MULTI_BLOCK["blockdevices"][1], path="/dev/disk-alias")]})
+                return self.multi_block_output(command)
+            with mock.patch.object(i, "output", same_parent_output):
+                with self.assertRaisesRegex(ValueError, "shares a physical disk"):
+                    i.check_targets(self.args(
+                        "--disk", "/dev/nvme0n1",
+                        "--extra-volume", "name=pool,mode=array,devs=/dev/nvme1n1+/dev/disk-alias,raid=raid1,role=compute",
+                    ))
+
+        # describe() advertises storage_roles and storage_raids without dropping existing keys.
+        with mock.patch.object(i, "output", self.multi_block_output), \
+             mock.patch.object(i, "cpu_model", lambda level: "ivybridge"), \
+             mock.patch.object(i, "tpm_status", lambda: {"tpm_version": 0}), \
+             mock.patch.object(i, "host_security", lambda: None), \
+             mock.patch.object(i, "tpm_advice", lambda st=None: (False, "passphrase", "no TPM")):
+            desc = i.describe(i.make_parser())
+        self.assertEqual(desc["storage_roles"], ["shared", "data", "compute"])
+        self.assertEqual(desc["storage_raids"], ["single", "raid0", "raid1", "raid10"])
+        self.assertEqual(desc["disks"][0]["serial"], "SER-0")
+
+    def test_extra_volumes_packages_install_and_resume_idempotency(self):
+        # selected_package_roots adds btrfs-progs for btrfs/array and cryptsetup for luks extra volume.
+        roots_btrfs = i.selected_package_roots(self.args(
+            "--extra-volume", "name=pool,mode=array,devs=/dev/nvme1n1+/dev/nvme2n1,raid=raid1,role=compute,encrypt=luks",
+        ))
+        self.assertIn("btrfs-progs", roots_btrfs)
+        self.assertIn("cryptsetup", roots_btrfs)
+
+        roots_ext4 = i.selected_package_roots(self.args(
+            "--extra-volume", "name=data,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared,encrypt=none",
+        ))
+        self.assertNotIn("btrfs-progs", roots_ext4)
+
+        # Full install() path: invokes locachy-storage create --root ... --no-mount ..., writes
+        # compute_storage to rc.conf, records extra_volumes in install.json, and skips on --resume.
+        run_dir = Path(self.tmp.name) / "run-esp"
+        run_dir.mkdir(parents=True)
+        pass_file = Path(self.tmp.name) / "luks.pass"
+        pass_file.write_text("DiskPass123")
+        pw_file = Path(self.tmp.name) / "user.pass"
+        pw_file.write_text("UserPass123")
+
+        (self.root / "etc/locachy").mkdir(parents=True, exist_ok=True)
+        (self.root / "etc/locachy/packages").write_text("base\n")
+        (self.root / "etc/locachy/rc.conf").write_text('hibernate_after="30"\n')
+        (self.root / "var/lib/locachy").mkdir(parents=True, exist_ok=True)
+        boot_img = self.root / "usr/local/lib/locachy/boot/locachy.efi"
+        boot_img.parent.mkdir(parents=True, exist_ok=True)
+        boot_img.write_bytes(b"EFI")
+
+        calls = []
+        def fake_run(cmd, check=True, **kw):
+            calls.append(cmd)
+            if cmd[0] == "umount" and Path(cmd[1]).is_dir():
+                # The mount point empties when unmounted (its files were the ESP's, not ours).
+                for child in Path(cmd[1]).iterdir():
+                    shutil.rmtree(child) if child.is_dir() else child.unlink()
+                return subprocess.CompletedProcess(cmd, 0)
+            if "locachy-storage" in str(cmd):
+                # Record created volume into target volumes.json as real locachy-storage does.
+                name = cmd[cmd.index("--name") + 1]
+                vf = self.root / "etc/locachy/volumes.json"
+                data = json.loads(vf.read_text()) if vf.is_file() else {"schema": 1, "volumes": []}
+                data["volumes"].append({"name": name})
+                vf.write_text(json.dumps(data))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        class FakePopen:
+            def __init__(self, cmd, **kw):
+                calls.append(cmd)
+                self.stdout = iter(["make-root: target built and verified\n"])
+            def wait(self):
+                return 0
+
+        args = self.args(
+            "--root", str(self.root), "--esp", str(self.esp), "--yes", "--no-rank-mirrors",
+            "--encrypt", "--luks-passphrase-file", str(pass_file), "--password-file", str(pw_file),
+            "--extra-volume", "name=archive,mode=attach,dev=/dev/nvme1n1p1,role=data",
+            "--extra-volume", "name=pool,mode=array,devs=/dev/nvme2n1+/dev/nvme3n1,raid=raid1,role=compute,encrypt=auto,compute_storage=1",
+        )
+        esp_dirs = iter([run_dir / "esp-1", run_dir / "esp-2"])
+
+        def fresh_dir(**kw):
+            path = next(esp_dirs)
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path)
+
+        def fake_fs(path):
+            return self.esp_fs if Path(path).parent == run_dir else self.root_fs
+
+        def install_once():
+            with mock.patch.object(i, "run", fake_run), \
+                 mock.patch.object(i.subprocess, "Popen", FakePopen), \
+                 mock.patch.object(i.tempfile, "mkdtemp", fresh_dir), \
+                 mock.patch.object(i, "filesystem", fake_fs), \
+                 mock.patch.object(i, "cpu_model", lambda lvl: "ivybridge"), \
+                 mock.patch.object(i, "update_source", lambda a: ("off", "main", "")), \
+                 mock.patch.object(i, "apps_source", lambda a: ("off", "main")), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                i.install(args, self.root, self.esp, self.root_fs, self.esp_fs, "x86-64-v3")
+
+        install_once()
+
+        storage_calls = [c for c in calls if any("locachy-storage" in str(x) for x in c)]
+        self.assertEqual(len(storage_calls), 2)
+        self.assertEqual(storage_calls[0][2:], [
+            str(SOURCE / "link/locachy-storage"), "create", "--root", str(self.root), "--no-mount",
+            "--name", "archive", "--mode", "attach", "--role", "data", "--dev", "/dev/nvme1n1p1", "--encrypt", "none",
+        ])
+        self.assertEqual(storage_calls[1][2:], [
+            str(SOURCE / "link/locachy-storage"), "create", "--root", str(self.root), "--no-mount",
+            "--name", "pool", "--mode", "array", "--role", "compute",
+            "--devs", "/dev/nvme2n1,/dev/nvme3n1", "--raid", "raid1", "--encrypt", "luks",
+            "--passphrase-file", str(pass_file),
+        ])
+        # rc.conf and packages manifest updated.
+        rc_text = (self.root / "etc/locachy/rc.conf").read_text()
+        self.assertIn('compute_storage="pool"', rc_text)
+        pkgs = (self.root / "etc/locachy/packages").read_text().splitlines()
+        self.assertIn("btrfs-progs", pkgs)
+        self.assertIn("cryptsetup", pkgs)
+        # install.json records extra_volumes summary.
+        summary = json.loads((self.root / "var/lib/locachy/install.json").read_text())
+        self.assertEqual([v["name"] for v in summary["extra_volumes"]], ["archive", "pool"])
+        self.assertEqual(summary["extra_volumes"][1]["encrypt"], "luks")
+        self.assertTrue(summary["extra_volumes"][1]["compute_storage"])
+        # stages.json records extra-volumes success.
+        stages_data = json.loads((self.root / ".locachy-installer/stages.json").read_text())
+        self.assertTrue(stages_data["stages"]["extra-volumes"]["success"])
+
+        # Simulate --resume: the extra-volumes stage MUST NOT re-invoke locachy-storage.
+        calls.clear()
+        (self.root / "etc/passwd").write_text("user:x:1000:1000::/home/user:/bin/bash\n")
+        args.resume = True
+        install_once()
+        self.assertEqual([c for c in calls if any("locachy-storage" in str(x) for x in c)], [])
+
+        # Also verify safe_arguments preserves repeatable --extra-volume entries.
+        safe = i.safe_arguments(args)
+        self.assertEqual(safe.count("--extra-volume"), 2)
+        self.assertIn("name=archive,mode=attach,dev=/dev/nvme1n1p1,role=data", safe)
+
+    def test_winmaint_disk_validation_tail_reservation_and_install(self):
+        with mock.patch.object(i, "output", self.multi_block_output), \
+             mock.patch.object(i, "cpu_model", lambda level: "ivybridge"), \
+             mock.patch.object(i, "tpm_status", lambda: {"tpm_version": 0}), \
+             mock.patch.object(i, "host_security", lambda: None), \
+             mock.patch.object(i, "tpm_advice", lambda st=None: (False, "passphrase", "no TPM")):
+            desc = i.describe(i.make_parser())
+        self.assertEqual(desc["winmaint"], {"min_gib": 40, "default_gib": 48, "max_gib": 4096})
+        # One Maintenance Windows default across the installer, locachy-winmaint and rc.conf.
+        winmaint_src = (SOURCE / "link/locachy-winmaint").read_text(encoding="utf-8")
+        self.assertEqual(int(re.search(r"^DEFAULT_WIN_C_GIB = (\d+)$", winmaint_src, re.M).group(1)), i.WINMAINT_DEFAULT_GIB)
+        rc_text = (SOURCE / "rc.conf").read_text(encoding="utf-8")
+        self.assertEqual(int(re.search(r'^winmaint_size_gib="(\d+)"$', rc_text, re.M).group(1)), i.WINMAINT_DEFAULT_GIB)
+
+        roots = i.selected_package_roots(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme0n1"))
+        self.assertIn("dosfstools", roots)
+        self.assertIn("mtools", roots)
+        self.assertNotIn("qemu-desktop", roots)
+
+        with mock.patch.object(i, "output", self.multi_block_output):
+            i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme0n1", "--winmaint-gib", "64"))
+            i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "128"))
+            i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme1n1", "--winmaint-gib", "64"))
+            # mode=format + --winmaint-disk on the same secondary disk is allowed (even when old
+            # partitions occupy most of the disk, since mode=format wipes and reserves the tail).
+            i.check_targets(self.args(
+                "--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme1n1", "--winmaint-gib", "48",
+                "--extra-volume", "name=data,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared",
+            ))
+            i.check_targets(self.args(
+                "--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme1n1", "--winmaint-gib", "900",
+                "--extra-volume", "name=data,mode=format,dev=/dev/nvme1n1,fs=btrfs,role=shared",
+            ))
+
+            for argv, said in (
+                (["--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme0n1", "--winmaint-gib", "20"], "between 40 and 4096"),
+                (["--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/sdb", "--winmaint-gib", "64"], "live medium"),
+                (["--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme1n1p1", "--winmaint-gib", "64"], "not a whole disk"),
+                (["--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme0n1", "--winmaint-gib", "500"], "at least"),
+                (["--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme1n1", "--winmaint-gib", "350"], "unallocated"),
+                (["--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme1n1", "--winmaint-gib", "999",
+                  "--extra-volume", "name=data,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared"], "at least"),
+                (["--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "64",
+                  "--extra-volume", "name=pool,mode=array,devs=/dev/nvme2n1+/dev/nvme3n1,raid=raid1,role=compute"], "cannot share a disk"),
+            ):
+                with self.assertRaisesRegex(ValueError, said, msg=argv):
+                    parsed = self.args(*argv)
+                    i.check_choices(parsed)
+                    i.check_targets(parsed)
+
+        sfdisk_calls = []
+        part_target = self.root.parent / "wm-target"
+        with mock.patch.object(i, "run", lambda cmd, **kw: sfdisk_calls.append((cmd, kw))), \
+             mock.patch.object(i, "disk_size_bytes", lambda d: 200 << 30):
+            wm_args = self.args("--disk", "/dev/nvme0n1", "--swap-gib", "8",
+                                "--winmaint-disk", "/dev/nvme0n1", "--winmaint-gib", "64",
+                                "--root", str(part_target), "--esp", str(part_target / "efi"))
+            i.prepare_partitions(wm_args)
+        sfdisk_input = next(kw["input"] for cmd, kw in sfdisk_calls if cmd[0] == "sfdisk")
+        self.assertIn(",130301M,L\n", sfdisk_input)
+        self.assertNotIn(",+,L\n", sfdisk_input)
+
+        run_dir = Path(self.tmp.name) / "run-wm"
+        run_dir.mkdir(parents=True)
+        pw_file = Path(self.tmp.name) / "wm-user.pass"
+        pw_file.write_text("UserPass123")
+        (self.root / "etc/locachy").mkdir(parents=True, exist_ok=True)
+        (self.root / "etc/locachy/packages").write_text("base\n")
+        (self.root / "etc/locachy/rc.conf").write_text('winmaint_size_gib="48"\n')
+        (self.root / "var/lib/locachy").mkdir(parents=True, exist_ok=True)
+        boot_img = self.root / "usr/local/lib/locachy/boot/locachy.efi"
+        boot_img.parent.mkdir(parents=True, exist_ok=True)
+        boot_img.write_bytes(b"EFI")
+
+        calls = []
+        def fake_run(cmd, check=True, **kw):
+            calls.append(cmd)
+            if cmd[0] == "umount" and Path(cmd[1]).is_dir():
+                for child in Path(cmd[1]).iterdir():
+                    shutil.rmtree(child) if child.is_dir() else child.unlink()
+            if "locachy-winmaint" in str(cmd):
+                sf = self.root / "var/lib/locachy/winmaint/state.json"
+                sf.parent.mkdir(parents=True, exist_ok=True)
+                sf.write_text(json.dumps({"schema": 1, "disk": "/dev/nvme0n1",
+                                          "partitions": {"c": {"sectors": 96 * 2097152}}}) + "\n")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        class FakePopen:
+            def __init__(self, cmd, **kw):
+                self.stdout = iter(["make-root: target built and verified\n"])
+            def wait(self):
+                return 0
+
+        esp_dirs = iter([run_dir / "esp-1", run_dir / "esp-2"])
+        def fresh_dir(**kw):
+            p = next(esp_dirs)
+            p.mkdir(parents=True, exist_ok=True)
+            return str(p)
+        def fake_fs(path):
+            return self.esp_fs if Path(path).parent == run_dir else self.root_fs
+
+        args = self.args(
+            "--root", str(self.root), "--esp", str(self.esp), "--yes", "--no-rank-mirrors",
+            "--password-file", str(pw_file),
+            "--winmaint-disk", "/dev/nvme0n1", "--winmaint-gib", "96",
+        )
+        def run_install():
+            with mock.patch.object(i, "run", fake_run), \
+                 mock.patch.object(i.subprocess, "Popen", FakePopen), \
+                 mock.patch.object(i.tempfile, "mkdtemp", fresh_dir), \
+                 mock.patch.object(i, "filesystem", fake_fs), \
+                 mock.patch.object(i, "output", lambda cmd: "gpt" if "PTTYPE" in cmd else self.output(cmd)), \
+                 mock.patch.object(i, "cpu_model", lambda lvl: "ivybridge"), \
+                 mock.patch.object(i, "update_source", lambda a: ("off", "main", "")), \
+                 mock.patch.object(i, "apps_source", lambda a: ("off", "main")), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                i.install(args, self.root, self.esp, self.root_fs, self.esp_fs, "x86-64-v3")
+
+        run_install()
+        wm_calls = [c for c in calls if any("locachy-winmaint" in str(x) for x in c)]
+        self.assertEqual(len(wm_calls), 1)
+        self.assertEqual(wm_calls[0][2:], [
+            str(SOURCE / "link/locachy-winmaint"), "create",
+            "--root", str(self.root), "--disk", "/dev/nvme0n1", "--size-gib", "96",
+        ])
+        self.assertIn('winmaint_size_gib="96"', (self.root / "etc/locachy/rc.conf").read_text())
+        summary = json.loads((self.root / "var/lib/locachy/install.json").read_text())
+        self.assertEqual(summary["maintenance_windows"], {"disk": "/dev/nvme0n1", "gib": 96})
+
+        calls.clear()
+        (self.root / "etc/passwd").write_text("user:x:1000:1000::/home/user:/bin/bash\n")
+        args.resume = True
+        run_install()
+        self.assertEqual([c for c in calls if any("locachy-winmaint" in str(x) for x in c)], [])
+
+        # Shared secondary disk: mode=format extra volume + Maintenance Windows passes
+        # --reserve-tail-mib <exact MiB> to locachy-storage BEFORE locachy-winmaint create runs.
+        shared_root = self.root.parent / "wm-shared-target"
+        shared_esp = shared_root / "efi"
+        shared_esp.mkdir(parents=True)
+        (shared_root / "etc/locachy").mkdir(parents=True, exist_ok=True)
+        (shared_root / "etc/locachy/packages").write_text("base\n")
+        (shared_root / "etc/locachy/rc.conf").write_text('winmaint_size_gib="48"\n')
+        (shared_root / "var/lib/locachy").mkdir(parents=True, exist_ok=True)
+        shared_boot = shared_root / "usr/local/lib/locachy/boot/locachy.efi"
+        shared_boot.parent.mkdir(parents=True, exist_ok=True)
+        shared_boot.write_bytes(b"EFI")
+        shared_calls = []
+
+        def shared_fake_run(cmd, check=True, **kw):
+            shared_calls.append(cmd)
+            if cmd[0] == "umount" and Path(cmd[1]).is_dir():
+                for child in Path(cmd[1]).iterdir():
+                    shutil.rmtree(child) if child.is_dir() else child.unlink()
+            if "locachy-storage" in str(cmd):
+                name = cmd[cmd.index("--name") + 1]
+                vf = shared_root / "etc/locachy/volumes.json"
+                data = json.loads(vf.read_text()) if vf.is_file() else {"schema": 1, "volumes": []}
+                data["volumes"].append({"name": name})
+                vf.write_text(json.dumps(data))
+            if "locachy-winmaint" in str(cmd):
+                sf = shared_root / "var/lib/locachy/winmaint/state.json"
+                sf.parent.mkdir(parents=True, exist_ok=True)
+                sf.write_text(json.dumps({"schema": 1, "disk": "/dev/nvme1n1",
+                                          "partitions": {"c": {"sectors": 48 * 2097152}}}) + "\n")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        shared_esp_dir = run_dir / "esp-shared"
+        def shared_fresh_dir(**kw):
+            shared_esp_dir.mkdir(parents=True, exist_ok=True)
+            return str(shared_esp_dir)
+
+        shared_args = self.args(
+            "--root", str(shared_root), "--esp", str(shared_esp), "--yes", "--no-rank-mirrors",
+            "--password-file", str(pw_file),
+            "--extra-volume", "name=data,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared,encrypt=none",
+            "--extra-volume", "name=other,mode=format,dev=/dev/nvme2n1,fs=btrfs,role=data,encrypt=none",
+            "--winmaint-disk", "/dev/nvme1n1", "--winmaint-gib", "48",
+        )
+        expected_tail_mib = str(48 * 1024 + i.WINMAINT_OVERHEAD_MIB)
+        with mock.patch.object(i, "run", shared_fake_run), \
+             mock.patch.object(i.subprocess, "Popen", FakePopen), \
+             mock.patch.object(i.tempfile, "mkdtemp", shared_fresh_dir), \
+             mock.patch.object(i, "filesystem", fake_fs), \
+             mock.patch.object(i, "output", lambda cmd: "gpt" if "PTTYPE" in cmd else self.multi_block_output(cmd)), \
+             mock.patch.object(i, "cpu_model", lambda lvl: "ivybridge"), \
+             mock.patch.object(i, "update_source", lambda a: ("off", "main", "")), \
+             mock.patch.object(i, "apps_source", lambda a: ("off", "main")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            i.install(shared_args, shared_root, shared_esp, self.root_fs, self.esp_fs, "x86-64-v3")
+
+        st_indices = [idx for idx, c in enumerate(shared_calls) if any("locachy-storage" in str(x) for x in c)]
+        wm_indices = [idx for idx, c in enumerate(shared_calls) if any("locachy-winmaint" in str(x) for x in c)]
+        efi_indices = [idx for idx, c in enumerate(shared_calls) if any("locachy-efi" in str(x) for x in c)]
+        self.assertEqual(len(st_indices), 2)
+        self.assertEqual(len(wm_indices), 1)
+        self.assertEqual(len(efi_indices), 1)
+        # extra-volumes runs before winmaint, and winmaint runs after the boot image is written and registered.
+        self.assertLess(max(st_indices), wm_indices[0])
+        self.assertLess(efi_indices[0], wm_indices[0])
+        data_cmd = shared_calls[st_indices[0]]
+        other_cmd = shared_calls[st_indices[1]]
+        self.assertEqual(data_cmd[2:], [
+            str(SOURCE / "link/locachy-storage"), "create", "--root", str(shared_root), "--no-mount",
+            "--name", "data", "--mode", "format", "--role", "shared",
+            "--dev", "/dev/nvme1n1", "--fs", "ext4", "--encrypt", "none",
+            "--reserve-tail-mib", expected_tail_mib,
+        ])
+        self.assertNotIn("--reserve-tail-mib", other_cmd)
+        self.assertEqual(shared_calls[wm_indices[0]][2:], [
+            str(SOURCE / "link/locachy-winmaint"), "create",
+            "--root", str(shared_root), "--disk", "/dev/nvme1n1", "--size-gib", "48",
+        ])
+
+
+    # Maintenance Windows' tail measured as locachy-winmaint create measures it (starts in 512-byte sectors).
+    FLOOR = (3 << 20) + (512 << 20) + (8 << 30) + (16 << 30)  # the system disk's least size with the default swap
+    GAP_BLOCK = {"blockdevices": [
+        {"path": "/dev/nvme0n1", "maj:min": "259:0", "type": "disk", "size": 512 << 30, "model": "Primary NVMe",
+         "serial": "SER-0", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": []},
+        # 100 GiB from 1 MiB and 180 GiB from 300 GiB: 220 GiB unallocated in between, 20 GiB at the end.
+        {"path": "/dev/nvme1n1", "maj:min": "259:10", "type": "disk", "size": 500 << 30, "model": "Gap",
+         "serial": "GAP-1", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": [
+             {"path": "/dev/nvme1n1p1", "maj:min": "259:11", "type": "part", "size": 100 << 30, "start": 2048,
+              "fstype": "ext4", "label": "a", "parttypename": "Linux filesystem", "mountpoints": [None]},
+             {"path": "/dev/nvme1n1p2", "maj:min": "259:12", "type": "part", "size": 180 << 30,
+              "start": (300 << 30) // 512, "fstype": "ext4", "label": "b", "parttypename": "Linux filesystem",
+              "mountpoints": [None]}]},
+        # Exactly the tail 48 GiB of C: and 256 MiB need (p1 ends at 2099200, backup GPT takes 33 sectors);
+        # one sector less on the next disk.
+        {"path": "/dev/nvme2n1", "maj:min": "259:20", "type": "disk",
+         "size": (2048 + (1 << 30) // 512 + (48 * 1024 + 256) * 2048 + 33) * 512, "model": "Exact",
+         "serial": "EX-2", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": [
+             {"path": "/dev/nvme2n1p1", "maj:min": "259:21", "type": "part", "size": 1 << 30, "start": 2048,
+              "fstype": "ext4", "label": "a", "parttypename": "Linux filesystem", "mountpoints": [None]}]},
+        {"path": "/dev/nvme3n1", "maj:min": "259:30", "type": "disk",
+         "size": (2048 + (1 << 30) // 512 + (48 * 1024 + 256) * 2048 + 32) * 512, "model": "Short",
+         "serial": "SH-3", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": [
+             {"path": "/dev/nvme3n1p1", "maj:min": "259:31", "type": "part", "size": 1 << 30, "start": 2048,
+              "fstype": "ext4", "label": "a", "parttypename": "Linux filesystem", "mountpoints": [None]}]},
+        {"path": "/dev/nvme4n1", "maj:min": "259:40", "type": "disk", "size": 1000 << 30, "model": "4Kn",
+         "serial": "4K-4", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 4096,
+         "mountpoints": [None], "children": []},
+        {"path": "/dev/nvme5n1", "maj:min": "259:50", "type": "disk", "size": 1000 << 30, "model": "MBR",
+         "serial": "MBR-5", "tran": "nvme", "rm": False, "ro": False, "pttype": "dos", "log-sec": 512,
+         "mountpoints": [None], "children": [
+             {"path": "/dev/nvme5n1p1", "maj:min": "259:51", "type": "part", "size": 500 << 30, "start": 2048,
+              "fstype": "ext4", "label": "a", "parttypename": "Linux filesystem", "mountpoints": [None]}]},
+        {"path": "/dev/nvme6n1", "maj:min": "259:60", "type": "disk", "size": 1000 << 30, "model": "Blank",
+         "serial": "BL-6", "tran": "nvme", "rm": False, "ro": False, "pttype": "", "log-sec": 512,
+         "mountpoints": [None], "children": []},
+        {"path": "/dev/nvme7n1", "maj:min": "259:70", "type": "disk", "size": 1000 << 30, "model": "RawFS",
+         "serial": "RAW-7", "tran": "nvme", "rm": False, "ro": False, "pttype": "", "fstype": "ext4",
+         "log-sec": 512, "mountpoints": [None], "children": []},
+        # A disk that already holds Windows: an ESP, locachy-winmaint's ESP, MSR and C:.
+        {"path": "/dev/nvme8n1", "maj:min": "259:80", "type": "disk", "size": 1000 << 30, "model": "Windows",
+         "serial": "WIN-8", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": [
+             {"path": "/dev/nvme8n1p1", "maj:min": "259:81", "type": "part", "size": 512 << 20, "start": 2048,
+              "fstype": "vfat", "label": "EFI", "parttypename": "EFI System", "partlabel": "EFI system partition",
+              "mountpoints": [None]},
+             {"path": "/dev/nvme8n1p2", "maj:min": "259:82", "type": "part", "size": 128 << 20, "start": 1050624,
+              "fstype": "vfat", "label": "WINMAINT_EP", "parttypename": "EFI System", "partlabel": "LOCACHY_WIN_ESP",
+              "mountpoints": [None]},
+             {"path": "/dev/nvme8n1p3", "maj:min": "259:83", "type": "part", "size": 16 << 20, "start": 1312768,
+              "fstype": "", "label": "", "parttypename": "Microsoft reserved", "partlabel": "LOCACHY_WIN_MSR",
+              "mountpoints": [None]},
+             {"path": "/dev/nvme8n1p4", "maj:min": "259:84", "type": "part", "size": 48 << 30, "start": 1345536,
+              "fstype": "ntfs", "label": "WINMAINT_C", "parttypename": "Microsoft basic data",
+              "partlabel": "LOCACHY_WIN_C", "mountpoints": [None]}]},
+        {"path": "/dev/nvme9n1", "maj:min": "259:90", "type": "disk", "size": FLOOR - 1, "model": "Small",
+         "serial": "SM-9", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": []},
+        {"path": "/dev/nvme10n1", "maj:min": "259:100", "type": "disk", "size": FLOOR, "model": "Floor",
+         "serial": "FL-10", "tran": "nvme", "rm": False, "ro": False, "pttype": "gpt", "log-sec": 512,
+         "mountpoints": [None], "children": []},
+        {"path": "/dev/sdb", "maj:min": "8:16", "type": "disk", "size": 16 << 30, "model": "Live USB",
+         "tran": "usb", "rm": True, "ro": False, "mountpoints": [None], "children": [
+             {"path": "/dev/sdb1", "maj:min": "8:17", "type": "part", "size": 1 << 30, "fstype": "iso9660",
+              "mountpoints": ["/run/archiso/bootmnt"]}]},
+    ]}
+
+    def tree_output(self, tree, command):
+        if command[0] == "findmnt":
+            return json.dumps({"filesystems": [{"target": "/", "source": "airootfs"},
+                                               {"target": "/run/archiso/bootmnt", "source": "/dev/sdb1"}]})
+        if command[:2] == ["lsblk", "--inverse"]:
+            anc = {}
+            for d in tree["blockdevices"]:
+                anc[d["path"]] = d["maj:min"]
+                for c in d.get("children") or []:
+                    anc[c["path"]] = f"{c['maj:min']}\n{d['maj:min']}"
+            if command[-1] not in anc:
+                raise subprocess.CalledProcessError(32, command)
+            return anc[command[-1]]
+        if command[:2] == ["lsblk", "--json"]:
+            def find(nodes, path):
+                for n in nodes:
+                    if n["path"] == path:
+                        return n
+                    got = find(n.get("children") or [], path)
+                    if got:
+                        return got
+            if not command[-1].startswith("/dev/"):
+                return json.dumps(tree)
+            node = find(tree["blockdevices"], command[-1])
+            if not node:
+                raise subprocess.CalledProcessError(32, command)
+            return json.dumps({"blockdevices": [node]})
+        return self.output(command)
+
+    def gap_output(self, command):
+        return self.tree_output(self.GAP_BLOCK, command)
+
+    def test_winmaint_tail_is_measured_as_locachy_winmaint_create_measures_it(self):
+        with mock.patch.object(i, "output", self.gap_output):
+            with self.assertRaisesRegex(ValueError, "unallocated at the end of the disk"):
+                i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme1n1", "--winmaint-gib", "40"))
+            i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "48"))
+            with self.assertRaisesRegex(ValueError, "unallocated at the end of the disk"):
+                i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme3n1", "--winmaint-gib", "48"))
+            with self.assertRaisesRegex(ValueError, "MBR"):
+                i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme5n1", "--winmaint-gib", "48"))
+            with self.assertRaisesRegex(ValueError, "512-byte sectors"):
+                i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme4n1", "--winmaint-gib", "48"))
+            with self.assertRaisesRegex(ValueError, "ext4 filesystem"):
+                i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme7n1", "--winmaint-gib", "48"))
+            i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme6n1", "--winmaint-gib", "48"))
+            # Installed as its own disk, with no partition table, 4Kn disks are refused the same way.
+            with self.assertRaisesRegex(ValueError, "512-byte sectors"):
+                i.check_targets(self.args("--winmaint-disk", "/dev/nvme4n1", "--winmaint-gib", "48"))
+        with mock.patch.object(i, "output", self.gap_output), \
+             mock.patch.object(i, "cpu_model", lambda level: "ivybridge"), \
+             mock.patch.object(i, "tpm_status", lambda: {"tpm_version": 0}), \
+             mock.patch.object(i, "host_security", lambda: None), \
+             mock.patch.object(i, "tpm_advice", lambda st=None: (False, "passphrase", "no TPM")):
+            desc = i.describe(i.make_parser())
+        disks = {d["path"]: d for d in desc["disks"]}
+        self.assertEqual(disks["/dev/nvme1n1"]["free_tail"], (1048575966 - 1006632960 + 1) * 512)
+        self.assertEqual(disks["/dev/nvme1n1"]["log_sec"], 512)
+        self.assertIsNone(disks["/dev/nvme4n1"]["free_tail"])
+        self.assertTrue(disks["/dev/nvme8n1"]["maintenance_windows"])
+        self.assertEqual(disks["/dev/nvme8n1"]["children"][1]["maintenance_windows"], True)
+
+    def test_resume_rechecks_changed_winmaint_inputs_and_keeps_a_recorded_one(self):
+        def check(*argv):
+            with mock.patch.object(i, "output", self.gap_output):
+                i.check_targets(self.args("--root", str(self.root), "--resume", *argv))
+        stages = self.root / ".locachy-installer"
+        stages.mkdir(parents=True, exist_ok=True)
+        # The journal says the winmaint stage succeeded with other inputs: the new ones are checked anyway.
+        (stages / "stages.json").write_text(json.dumps({"schema": 1, "stages": {"winmaint": {"success": True}}}))
+        check("--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "48")
+        with self.assertRaisesRegex(ValueError, "unallocated at the end of the disk"):
+            check("--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "49")
+        state = self.root / "var/lib/locachy/winmaint/state.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"schema": 1, "disk": "/dev/nvme2n1", "partitions": {"c": {"sectors": 48 * 2097152}}}))
+        check("--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "48")
+        with self.assertRaisesRegex(ValueError, "is kept"):
+            check("--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "96")
+        with self.assertRaisesRegex(ValueError, "is kept"):
+            check("--winmaint-disk", "/dev/nvme3n1", "--winmaint-gib", "48")
+        state.write_text("{}")
+        with self.assertRaisesRegex(ValueError, "cannot be read"):
+            check("--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "48")
+        # Resuming on the already-partitioned system disk: enlarged --winmaint-gib is checked
+        # against the real tail left after the system partitions (no blind bypass).
+        state.unlink()
+        mounted = json.loads(json.dumps(self.GAP_BLOCK))
+        mounted["blockdevices"][2]["children"][0]["mountpoints"] = [str(self.root)]
+        with mock.patch.object(i, "output", lambda cmd: self.tree_output(mounted, cmd)), \
+             mock.patch.object(i, "filesystem", lambda p: {"source": "/dev/nvme2n1p1", "target": str(p)}):
+            i.check_targets(self.args("--root", str(self.root), "--esp", str(self.esp), "--resume",
+                                      "--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "48"))
+            with self.assertRaisesRegex(ValueError, "unallocated at the end of the disk"):
+                i.check_targets(self.args("--root", str(self.root), "--esp", str(self.esp), "--resume",
+                                          "--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "49"))
+
+    def test_installing_over_maintenance_windows_is_refused_before_any_write(self):
+        with mock.patch.object(i, "output", self.gap_output):
+            with self.assertRaisesRegex(ValueError, "holds Maintenance Windows partitions; installing here would erase them"):
+                i.check_targets(self.args("--disk", "/dev/nvme8n1"))
+            with self.assertRaisesRegex(ValueError, "nvme8n1p2: a Maintenance Windows partition"):
+                i.check_targets(self.args("--format-esp", "/dev/nvme8n1p2", "--format-root", "/dev/nvme8n1p1"))
+            with self.assertRaisesRegex(ValueError, "nvme8n1p4: a Maintenance Windows partition"):
+                i.check_targets(self.args("--format-esp", "/dev/nvme8n1p1", "--format-root", "/dev/nvme8n1p4"))
+            with self.assertRaisesRegex(ValueError, "holds Maintenance Windows partitions; locachy-storage never formats it"):
+                i.check_targets(self.args("--disk", "/dev/nvme0n1",
+                                          "--extra-volume", "name=d,mode=format,dev=/dev/nvme8n1,fs=ext4,role=shared"))
+            with self.assertRaisesRegex(ValueError, "is a Maintenance Windows partition"):
+                i.check_targets(self.args("--disk", "/dev/nvme0n1",
+                                          "--extra-volume", "name=w,mode=attach,dev=/dev/nvme8n1p4,role=data"))
+            with self.assertRaisesRegex(ValueError, "already holds Maintenance Windows partitions"):
+                i.check_targets(self.args("--disk", "/dev/nvme0n1", "--winmaint-disk", "/dev/nvme8n1", "--winmaint-gib", "48"))
+            with self.assertRaisesRegex(ValueError, "not a whole disk"):
+                i.check_targets(self.args("--disk", "/dev/nvme8n1p1"))
+
+    def test_failed_winmaint_leaves_a_bootable_target_and_resume_rechecks_after_extra_volumes(self):
+        # A failure in Maintenance Windows happens after the boot image is published to the ESP.
+        run_dir = Path(self.tmp.name) / "run-wm-fail"
+        run_dir.mkdir(parents=True)
+        pw_file = Path(self.tmp.name) / "wm-fail.pass"
+        pw_file.write_text("UserPass123")
+        (self.root / "etc/locachy").mkdir(parents=True, exist_ok=True)
+        (self.root / "etc/locachy/packages").write_text("base\n")
+        (self.root / "etc/locachy/rc.conf").write_text('winmaint_size_gib="48"\n')
+        (self.root / "var/lib/locachy").mkdir(parents=True, exist_ok=True)
+        boot_img = self.root / "usr/local/lib/locachy/boot/locachy.efi"
+        boot_img.parent.mkdir(parents=True, exist_ok=True)
+        boot_img.write_bytes(b"EFI")
+
+        fail_wm = [True]
+        calls = []
+        esp_seen = []
+
+        def fake_run(cmd, check=True, **kw):
+            calls.append(cmd)
+            if cmd[0] == "umount" and Path(cmd[1]).is_dir():
+                for child in Path(cmd[1]).iterdir():
+                    shutil.rmtree(child) if child.is_dir() else child.unlink()
+            if "locachy-winmaint" in str(cmd):
+                esp_seen.append(((run_dir / "esp-1/EFI/locachy/locachy.efi").is_file(),
+                                 (run_dir / "esp-1/EFI/BOOT/BOOTX64.EFI").is_file()))
+                if fail_wm[0]:
+                    raise subprocess.CalledProcessError(1, cmd)
+                sf = self.root / "var/lib/locachy/winmaint/state.json"
+                sf.parent.mkdir(parents=True, exist_ok=True)
+                sf.write_text(json.dumps({"schema": 1, "disk": "/dev/nvme2n1",
+                                          "partitions": {"c": {"sectors": 48 * 2097152}}}))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        class FakePopen:
+            def __init__(self, cmd, **kw):
+                self.stdout = iter(["make-root: target built and verified\n"])
+            def wait(self):
+                return 0
+
+        esp_dir = run_dir / "esp-1"
+        def fresh_dir(**kw):
+            esp_dir.mkdir(parents=True, exist_ok=True)
+            return str(esp_dir)
+
+        args = self.args("--root", str(self.root), "--esp", str(self.esp), "--yes", "--no-rank-mirrors",
+                         "--password-file", str(pw_file), "--winmaint-disk", "/dev/nvme2n1", "--winmaint-gib", "48")
+
+        def run_once():
+            with mock.patch.object(i, "run", fake_run), \
+                 mock.patch.object(i.subprocess, "Popen", FakePopen), \
+                 mock.patch.object(i.tempfile, "mkdtemp", fresh_dir), \
+                 mock.patch.object(i, "filesystem", lambda p: self.esp_fs if Path(p) == esp_dir else self.root_fs), \
+                 mock.patch.object(i, "output", lambda cmd: "gpt" if "PTTYPE" in cmd else self.output(cmd)), \
+                 mock.patch.object(i, "cpu_model", lambda lvl: "ivybridge"), \
+                 mock.patch.object(i, "update_source", lambda a: ("off", "main", "")), \
+                 mock.patch.object(i, "apps_source", lambda a: ("off", "main")), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                i.install(args, self.root, self.esp, self.root_fs, self.esp_fs, "x86-64-v3")
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            run_once()
+        # Both EFI/locachy and the fallback were written before locachy-winmaint ran, and boot succeeded.
+        self.assertEqual(esp_seen, [(True, True)])
+        stages_data = json.loads((self.root / ".locachy-installer/stages.json").read_text())
+        self.assertTrue(stages_data["stages"]["boot"]["success"])
+        self.assertNotIn("winmaint", stages_data["stages"])
+
+        # The disk helper can fail after saving its GPT state but before
+        # writing the Windows container entry. Resume finishes only that file.
+        calls.clear()
+        fail_wm[0] = False
+        sf = self.root / "var/lib/locachy/winmaint/state.json"
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        sf.write_text(json.dumps({"schema": 1, "disk": "/dev/nvme2n1",
+                                  "partitions": {"c": {"sectors": 48 * 2097152}}}))
+        (self.root / "etc/passwd").write_text("user:x:1000:1000::/home/user:/bin/bash\n")
+        args.resume = True
+        helper = i.winmaint_helper()
+        with mock.patch.object(i, "winmaint_helper", return_value=helper), \
+             mock.patch.object(helper, "parse_gpt_disk", return_value={}) as parse, \
+             mock.patch.object(helper, "verify_state_against_gpt") as verify:
+            run_once()
+        parse.assert_called_once_with("/dev/nvme2n1")
+        verify.assert_called_once()
+        self.assertFalse(any("locachy-boot" in str(c) or "locachy-winmaint" in str(c) for c in calls))
+        self.assertTrue(i.winmaint_container_present(self.root))
+        self.assertTrue(i.INSTALL_STATE.Stages(self.root / ".locachy-installer").stages["winmaint"]["success"])
+
+        # Once extra-volumes has completed, a resumed run with a changed --winmaint-gib on that
+        # disk checks the real tail on disk, not the pre-format formula (since format won't run again).
+        r2 = self.root.parent / "target-after-extra"
+        (r2 / ".locachy-installer").mkdir(parents=True)
+        (r2 / ".locachy-installer/stages.json").write_text(json.dumps({"schema": 1, "stages": {
+            "extra-volumes": {"success": True}}}))
+        volume_file = r2 / "etc/locachy/volumes.json"
+        volume_file.parent.mkdir(parents=True)
+        volume_file.write_text(json.dumps({"schema": 1, "volumes": [{"name": "data"}]}))
+        with mock.patch.object(i, "output", self.gap_output):
+            with self.assertRaisesRegex(ValueError, "unallocated at the end of the disk"):
+                i.check_targets(self.args(
+                    "--root", str(r2), "--resume",
+                    "--extra-volume", "name=data,mode=format,dev=/dev/nvme1n1,fs=ext4,role=shared",
+                    "--winmaint-disk", "/dev/nvme1n1", "--winmaint-gib", "48",
+                ))
+
+    def test_unrecorded_extra_volume_failure_is_not_reformatted_on_resume(self):
+        args = self.args("--extra-volume", "name=data,mode=format,dev=/dev/nvme1n1")
+        with mock.patch.object(i, "run", side_effect=subprocess.CalledProcessError(1, "storage")) as run, \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(subprocess.CalledProcessError):
+                i.apply_extra_volumes(args, self.root)
+            with self.assertRaisesRegex(ValueError, "will not format them again"):
+                i.apply_extra_volumes(args, self.root)
+        run.assert_called_once()
+        self.assertTrue(i.extra_volume_pending(self.root, "data").is_file())
+
+    def test_system_disk_floor_includes_the_partition_slack(self):
+        with mock.patch.object(i, "output", self.gap_output):
+            with self.assertRaisesRegex(ValueError, "at least 25 GiB"):
+                i.check_targets(self.args("--disk", "/dev/nvme9n1"))
+            i.check_targets(self.args("--disk", "/dev/nvme10n1"))
+        # The floor is what partitioning needs: 1 MiB before the first partition, 2 MiB kept at the end.
+        self.assertEqual(i.DISK_SLACK_BYTES + i.ESP_BYTES + (8 << 30) + i.MIN_ROOT_BYTES, self.FLOOR)
+        # With Maintenance Windows on the system disk, check_targets and prepare_partitions share the exact floor.
+        wm_floor = self.FLOOR + (48 * 1024 + i.WINMAINT_OVERHEAD_MIB) * (1 << 20)
+        tree = json.loads(json.dumps(self.GAP_BLOCK))
+        tree["blockdevices"][9]["size"] = wm_floor - 1
+        tree["blockdevices"][10]["size"] = wm_floor
+        with mock.patch.object(i, "output", lambda cmd: self.tree_output(tree, cmd)):
+            with self.assertRaisesRegex(ValueError, "with Maintenance Windows"):
+                i.check_targets(self.args("--disk", "/dev/nvme9n1", "--winmaint-disk", "/dev/nvme9n1", "--winmaint-gib", "48"))
+            i.check_targets(self.args("--disk", "/dev/nvme10n1", "--winmaint-disk", "/dev/nvme10n1", "--winmaint-gib", "48"))
+        part_target = self.root.parent / "floor-target"
+        with mock.patch.object(i, "run", lambda cmd, **kw: None), \
+             mock.patch.object(i, "disk_size_bytes", lambda d: wm_floor):
+            i.prepare_partitions(self.args("--disk", "/dev/nvme10n1", "--swap-gib", "8",
+                                           "--winmaint-disk", "/dev/nvme10n1", "--winmaint-gib", "48",
+                                           "--root", str(part_target), "--esp", str(part_target / "efi")))
+        with mock.patch.object(i, "run", lambda cmd, **kw: None), \
+             mock.patch.object(i, "disk_size_bytes", lambda d: wm_floor - 1), \
+             self.assertRaisesRegex(ValueError, "no room"):
+            i.prepare_partitions(self.args("--disk", "/dev/nvme9n1", "--swap-gib", "8",
+                                           "--winmaint-disk", "/dev/nvme9n1", "--winmaint-gib", "48",
+                                           "--root", str(part_target), "--esp", str(part_target / "efi")))
 
 
 if __name__ == "__main__":

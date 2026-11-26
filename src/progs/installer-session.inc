@@ -58,6 +58,26 @@ static int session_fd(const char *action)
     json_object_object_add(state, "ime_name", json_object_new_string(nimes ? imes[c.ime].name : "off"));
     json_object_object_add(state, "machine_name", json_object_new_string(c.machine > 0 ? machines[c.machine].name : ""));
     json_object_object_add(state, "level_name", json_object_new_string(c.level > 0 ? levels[c.level - 1] : "auto"));
+    json_object_object_add(state, "array_name", json_object_new_string(c.array_name));
+    json_object_object_add(state, "array_raid_name", json_object_new_string(raid_name(c.array_raid)));
+    json_object_object_add(state, "array_role_name", json_object_new_string(role_name(c.array_role)));
+    json_object_object_add(state, "array_encrypt", json_object_new_int(c.array_encrypt));
+    json_object_object_add(state, "array_compute_storage", json_object_new_int(c.array_compute_storage));
+    json_object_object_add(state, "winmaint_disk", json_object_new_string(c.winmaint_disk));
+    json_object_object_add(state, "winmaint_gib", json_object_new_int(c.winmaint_gib));
+    struct json_object *extras = json_object_new_array();
+    for (int i = 0; i < c.nextra; i++) {
+        struct json_object *item = json_object_new_object();
+        json_object_object_add(item, "disk", json_object_new_string(c.extra[i].disk));
+        json_object_object_add(item, "part", json_object_new_string(c.extra[i].part));
+        json_object_object_add(item, "name", json_object_new_string(c.extra[i].name));
+        json_object_object_add(item, "action", json_object_new_int(c.extra[i].action));
+        json_object_object_add(item, "role_name", json_object_new_string(role_name(c.extra[i].role)));
+        json_object_object_add(item, "encrypt", json_object_new_int(c.extra[i].encrypt));
+        json_object_object_add(item, "compute_storage", json_object_new_int(c.extra[i].compute_storage));
+        json_object_array_add(extras, item);
+    }
+    json_object_object_add(state, "extra_disks", extras);
     const char *text = json_object_to_json_string_ext(state, JSON_C_TO_STRING_PLAIN);
     size_t size = strlen(text), done = 0;
     int fd = memfd_create("locachy-installer-session", MFD_ALLOW_SEALING | MFD_CLOEXEC);
@@ -170,6 +190,86 @@ static int restore_session(int fd, char *action, size_t action_size)
     for (int i = 0; i < nlevels; i++) if (!strcmp(levels[i], level)) { next.level = i + 1; have_level = 1; }
     ok &= have_ime && have_machine && have_level && session_string(state, "ime_name") &&
           session_string(state, "machine_name") && session_string(state, "level_name");
+    /* Optional multi-disk storage and Maintenance Windows choices (absent in
+     * sessions from older media; strictly validated when present). */
+    copy(next.array_name, sizeof next.array_name, "pool");
+    next.array_raid = raid_index("raid1");
+    next.array_role = role_index("shared");
+    next.array_encrypt = VENC_AUTO;
+    next.array_compute_storage = 0;
+    next.winmaint_gib = winmaint_default_gib;
+    if (jget(state, "array_name")) {
+        const char *s = jstr(state, "array_name");
+        if (!session_string(state, "array_name") || strlen(s) >= sizeof next.array_name) ok = 0;
+        else copy(next.array_name, sizeof next.array_name, s);
+    }
+    if (jget(state, "array_raid_name")) {
+        const char *s = jstr(state, "array_raid_name");
+        int found = 0;
+        if (!session_string(state, "array_raid_name")) ok = 0;
+        for (int i = 0; i < nstorage_raids; i++) if (!strcmp(storage_raids[i], s)) { next.array_raid = i; found = 1; }
+        ok &= found;
+    }
+    if (jget(state, "array_role_name")) {
+        const char *s = jstr(state, "array_role_name");
+        int found = 0;
+        if (!session_string(state, "array_role_name")) ok = 0;
+        for (int i = 0; i < nstorage_roles; i++) if (!strcmp(storage_roles[i], s)) { next.array_role = i; found = 1; }
+        ok &= found;
+    }
+    if (jget(state, "array_encrypt")) {
+        long long n = jint(state, "array_encrypt");
+        if (!json_object_is_type(jget(state, "array_encrypt"), json_type_int) || n < VENC_AUTO || n > VENC_NONE) ok = 0;
+        else next.array_encrypt = (int)n;
+    }
+    if (jget(state, "array_compute_storage")) {
+        long long n = jint(state, "array_compute_storage");
+        if (!json_object_is_type(jget(state, "array_compute_storage"), json_type_int) || n < 0 || n > 1) ok = 0;
+        else next.array_compute_storage = (int)n;
+    }
+    if (jget(state, "winmaint_disk")) {
+        const char *s = jstr(state, "winmaint_disk");
+        if (!session_string(state, "winmaint_disk") || strlen(s) >= sizeof next.winmaint_disk) ok = 0;
+        else copy(next.winmaint_disk, sizeof next.winmaint_disk, s);
+    }
+    if (jget(state, "winmaint_gib")) {
+        long long n = jint(state, "winmaint_gib");
+        if (!json_object_is_type(jget(state, "winmaint_gib"), json_type_int) ||
+            n < winmaint_min_gib || n > winmaint_max_gib) ok = 0;
+        else next.winmaint_gib = (int)n;
+    }
+    if (jget(state, "extra_disks")) {
+        struct json_object *extras = jget(state, "extra_disks");
+        if (!json_object_is_type(extras, json_type_array) || jlen(extras) > MAX_DISKS) {
+            ok = 0;
+        } else {
+            for (int i = 0; i < jlen(extras); i++) {
+                struct json_object *it = jat(extras, i);
+                if (!json_object_is_type(it, json_type_object)) { ok = 0; break; }
+                struct extra_disk *ex = &next.extra[next.nextra++];
+                const char *dk = jstr(it, "disk"), *pt = jstr(it, "part"), *nm = jstr(it, "name");
+                const char *rn = jstr(it, "role_name");
+                long long act_v = jint(it, "action"), enc_v = jint(it, "encrypt"), cs_v = jint(it, "compute_storage");
+                int rfound = 0;
+                for (int r = 0; r < nstorage_roles; r++) if (!strcmp(storage_roles[r], rn)) { ex->role = r; rfound = 1; }
+                if (!session_string(it, "disk") || !session_string(it, "part") || !session_string(it, "name") ||
+                    !session_string(it, "role_name") || !rfound ||
+                    strlen(dk) >= sizeof ex->disk || strlen(pt) >= sizeof ex->part || strlen(nm) >= sizeof ex->name ||
+                    !json_object_is_type(jget(it, "action"), json_type_int) || act_v < EXTRA_ATTACH || act_v > EXTRA_ARRAY ||
+                    !json_object_is_type(jget(it, "encrypt"), json_type_int) || enc_v < VENC_AUTO || enc_v > VENC_NONE ||
+                    !json_object_is_type(jget(it, "compute_storage"), json_type_int) || cs_v < 0 || cs_v > 1) {
+                    ok = 0;
+                    break;
+                }
+                copy(ex->disk, sizeof ex->disk, dk);
+                copy(ex->part, sizeof ex->part, pt);
+                copy(ex->name, sizeof ex->name, nm);
+                ex->action = (int)act_v;
+                ex->encrypt = (int)enc_v;
+                ex->compute_storage = (int)cs_v;
+            }
+        }
+    }
     int next_recovered = json_object_is_type(jget(state, "recovered"), json_type_boolean) ?
                          json_object_get_boolean(jget(state, "recovered")) : 0;
     long long next_lang = jint(state, "ui_lang");
@@ -270,7 +370,11 @@ static int refresh_installer(const char *action)
         if (result) json_object_put(result);
         return -1;
     }
-    if (!result || !frontend[0] || !hash[0]) {
+    struct json_object *snapshot_value = jget(result, "snapshot");
+    const char *snapshot = jstr(result, "snapshot");
+    if (!result || !frontend[0] || !hash[0] ||
+        (snapshot_value && (!json_object_is_type(snapshot_value, json_type_string) || strlen(snapshot) != 64 ||
+                            strspn(snapshot, "0123456789abcdef") != 64))) {
         if (result) json_object_put(result);
         tell(1, "%s", _("The source or installer could not be updated. Nothing was continued; the terminal shows why."));
         return -1;
@@ -281,7 +385,8 @@ static int refresh_installer(const char *action)
     char *slash = strrchr(checkout, '/');
     if (slash && !strcmp(slash, "/src")) *slash = '\0';
     if (!strcmp(action, "continue") && stopped_installation) {
-        const char *saved = jstr(stopped_installation, "source");
+        const char *saved = jstr(jget(stopped_installation, "source"), "commit");
+        if (!saved[0]) saved = jstr(stopped_installation, "source"); /* legacy resume record */
         if (saved[0] && revision[0] && strcmp(saved, revision) != 0) {
             /* A stopped run's target stays the authority for resume. The
              * refreshed binary may continue it only after the person sees
@@ -293,11 +398,13 @@ static int refresh_installer(const char *action)
     if (current && !strcmp(current, hash)) {
         if (setenv("LOCACHY_INSTALL_SNAPSHOT_ROOT", checkout, 1) < 0 ||
             setenv("LOCACHY_INSTALL_SNAPSHOT_COMMIT", revision, 1) < 0 ||
-            setenv("LOCACHY_INSTALLER_REVISION", revision, 1) < 0) {
+            setenv("LOCACHY_INSTALLER_REVISION", revision, 1) < 0 ||
+            (snapshot[0] && setenv("LOCACHY_INSTALL_SNAPSHOT", snapshot, 1) < 0)) {
             json_object_put(result);
             tell(1, "%s", _("Cannot preserve the installer choices for its update."));
             return -1;
         }
+        if (!snapshot[0]) unsetenv("LOCACHY_INSTALL_SNAPSHOT");
         json_object_put(result);
         return 0;
     }
@@ -310,26 +417,27 @@ static int refresh_installer(const char *action)
     /* Only exec's environment may claim the new executable's input hash.
      * On failure this process must still identify its original binary. */
     const char *names[] = { "LOCACHY_INSTALL_SNAPSHOT_ROOT=", "LOCACHY_INSTALL_SNAPSHOT_COMMIT=",
-                            "LOCACHY_INSTALLER_INPUT_HASH=", "LOCACHY_INSTALLER_REVISION=" };
-    const char *values[] = { checkout, revision, hash, revision };
-    char *updates[4] = {0};
-    size_t count = 0, used = 0;
+                            "LOCACHY_INSTALLER_INPUT_HASH=", "LOCACHY_INSTALLER_REVISION=",
+                            "LOCACHY_INSTALL_SNAPSHOT=" };
+    const char *values[] = { checkout, revision, hash, revision, snapshot[0] ? snapshot : NULL };
+    char *updates[sizeof names / sizeof names[0]] = {0};
+    size_t count = 0, used = 0, n = sizeof updates / sizeof updates[0];
     while (environ[count]) count++;
-    char **environment = calloc(count + 5, sizeof *environment);
+    char **environment = calloc(count + n + 1, sizeof *environment);
     int ready = environment != NULL;
-    for (size_t i = 0; i < 4 && ready; i++) {
-        if (asprintf(&updates[i], "%s%s", names[i], values[i]) < 0) ready = 0;
+    for (size_t i = 0; i < n && ready; i++) {
+        if (values[i] && asprintf(&updates[i], "%s%s", names[i], values[i]) < 0) ready = 0;
     }
     if (ready) {
         for (size_t i = 0; i < count; i++) {
             int replace = 0;
-            for (size_t k = 0; k < 4; k++) replace |= !strncmp(environ[i], names[k], strlen(names[k]));
+            for (size_t k = 0; k < n; k++) replace |= !strncmp(environ[i], names[k], strlen(names[k]));
             if (!replace) environment[used++] = environ[i];
         }
-        for (size_t i = 0; i < 4; i++) environment[used++] = updates[i];
+        for (size_t i = 0; i < n; i++) if (updates[i]) environment[used++] = updates[i];
     }
     if (!ready || fcntl(fd, F_SETFD, 0) < 0) {
-        for (size_t i = 0; i < 4; i++) free(updates[i]);
+        for (size_t i = 0; i < n; i++) free(updates[i]);
         free(environment);
         close(fd);
         json_object_put(result);
@@ -345,7 +453,7 @@ static int refresh_installer(const char *action)
     console_restore();
     execve(frontend, next, environment);
     close(fd);
-    for (size_t i = 0; i < 4; i++) free(updates[i]);
+    for (size_t i = 0; i < n; i++) free(updates[i]);
     free(environment);
     json_object_put(result);
     console_take();

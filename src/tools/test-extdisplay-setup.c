@@ -496,11 +496,78 @@ static void automatic_flow(void)
     CHECK(extdisplay_setup_line(&s, "preparing cable1 carrier", NULL, 0) == EXTDISPLAY_SETUP_EV_BROKEN);
 }
 
+static void carrier_lost_hotplug(void)
+{
+    int sv[2];
+    CHECK(channel(sv) == 0);
+    if (failures) return;
+    struct extdisplay_setup s;
+    struct extdisplay_auto a;
+    extdisplay_setup_init(&s, sv[0]);
+    extdisplay_auto_init(&a);
+
+    /* Initial watch -> single candidate -> automatic pair -> paired session. */
+    CHECK(extdisplay_setup_watch(&s) == 0);
+    CHECK(strcmp(request(sv[1]), "watch") == 0);
+    CHECK(extdisplay_setup_line(&s, "iface tb0 thunderbolt-net up 8 02:00:00:00:00:01", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST);
+    CHECK(extdisplay_auto_step(&a, &s) == 1 && s.state == EXTDISPLAY_SETUP_PAIRING);
+    CHECK(strcmp(request(sv[1]), "pair tb0 8 02:00:00:00:00:01") == 0);
+    CHECK(extdisplay_setup_line(&s, "lease tb0 fe80::1 27183", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "code ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YQ", NULL, 0) == EXTDISPLAY_SETUP_EV_CODE);
+    int pair[2];
+    CHECK(stream_pair(pair) == 0);
+    CHECK(extdisplay_setup_line(&s, "paired", &pair[1], 1) == EXTDISPLAY_SETUP_EV_PAIRED);
+    close(s.stream);
+    s.stream = -1;
+    close(pair[0]);
+
+    /* Cable unplugged mid-session: broker reports carrier-lost. */
+    CHECK(extdisplay_setup_line(&s, "ended carrier-lost", NULL, 0) == EXTDISPLAY_SETUP_EV_ENDED);
+    CHECK(s.state == EXTDISPLAY_SETUP_LIST);
+    CHECK(strstr(extdisplay_setup_reason_text(s.reason), "Waiting for the cable") != NULL);
+    extdisplay_auto_after_session(&a, &s);
+    CHECK(a.enabled == 1 && a.suppressed == 0 && s.state == EXTDISPLAY_SETUP_SCANNING);
+    CHECK(strcmp(request(sv[1]), "scan") == 0);
+    /* Empty scan while cable is out: stays waiting, does not close or pair. */
+    CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST);
+    CHECK(extdisplay_auto_step(&a, &s) == 0 && s.state == EXTDISPLAY_SETUP_LIST && s.count == 0);
+
+    /* Cable replugged: broker announces changed -> rescan -> auto-pairs new interface. */
+    CHECK(extdisplay_setup_line(&s, "changed", NULL, 0) == EXTDISPLAY_SETUP_EV_CHANGED);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_CHANGED);
+    CHECK(extdisplay_auto_step(&a, &s) == 1 && s.state == EXTDISPLAY_SETUP_SCANNING);
+    CHECK(strcmp(request(sv[1]), "scan") == 0);
+    CHECK(extdisplay_setup_line(&s, "iface tb1 thunderbolt-net up 11 02:00:00:00:00:01", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST);
+    CHECK(extdisplay_auto_step(&a, &s) == 1 && s.state == EXTDISPLAY_SETUP_PAIRING);
+    CHECK(strcmp(request(sv[1]), "pair tb1 11 02:00:00:00:00:01") == 0);
+
+    /* Carrier-lost during waiting also returns to waiting and auto-pairs on return,
+     * while ambiguity (two live candidates) still waits for user choice. */
+    CHECK(extdisplay_setup_line(&s, "ended carrier-lost", NULL, 0) == EXTDISPLAY_SETUP_EV_ENDED);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_ENDED);
+    CHECK(a.enabled == 1 && a.suppressed == 0 && s.state == EXTDISPLAY_SETUP_SCANNING);
+    CHECK(strcmp(request(sv[1]), "scan") == 0);
+    CHECK(extdisplay_setup_line(&s, "iface tb1 thunderbolt-net up 12 02:00:00:00:00:01", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "iface tb2 thunderbolt-net up 13 02:00:00:00:00:02", NULL, 0) == EXTDISPLAY_SETUP_EV_NONE);
+    CHECK(extdisplay_setup_line(&s, "end", NULL, 0) == EXTDISPLAY_SETUP_EV_LIST);
+    extdisplay_auto_on_event(&a, &s, EXTDISPLAY_SETUP_EV_LIST);
+    CHECK(extdisplay_auto_step(&a, &s) == 0 && s.state == EXTDISPLAY_SETUP_LIST);
+
+    close(sv[0]);
+    close(sv[1]);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--control-fd") == 0 && strcmp(argv[2], "3") == 0) return stub();
     flow();
     automatic_flow();
+    carrier_lost_hotplug();
     cancelled();
     released();
     errors_and_eof();

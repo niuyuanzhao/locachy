@@ -195,6 +195,11 @@ int open_containers(char names[][OPEN_NAME], int max)
 }
 int open_window_ids(const char *name, char ids[][OPEN_WINDOW_ID], int max)
 { (void)name; (void)ids; (void)max; return 0; }
+int open_window_matches(const char *name, const char *app_id, const char *title)
+{ (void)name; (void)app_id; (void)title; return 0; }
+int open_window_qemu(const char *app_id) { (void)app_id; return 0; }
+int open_window_vm_tagged(const char *app_id, const char *title) { (void)app_id; (void)title; return 0; }
+int open_vm(const char *name) { (void)name; return 0; }
 int open_candidates(const char *type, char names[][OPEN_NAME], int max) { (void)type;(void)names;(void)max;return 0; }
 int open_rule(const char *type, char *name, size_t size) { (void)type;(void)name;(void)size;return OPEN_NO_RULE; }
 int open_set_rule(const char *type, const char *value) { (void)type;(void)value;return 0; }

@@ -25,9 +25,11 @@ openssl
 iproute2
 util-linux
 dosfstools
+mtools
 e2fsprogs
 efibootmgr
 parted
+gptfdisk
 btrfs-progs
 cryptsetup
 nvme-cli
@@ -45,6 +47,7 @@ freetype2
 fontconfig
 libinput
 libnm
+glib2
 json-c
 libxkbcommon
 libx11

@@ -1,0 +1,317 @@
+#!/usr/bin/python3 -I
+"""Native OpenSSH in locachy-net. The listener and sessions share a cgroup."""
+
+import errno
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+CLIENT = "/usr/local/lib/locachy/tailnet-ssh-client"
+SSHD = "/usr/bin/sshd"
+NS = Path("/run/netns/locachy-net")
+RESOLVER = Path("/etc/netns/locachy-net/resolv.conf")
+BASE = Path("/etc/locachy/tailnet-ssh")
+KEYS = BASE / "authorized_keys"
+HOST_KEY = BASE / "ssh_host_ed25519_key"
+HOST_PUBLIC_KEY = Path(str(HOST_KEY) + ".pub")
+RUN = Path("/run/locachy/tailnet-ssh")
+CONFIG = RUN / "sshd_config"
+GROUP = Path("/sys/fs/cgroup/locachy-tailnet-ssh")
+TABLE = "locachy-tailnet-ssh"
+DEVICE = "tailscale0"
+PORT = 22
+PREFIXES = tuple(map(ipaddress.ip_network, ("100.64.0.0/10", "fd7a:115c:a1e0::/48")))
+# linux/rtnetlink.h: RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR.
+ADDR_EVENTS = 0x1 | 0x10 | 0x100
+
+
+def log(message):
+    print(f"tailnet-ssh-client: {message}", file=sys.stderr, flush=True)
+
+
+def owned(info, kind, forbidden):
+    return (kind(info.st_mode) and info.st_uid == info.st_gid == 0
+            and not info.st_mode & forbidden)
+
+
+def trusted_dir(path):
+    return owned(path.lstat(), stat.S_ISDIR, 0o022)
+
+
+def ensure_host_key():
+    if not trusted_dir(BASE.parent):
+        raise RuntimeError(f"unsafe SSH configuration parent: {BASE.parent}")
+    # The unprivileged key lookup must be able to traverse both directories.
+    for directory in (BASE, KEYS):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        else:
+            directory.chmod(0o755)
+        if not trusted_dir(directory):
+            raise RuntimeError(f"unsafe SSH configuration directory: {directory}")
+    try:
+        info = HOST_KEY.lstat()
+    except FileNotFoundError:
+        if os.path.lexists(HOST_PUBLIC_KEY):
+            raise RuntimeError(f"public key exists without its SSH host private key: {HOST_KEY}")
+        # Generate on the installed node, not at build time. Generate in a
+        # private staging directory and publish the private key atomically.
+        with tempfile.TemporaryDirectory(prefix=".key-", dir=BASE) as staging:
+            private = Path(staging) / HOST_KEY.name
+            checked("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private),
+                    stdin=subprocess.DEVNULL)
+            info = private.lstat()
+            if not owned(info, stat.S_ISREG, 0o177):
+                raise RuntimeError(f"ssh-keygen created an unsafe host key: {private}")
+            os.link(private, HOST_KEY)
+    if not owned(info, stat.S_ISREG, 0o177):
+        raise RuntimeError(f"unsafe SSH host key: {HOST_KEY}")
+
+
+def authorized_keys(user, uid):
+    # OpenSSH runs this as nobody. Only regular local accounts, and only the
+    # explicitly enrolled file; never fall back to a user's own authorized_keys.
+    if (not user or user.startswith(".") or "/" in user or user == "root"
+            or not uid.isdecimal() or not 1000 <= int(uid) <= 60000):
+        return
+    try:
+        if not all(map(trusted_dir, (BASE.parent, BASE, KEYS))):
+            return
+        fd = os.open(KEYS / user, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as source:
+            if owned(os.fstat(fd), stat.S_ISREG, 0o022):
+                shutil.copyfileobj(source, sys.stdout.buffer)
+    except OSError:
+        pass  # No enrollment, inaccessible file, or unsafe path: no keys.
+
+
+def checked(*argv, **kwargs):
+    return subprocess.run(argv, check=True, timeout=5, **kwargs)
+
+
+def addresses():
+    # Dump all links so a normal missing device is not confused with an ip
+    # failure. Do not infer our addresses from the host routing table or DNS.
+    links = json.loads(checked("ip", "-j", "address", "show", stdout=subprocess.PIPE).stdout)
+    result = set()
+    for link in links:
+        if link["ifname"] != DEVICE or "UP" not in link["flags"]:
+            continue
+        for info in link.get("addr_info", ()):
+            if info.get("scope") != "global" or any(
+                info.get(flag) or flag in info.get("flags", ())
+                for flag in ("tentative", "dadfailed")
+            ):
+                continue
+            addr = ipaddress.ip_address(info["local"])
+            if any(addr in prefix for prefix in PREFIXES):
+                result.add(addr)
+    return tuple(sorted(result, key=lambda addr: (addr.version, int(addr))))
+
+
+def firewall(bound=()):
+    # Linux is a weak host: even an exact ListenAddress can be reached via
+    # another interface. Reject there (including lo) before sshd starts. A
+    # separate table survives network-client's atomic rebuild of its own table.
+    text = f"destroy table inet {TABLE}\n"
+    if bound:
+        rules = []
+        for addr in bound:
+            family = "ip" if addr.version == 4 else "ip6"
+            rules.append(f'  iifname != "{DEVICE}" {family} daddr {addr} tcp dport {PORT} drop\n')
+        text += (f"table inet {TABLE} {{\n chain input {{\n"
+                 "  type filter hook input priority filter; policy accept;\n"
+                 + "".join(rules) + " }\n}\n")
+    checked("nft", "-f", "-", input=text, text=True)
+
+
+def ssh_config(bound):
+    if not bound:
+        raise ValueError("refusing to configure OpenSSH without a tailnet address")
+    lines = "".join(f"ListenAddress {a if a.version == 4 else f'[{a}]'}:{PORT}\n" for a in bound)
+    return lines + f"""Port {PORT}
+HostKey {HOST_KEY}
+PidFile none
+UsePAM no
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+HostbasedAuthentication no
+GSSAPIAuthentication no
+AuthorizedKeysFile none
+AuthorizedKeysCommand {CLIENT} --authorized-keys %u %U
+AuthorizedKeysCommandUser nobody
+StrictModes yes
+DisableForwarding yes
+PermitTunnel no
+PermitUserRC no
+PermitUserEnvironment no
+UseDNS no
+LogLevel VERBOSE
+Subsystem sftp internal-sftp
+"""
+
+
+def drain(server):
+    # OpenSSH PTYs and ordinary commands can setsid(), so a process-group
+    # signal is insufficient, even when process 1 stops the service itself.
+    if server is not None and server.poll() is None:
+        server.terminate()
+    (GROUP / "cgroup.kill").write_text("1\n")
+    if server is not None:
+        server.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while "populated 0" not in (GROUP / "cgroup.events").read_text().splitlines():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("SSH cgroup did not drain; keeping its firewall in place")
+        time.sleep(0.05)
+
+
+def attach():
+    # Called in the child, before exec and before it can fork any sessions.
+    (GROUP / "cgroup.procs").write_text(str(os.getpid()) + "\n")
+
+
+def identity(path):
+    try:
+        info = path.stat()
+        return info.st_dev, info.st_ino
+    except FileNotFoundError:
+        return None
+
+
+def serve():
+    net_id = identity(NS)
+    resolv_id = identity(RESOLVER)
+    if not net_id or net_id != identity(Path("/proc/self/ns/net")) or not resolv_id:
+        raise RuntimeError("not in locachy-net with its resolver")
+    if not stat.S_ISREG(RESOLVER.lstat().st_mode):
+        raise RuntimeError("locachy-net resolver is not a regular file")
+
+    RUN.mkdir(mode=0o700, exist_ok=True)
+    if not owned(RUN.lstat(), stat.S_ISDIR, 0o077):
+        raise RuntimeError(f"unsafe runtime directory: {RUN}")
+    with (RUN / "lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another SSH supervisor already holds the service lock") from None
+        supervise(net_id, resolv_id)
+
+
+def supervise(net_id, resolv_id):
+    GROUP.mkdir(exist_ok=True)
+    drain(None)  # An interrupted supervisor may have left old sessions behind.
+    firewall()
+    server = None
+    pidfd = None
+    try:
+        ensure_host_key()
+        # This mount namespace has inherited the real host cgroup filesystem;
+        # unlike ip netns exec, we never remount sysfs. The resolver bind does
+        # not propagate to the host and follows openresolv's in-place writes.
+        checked("mount", "--bind", str(RESOLVER), "/etc/resolv.conf")
+        bound = ()
+        with open_netlink() as events:
+            # Subscribe before the first snapshot, to avoid missing late addresses.
+            pending = True
+            log(f"waiting for tailnet addresses on {DEVICE}")
+            while not stopping and net_id == identity(NS) and resolv_id == identity(RESOLVER):
+                if pending:
+                    current = addresses()
+                    if current != bound:
+                        if server is not None:
+                            drain(server)
+                            os.close(pidfd)
+                            pidfd = server = None
+                        firewall(current)
+                        bound = current
+                        if bound and not stopping:
+                            CONFIG.write_text(ssh_config(bound))
+                            checked(SSHD, "-t", "-f", str(CONFIG))
+                            server = subprocess.Popen((SSHD, "-D", "-e", "-f", str(CONFIG)),
+                                                      preexec_fn=attach)
+                            pidfd = os.pidfd_open(server.pid)
+                        else:
+                            CONFIG.unlink(missing_ok=True)
+                    pending = False
+                ready, _, _ = select.select([wake_read, events] + ([] if pidfd is None else [pidfd]),
+                                             [], [], 10)
+                if wake_read in ready:
+                    break
+                if pidfd is not None and pidfd in ready:
+                    raise RuntimeError(f"OpenSSH listener exited ({server.wait()})")
+                if events in ready:
+                    try:
+                        events.recv(65536)
+                    except OSError as exc:
+                        if exc.errno != errno.ENOBUFS:
+                            raise
+                    pending = True  # Reconcile after a notification or queue overflow.
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
+        drain(server)
+        firewall()
+        CONFIG.unlink(missing_ok=True)
+        GROUP.rmdir()
+
+
+def open_netlink():
+    events = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+    events.bind((0, ADDR_EVENTS))
+    return events
+
+
+stopping = False
+
+
+def stop(_signum, _frame):
+    global stopping
+    stopping = True
+
+
+def main(argv):
+    if len(argv) == 3 and argv[0] == "--authorized-keys":
+        authorized_keys(argv[1], argv[2])
+        return 0
+    if os.geteuid() != 0 or argv not in ([], ["--serve"]):
+        raise RuntimeError("run as root from process 1's service_tailnet_ssh")
+    os.umask(0o077)
+    if not argv:
+        # Do not start anything on the host while the network service is late.
+        while not NS.exists() or not RESOLVER.is_file():
+            time.sleep(1)
+        os.execvp("nsenter", ("nsenter", f"--net={NS}", "--", "unshare", "--mount",
+                             "--propagation", "slave", "--", CLIENT, "--serve"))
+    global wake_read
+    wake_read, wake_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+    signal.set_wakeup_fd(wake_write)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, stop)
+    serve()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        log(exc)
+        sys.exit(1)

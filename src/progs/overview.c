@@ -731,29 +731,34 @@ static void capture(struct capture *c, struct ext_image_capture_source_v1 *sourc
 
 /* Windows, as the two protocols list them */
 
+static void win_resolve_container(struct window *w)
+{
+    char names[64][OPEN_NAME];
+    w->container[0] = '\0';
+    for (int i = open_containers(names, 64) - 1; i >= 0 && !w->container[0]; i--) {
+        if (open_window_matches(names[i], w->app_id, w->title)) {
+            memcpy(w->container, names[i], sizeof w->container);
+        }
+    }
+}
+
 static void win_title(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *title)
 {
     struct window *w = data;
     (void)h;
-    snprintf(w->title, sizeof w->title, "%s", title);
+    snprintf(w->title, sizeof w->title, "%s", title ? title : "");
+    /* Only a QEMU window's owner depends on its title (a VM's -name). */
+    if (open_window_qemu(w->app_id)) {
+        win_resolve_container(w);
+    }
 }
 
 static void win_app_id(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *id)
 {
     struct window *w = data;
-    char names[64][OPEN_NAME], ids[16][OPEN_WINDOW_ID];
     (void)h;
-    snprintf(w->app_id, sizeof w->app_id, "%s", id);
-    w->container[0] = '\0';
-    for (int i = open_containers(names, 64) - 1; i >= 0 && !w->container[0]; i--) {
-        int n = open_window_ids(names[i], ids, 16);
-        for (int k = 0; k < n; k++) {
-            if (strcasecmp(id, ids[k]) == 0) {
-                memcpy(w->container, names[i], sizeof w->container);
-                break;
-            }
-        }
-    }
+    snprintf(w->app_id, sizeof w->app_id, "%s", id ? id : "");
+    win_resolve_container(w);
 }
 
 static void win_output_enter(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, struct wl_output *o)

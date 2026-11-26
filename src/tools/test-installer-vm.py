@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Boot the real installer ISO; optionally install and boot a private target.
+"""Boot the real installer ISO; optionally install and diagnose a private target.
 
 smoke ISO NEW_TEST_DIRECTORY [--firmware bios|uefi]
 install ISO NEW_TEST_DIRECTORY [--level x86-64-v2] [--timeout 14400]
 tui ISO NEW_TEST_DIRECTORY        the full-screen installer, by its keys
-tui-stops ISO NEW_TEST_DIRECTORY  the same with the Tor module, the network
-                                  cut while the packages download (it stops,
-                                  then goes on); both trust the source keys
-                                  it stops for as a person does (y copies the
-                                  command, t a terminal, pasted, y each)
+tui-stops ISO NEW_TEST_DIRECTORY  the same with the network cut during
+                                  package download; verify that c resumes
+                                  on the same partitions and filesystems
+
+No mode approves source signing keys. An unresolved key stops the test.
+Installation modes check the original UKI copies, then rebuild a diagnostic
+UKI for serial observation. They do not prove the original UKI boots.
 
 No host block devices, privileged mounts, SSH service, guest test hook or
 prebuilt target root are used. Only the test VM partitions its new disk.
@@ -19,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -60,12 +63,18 @@ class Guest(root_boot.Guest):
                 raise RuntimeError("Guest ended before " + repr(pattern))
             self.pump(min(0.2, self.remaining()))
 
-    def shell(self, command):
+    def shell(self, command, *, label=None, output=False):
         marker = "LOCACHY-CMD-" + str(time.monotonic_ns())
-        self.send(command + "; _rc=$?; printf '\\n" + marker + "-%s\\n' \"$_rc\"\n")
-        result = self.any(rb"(?:\r?\n)" + marker.encode() + rb"-([0-9]+)\r?\n")
-        if result.group(1) != b"0":
-            raise RuntimeError("Guest command failed (" + result.group(1).decode() + "): " + command)
+        start = f"printf '\\n{marker}-BEGIN\\n'; " if output else ""
+        self.send(start + command + "; _rc=$?; printf '\\n" + marker + "-%s\\n' \"$_rc\"\n")
+        prefix = rb"(?:\r?\n)" + marker.encode()
+        body = prefix + rb"-BEGIN\r?\n([\s\S]*?)" if output else b""
+        result = self.any(body + prefix + rb"-([0-9]+)\r?\n")
+        status = result.group(2 if output else 1)
+        if status != b"0":
+            raise RuntimeError(f"Guest command failed ({status.decode()}): {label or command}")
+        if output:
+            return result.group(1).decode(errors="replace").replace("\r", "")
 
 
 def tools():
@@ -129,15 +138,28 @@ def launch(out, seconds, *, iso=None, disk=None, firmware="uefi", smoke=False, n
                 "-serial", "chardev:com1", "-qmp", "unix:" + str(out / "qmp.sock") + ",server=on,wait=off"]
     (out / "qemu-command.json").write_text(json.dumps(command, indent=2) + "\n")
     error = (out / "qemu.err").open("wb")
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=error)
+    process = None
     try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=error)
         guest = Guest(out, seconds)
     except BaseException:
-        process.terminate()
-        process.wait(timeout=10)
-        error.close()
+        try:
+            if process is not None:
+                stop_qemu(process)
+        finally:
+            error.close()
         raise
     return process, guest, error
+
+
+def stop_qemu(process):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
 
 
 def end_vm(process, guest, error, *, completed=False):
@@ -146,16 +168,12 @@ def end_vm(process, guest, error, *, completed=False):
             process.wait(timeout=30)
             if process.returncode:
                 raise RuntimeError("QEMU exit status " + str(process.returncode))
-        elif process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
     finally:
-        guest.close()
-        error.close()
+        try:
+            stop_qemu(process)
+        finally:
+            guest.close()
+            error.close()
 
 
 def boot_live(guest, firmware, kernel, initrd):
@@ -211,6 +229,33 @@ def smoke_test(args, iso, out, kernel, initrd):
     print("PASS v1: real ISO, standard kernel, glibc/pacman/Python/GCC and installer entry on qemu64")
 
 
+DIAGNOSTIC_BOOT = "diagnostic-boot"
+BOOT_EVIDENCE = {"boot_image": "diagnostic-serial-uki", "original_uki_booted": False,
+                 "installer_nvram_tested": False}
+
+
+def prepare_diagnostic_boot(guest, target):
+    """Check the installer's original files, then build a serial-only variant."""
+    root = shlex.quote(target)
+    guest.shell(
+        f"root={root} && esp=\"$root/efi/EFI\" && lib=\"$root/usr/local/lib/locachy/boot/locachy.efi\" && "
+        'fallback="$esp/BOOT/BOOTX64.EFI" && uki="$esp/locachy/locachy.efi" && '
+        'findmnt -rn --mountpoint "$root/efi" -t vfat && test -s "$fallback" && '
+        'cmp "$fallback" "$uki" && cmp "$fallback" "$lib" && original=$(sha256sum <"$fallback") && '
+        'rc="$root/etc/locachy/rc.conf" && cp -p "$rc" /run/installer-original-rc.conf && '
+        "printf '\\nboot_verbose=\"1\"\\nboot_cmdline=\"console=ttyS0\"\\n' >>\"$rc\" && "
+        '(arch-chroot "$root" /usr/local/bin/locachy-boot >/run/installer-diagnostic-boot.log 2>&1 || '
+        '{ status=$?; tail -n 60 /run/installer-diagnostic-boot.log; exit "$status"; }) && '
+        'grep -F "command line:" /run/installer-diagnostic-boot.log | grep -F "console=ttyS0" && '
+        'cmp "$fallback" "$uki" && cmp "$fallback" "$lib" && '
+        'saved=$(sha256sum <"$esp/locachy/locachy-prev.efi") && test "$saved" = "$original" && '
+        'diagnostic=$(sha256sum <"$fallback") && test "$diagnostic" != "$original" && '
+        'cp -p /run/installer-original-rc.conf "$rc" && '
+        'printf "Original UKI (preserved as locachy-prev.efi): %s\\nDiagnostic serial UKI: %s\\n" '
+        '"${original%% *}" "${diagnostic%% *}" && sync && umount "$root/efi" && umount "$root"',
+        label="check original UKI and prepare diagnostic serial UKI")
+
+
 def install_guest(args, iso, out, kernel, initrd):
     disk = out / "target.img"
     subprocess.run(["qemu-img", "create", "-f", "raw", str(disk), "32G"], check=True)
@@ -237,10 +282,7 @@ def install_guest(args, iso, out, kernel, initrd):
         guest.shell("cpu=$(python3 -c 'import json; print(json.load(open(\"/mnt/var/lib/locachy/install.json\"))[\"cpu\"])') && "
                     "test \"$cpu\" != " + args.level + " && grep -qx \"$cpu\" /mnt/usr/local/lib/locachy/cpu && "
                     "grep -q -- \"-march=$cpu'\" /mnt/etc/makepkg.conf.d/99-locachy-cpu.conf && cat /mnt/usr/local/lib/locachy/build.json && cat /mnt/var/lib/locachy/install.json && test -s /mnt/var/log/locachy/install-build.log && echo target-local-build-evidence-ok")
-        # This private test disk keeps the production PAM/lock/home, only serial
-        # verbosity changes to make the second, ISO-free boot observable: the
-        # Boot rows of settings (rc.conf), made into the image by locachy-boot.
-        guest.shell("printf 'boot_verbose=\"1\"\\nboot_cmdline=\"console=ttyS0\"\\n' >>/mnt/etc/locachy/rc.conf && arch-chroot /mnt /usr/local/bin/locachy-boot | grep -q 'console=ttyS0' && cmp /mnt/efi/EFI/BOOT/BOOTX64.EFI /mnt/efi/EFI/locachy/locachy.efi; sync; umount /mnt/efi && umount /mnt")
+        prepare_diagnostic_boot(guest, "/mnt")
         guest.shell("printf 'LOCACHY-GUEST-INSTALL-PASSED\\n'")
         guest.send("poweroff\n")
         while guest.alive:
@@ -255,92 +297,268 @@ def install_guest(args, iso, out, kernel, initrd):
 # during an installation, and counts taken from it go down. (Its short form:
 # the journal takes "installer:" for the sender, which -o cat leaves out.)
 KLOG = "journalctl -k -o short --no-pager"
+TUI_RUN = "/run/locachy-installer"
+TUI_LOG = TUI_RUN + "/install.log"
+REFRESH_WAIT = 1260  # Two 300 s clones and a 600 s live build can run in sequence.
+INSTALL_DONE = "installer: installation completed"
+INSTALL_FAILED = "installer: installation failed"
 
 
-def wait_kmsg(guest, pattern, seconds, fail=None):
-    """Until the guest's kernel log has pattern (grep -E), read over the
-    serial shell; fail: a pattern that ends the wait as a failure."""
-    stop = "" if fail is None else KLOG + " | grep -qE '" + fail + "' && exit 3; "
-    guest.shell("timeout " + str(seconds) + " sh -c \"until " + KLOG + " | grep -qE '" + pattern + "'; do " + stop +
-                "sleep 2; done\"")
+# Read the install backend's actual exec environment, not the frontend's
+# /proc environ (setenv after a same-binary refresh isn't reflected there).
+# The selection record also identifies the exact bundled bytes at the same HEAD.
+TUI_PROVENANCE = r"""
+from hashlib import sha256
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import time
+
+run, action, target, slots, origin, proc = map(Path, sys.argv[1:])
 
 
-def guest_state(guest, command):
-    """What command (shell, sets s) found, through the serial shell."""
-    guest.send(command + "; printf '\\nLOCACHY-STATE-%s\\n' \"$s\"\n")
-    return guest.any(rb"(?:\r?\n)LOCACHY-STATE-([a-z0-9]+)\r?\n").group(1).decode()
+def require(ok, what):
+    if not ok:
+        sys.exit('Installer provenance: ' + what)
 
 
-def kmsg_count(pattern):
-    return "$(" + KLOG + " | grep -cE '" + pattern + "')"
+def backend(source):
+    spec = spec_from_loader('install_backend', SourceFileLoader('install_backend', str(source / 'link/locachy-install')))
+    impl = module_from_spec(spec)
+    spec.loader.exec_module(impl)
+    return impl
 
 
-def trust_keys(guest, screenshots, round_):
-    """As a person: y copies the command the page shows, t opens the
-    terminal, the command pasted (Ctrl+Shift+V) and run, y to each key it
-    shows; then the terminal closed."""
-    target = "/run/locachy-install-target"
-    keys = int(guest_state(guest, "s=$(awk '{print $2}' " + target + "/var/lib/locachy/builder/untrusted-keys | sort -u | wc -l)"))
-    guest.shell("cat " + target + "/var/lib/locachy/builder/untrusted-keys")
-    terms = int(guest_state(guest, "s=" + kmsg_count("installer: running /usr/local/bin/term")))
-    guest.key("y")
-    guest.key("t")
-    guest.shell("timeout 30 sh -c \"until [ " + kmsg_count("installer: running /usr/local/bin/term") + " -gt " +
-                str(terms) + " ]; do sleep 1; done\"")
-    guest.pump(3)
-    guest.key("ctrl", "shift", "v")
-    guest.pump(1)
-    screenshots[f"trust-{round_}"] = guest.shot(f"tui-trust-{round_}")
-    guest.key("ret")
-    for _ in range(keys):
-        guest.pump(2)
-        guest.type("y")
-        guest.key("ret")
-    guest.shell("timeout 600 sh -c 'while [ -s " + target + "/var/lib/locachy/builder/untrusted-keys ]; do sleep 2; done'")
-    guest.pump(2)
-    screenshots[f"trusted-{round_}"] = guest.shot(f"tui-trusted-{round_}")
-    guest.type("exit")
-    guest.key("ret")
-    # When the terminal's process is gone, and when the installer has the
-    # screen again (its "ended" line): each within seconds, as a person sees.
-    gone = int(guest_state(guest, "s=0; while pgrep -x term >/dev/null && [ $s -lt 120 ]; do sleep 1; s=$((s + 1)); done"))
-    back = int(guest_state(guest, "s=0; until [ " + kmsg_count("installer: /usr/local/bin/term ended") + " -gt " +
-                           str(terms) + " ] || [ $s -ge 120 ]; do sleep 1; s=$((s + 1)); done"))
-    print(f"exit: the terminal gone after {gone} s, the installer back {back} s later", flush=True)
-    guest.shell(KLOG.replace("-o short", "-o short-precise") + " | grep -E 'installer:|term:|screen:|keys:|pointer:' | tail -12; date +%T.%N")
-    if gone >= 120 or back >= 10:
-        screenshots[f"not-ended-{round_}"] = guest.shot(f"tui-not-ended-{round_}")
-        guest.shell("ps -eo pid,ppid,pgid,sid,tty,stat,etimes,args | awk '$5 != \"?\"'; true")
-        raise RuntimeError(f"After exit: the terminal gone after {gone} s, the installer back {back} s later")
-    guest.pump(2)
+def catalog_identity(impl, path):
+    meta = impl.APPS.read_meta(path)
+    require(re.fullmatch('[0-9a-f]{40}', meta.get('commit', '')), 'catalog has no full commit: ' + str(path))
+    meta.pop('installed', None)  # The copy sets its own installation timestamp.
+    presets = impl.APPS.read_catalog(path)
+    return {'meta': meta, 'presets': {name: sha256(Path(p).read_bytes()).hexdigest() for name, p in presets.items()}}
+
+
+def stable_source(impl, path):
+    # make-root.sh rewrites these two on the target. Their original bytes are
+    # included in the full source stage fingerprint checked below.
+    return impl.INSTALL_STATE.files_digest(path, set(impl.INSTALL_STATE.SOURCE_INPUTS) - {'rc.conf', 'packages'})
+
+
+def observe(resume):
+    for _ in range(60):
+        for pid in proc.glob('[0-9]*/cmdline'):
+            try:
+                args = pid.read_bytes().split(b'\0')
+                if len(args) < 4 or not args[2].endswith(b'/link/locachy-install') or b'--private' in args:
+                    continue
+                if b'--yes' not in args or (b'--resume' in args) != resume:
+                    continue
+                if not resume and not any(a.startswith(b'--disk=') for a in args):
+                    continue
+                env = dict(e.split(b'=', 1) for e in pid.with_name('environ').read_bytes().split(b'\0') if b'=' in e)
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if b'LOCACHY_INSTALL_SNAPSHOT' in env:
+                return os.fsdecode(args[2]), {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()}
+        time.sleep(0.25)
+    sys.exit('Installer provenance: did not observe the selected install backend')
+
+
+def capture(resume):
+    entry, env = observe(resume)
+    token = env['LOCACHY_INSTALL_SNAPSHOT']
+    require(re.fullmatch('[0-9a-f]{64}', token), 'invalid live selection token')
+    raw = (slots / (token + '.json')).read_bytes()
+    require(sha256(raw).hexdigest() == token, 'selection record hash does not match')
+    options, source, catalog, source_how, apps_how = json.loads(raw)
+    source, catalog = Path(source), Path(catalog)
+    require(all(p.is_relative_to(slots) and p.resolve(strict=True) == p for p in (source, catalog)),
+            'selection did not pin both input paths')
+    require(Path(entry) == source / 'link/locachy-install' and Path(env['LOCACHY_APPS_CATALOG']) == catalog and
+            env['LOCACHY_SOURCE'] == source_how and env['LOCACHY_APPS'] == apps_how,
+            'backend inputs do not match the selection record')
+    impl = backend(source)
+    repo, branch, commit = impl.detect_source_git(source, origin)
+    require(re.fullmatch('[0-9a-f]{40}', commit), 'source has no full commit: ' + str(source))
+    if source_how == 'bundled: local changes over the fetched commit':
+        medium = json.loads(origin.read_text())
+        require(medium.get('source_changed') is True and options[:2] == [repo, branch] and
+                medium.get('commit') == commit and source.name.startswith('bundled-source.'),
+                'local changes did not come from the selected medium snapshot')
+    state = impl.INSTALL_STATE
+    data = {'token': token, 'source': str(source), 'commit': commit, 'source_how': source_how,
+            'source_tree': state.files_digest(source, state.SOURCE_INPUTS), 'stable_source': stable_source(impl, source),
+            'catalog': str(catalog), 'catalog_how': apps_how, 'catalog_identity': catalog_identity(impl, catalog)}
+    (run / ('test-selection-resume.json' if resume else 'test-selection.json')).write_text(json.dumps(data))
+    print(f'Selected installer {token}: source {commit} ({source_how}); '
+          f'app presets {data["catalog_identity"]["meta"]["commit"]} ({apps_how})', flush=True)
+
+
+def verify(resume):
+    first = json.loads((run / 'test-selection.json').read_text())
+    last = json.loads((run / 'test-selection-resume.json').read_text()) if resume else first
+    impl = backend(Path(last['source']))
+    require((target / 'usr/local/lib/locachy/source-commit').read_text().strip() == last['commit'],
+            'target source commit differs from the selected backend')
+    require(stable_source(impl, target / 'usr/local/src/locachy') == last['stable_source'],
+            'installed source bytes differ from the selected backend')
+    installed_catalog = target / 'var/lib/locachy/apps/catalog'
+    require(catalog_identity(impl, installed_catalog) == first['catalog_identity'],
+            'target app presets differ from the initial pinned catalog')
+
+    # A resume can use a refreshed source, but uses the first run's catalog.
+    # Check the completed source stage against the original (pre-rewrite) tree.
+    os.environ['LOCACHY_APPS_CATALOG'] = first['catalog']
+    config = json.loads((target / 'var/lib/locachy/install.json').read_text())
+    require(not config['extra_volumes'], 'unexpected extra volumes in the TUI fixture')
+    extra = list(dict.fromkeys(['cryptsetup', *impl.host_preset_packages(config['containers'])]))
+    os.environ.update(LOCACHY_INSTALLER='1', WITH_IME='0' if config['ime'] == 'off' else config['ime'],
+                      WITH_FEATURES=','.join(config['features']), WITH_EXTRA_PACKAGES=','.join(extra),
+                      WITH_REPOS=','.join(config['repos']))
+    expected = impl.INSTALL_STATE.build_input(last['source'], target, 'sources', config['cpu_level'], config['cpu'])
+    require(impl.INSTALL_STATE.files_digest(last['source'], impl.INSTALL_STATE.SOURCE_INPUTS) == last['source_tree'],
+            'selected source tree changed during installation')
+    stage = json.loads((target / '.locachy-installer/stages.json').read_text())['stages']['sources']
+    require(stage['success'] is True and stage['input'] == expected,
+            'completed source stage does not match the exact selected source tree')
+    print(f'PASS target matches source selection {last["token"]} and catalog selection {first["token"]}', flush=True)
+
+
+{'capture': lambda: capture(False), 'capture-resume': lambda: capture(True),
+ 'verify': lambda: verify(False), 'verify-resume': lambda: verify(True)}[str(action)]()
+"""
+
+
+def tui_provenance(guest, target, action):
+    # Bash's serial console has a per-line size limit, so send Python via a
+    # here-doc rather than as one large quoted argument on a physical line.
+    limit = min(60, int(guest.remaining()) - 8)
+    if limit <= 0:
+        raise RuntimeError(f"Guest acceptance timed out: installer provenance {action}")
+    command = ["timeout", "-k", "2", str(limit), "python3", "-IB", "-", TUI_RUN, action, target,
+               "/run/locachy-source.snapshots", "/etc/locachy/source-origin.json", "/proc"]
+    guest.shell("{ " + shlex.join(command) + " <<'LOCACHY_PROVENANCE'\n" + TUI_PROVENANCE +
+                "LOCACHY_PROVENANCE\n}", label="installer provenance " + action)
+
+
+def tui_wait(guest, seconds, check, label):
+    # Leave time to read the logs after the guest-side wait returns.
+    limit = min(seconds, int(guest.remaining()) - 8)
+    if limit <= 0:
+        raise RuntimeError(f"Guest acceptance timed out: {label}")
+    guest.shell(shlex.join(["timeout", "-k", "2", str(limit), "sh", "-c", check]), label=label)
+
+
+def wait_kmsg(guest, pattern, seconds, *, fail=None, after=None, label=None):
+    """Test success and failure against the same journal snapshot."""
+    def has(expression):
+        return "printf '%s\\n' \"$log\" | grep -qE " + shlex.quote(expression)
+
+    since = "" if after is None else ("log=$(printf '%s\\n' \"$log\" | sed -n " +
+                                      shlex.quote(f"/{after}/,$p") + "); ")
+    stop = "" if fail is None else has(fail) + " && exit 3; "
+    check = ("while :; do log=$(" + KLOG + ") || exit 4; " + since + stop +
+             has(pattern) + " && exit 0; sleep 2; done")
+    tui_wait(guest, seconds, check, label or pattern)
+
+
+def record_target_identity(guest, target, suffix):
+    """Record the partitions, encrypted volumes and filesystems."""
+    guest.shell(f"root={shlex.quote(target)} && "
+                'rootdev=$(findmnt -nro SOURCE --mountpoint "$root") && '
+                'espdev=$(findmnt -nro SOURCE --mountpoint "$root/efi") && '
+                '(for dev in /dev/sda1 /dev/sda2 /dev/sda3; do '
+                'blkid -s PARTUUID -o value "$dev" || exit 1; done; '
+                'for dev in /dev/sda2 /dev/sda3 "$rootdev" "$espdev" /dev/mapper/locachy-swap-crypt; do '
+                'blkid -p -s UUID -o value "$dev" || exit 1; done) '
+                f"> /run/installer-target-{suffix} && "
+                f'cp "$root/.locachy-installer/install-id" /run/installer-id-{suffix} && '
+                f"grep -Eq '^[0-9a-f]{{32}}$' /run/installer-id-{suffix}",
+                label=f"record target identity ({suffix})")
+
+
+def verify_resumed_target(guest, target):
+    record_target_identity(guest, target, "after")
+    guest.shell("cmp /run/installer-target-before /run/installer-target-after && "
+                "cmp /run/installer-id-before /run/installer-id-after && "
+                f"cmp /run/installer-test-nonce {target}/.locachy-installer/test-nonce")
+
+
+def wait_download(guest, target, seconds):
+    # The pacman log is from the target's package transaction, not mirror
+    # ranking, key preflight, or an old UI download line.
+    pacman_log = shlex.quote(target + "/.locachy-installer/pacman.log")
+    check = ("while :; do log=$(" + KLOG + ") || exit 4; "
+             "printf '%s\\n' \"$log\" | grep -qE 'installer: installation (completed|failed)' && exit 3; "
+             f"if [ -s {pacman_log} ] && grep -qE '^\\([0-9]+/[0-9]+\\) downloading ' {TUI_LOG}; then "
+             f"grep -qE '^(checking keys in keyring|installing )' {pacman_log} && exit 5; exit 0; fi; sleep 1; done")
+    tui_wait(guest, seconds, check, "target package download (after key preflight)")
+
+
+def verify_network_stop(guest, target, offset):
+    log = shlex.quote(target + "/.locachy-installer/pacman.log")
+    network_error = (r"failed retrieving file .* (Could not resolve|[Ff]ailed to connect|"
+                     r"Couldn't connect|[Tt]imed out|[Tt]oo slow|Network is unreachable|"
+                     r"No route to host|Connection reset|Recv failure|Could not resolve host)")
+    guest.shell(f"tail -c +{offset + 1} {log} >/run/installer-network-stop.log && "
+                "tail -n 40 /run/installer-network-stop.log && "
+                "grep -qEi " + shlex.quote(network_error) + " /run/installer-network-stop.log && "
+                f"grep -qF 'make-root: pacman failed;' {TUI_LOG} && "
+                "locachy-install --resume-status >/run/installer-stop.json && "
+                "python3 -I -c " + shlex.quote(
+                    "import json, sys; d = json.load(open('/run/installer-stop.json')); "
+                    "sys.exit(0 if d and d.get('phase') == 'target' and d.get('root') == sys.argv[1] else 1)"
+                ) + " " + shlex.quote(target), label="confirm package retrieval failed and the same target is resumable")
+
+
+def tui_failure(guest, out, serial_ready):
+    print(f"Installer VM logs: {out / 'install/serial.log'}, {out / 'install/qemu.err'}", file=sys.stderr, flush=True)
+    if serial_ready and guest.alive:
+        try:
+            logs = guest.shell(f"for log in {TUI_RUN}/refresh.log {TUI_LOG}; do "
+                               "if [ -f \"$log\" ]; then printf '\\n--- %s ---\\n' \"$log\"; tail -n 60 \"$log\"; fi; done; "
+                               f"{KLOG} | grep -E 'installer:|term:' | tail -n 18", output=True,
+                               label="read installer failure logs")
+            if logs.strip():
+                print(logs.rstrip(), file=sys.stderr, flush=True)
+        except (OSError, RuntimeError) as error:
+            print(f"Could not read live installer logs: {error}", file=sys.stderr, flush=True)
+    try:
+        guest.shot("tui-failed")
+    except (OSError, RuntimeError):
+        pass  # A blank or stopped display must not hide the original failure.
 
 
 def install_tui(args, iso, out, kernel, initrd, stops=False):
     """The full-screen installer on tty1, driven by its keys alone: the
     terminal (and back), then the whole disk, a passphrase and a user.
-    Where it stops it is continued (c): for source signing keys, trusted as
-    a person does (trust_keys); stops: with the Tor module (its own key),
-    and the network cut while the packages download."""
+    With stops, cut the network during package download and continue with c
+    after reconnecting. No run of this harness adds trust to an unknown key."""
     disk = out / "target.img"
     subprocess.run(["qemu-img", "create", "-f", "raw", str(disk), "32G"], check=True)
     process, guest, error = launch(out / "install", args.timeout, iso=iso, disk=disk, network=True)
     completed = False
     screenshots = {}
+    serial_ready = False
     try:
         boot_live(guest, "uefi", kernel, initrd)
+        serial_ready = True
         guest.shell("locale -a | grep -qi '^zh_CN.utf8$' && test -s /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc")
-        wait_kmsg(guest, "installer: started", 120)
+        wait_kmsg(guest, "installer: started", REFRESH_WAIT)
         guest.pump(15)  # its description of this computer (locachy-install --describe-json)
         screenshots["start"] = guest.shot("tui-start")
         guest.key("down")
         guest.key("ret")
         wait_kmsg(guest, "installer: running /usr/local/bin/term", 30)
-        guest.pump(3)
+        wait_kmsg(guest, "term: started /bin/bash", 30)
         screenshots["terminal"] = guest.shot("tui-terminal")
-        guest.type("echo live-rescue-ok >/dev/kmsg; exit")
+        guest.type("echo live-rescue-ok >/dev/kmsg && exit")
         guest.key("ret")
         wait_kmsg(guest, "installer: /usr/local/bin/term ended 0", 30)
-        guest.shell("dmesg | grep -q live-rescue-ok")
+        wait_kmsg(guest, "live-rescue-ok", 10)
         guest.pump(10)  # the description again
         guest.key("up")
         guest.key("ret")                                  # Install LOCachy
@@ -373,13 +591,6 @@ def install_tui(args, iso, out, kernel, initrd, stops=False):
         for _ in range(2):                                # Region: as it is
             guest.key("end")
             guest.key("ret")
-        if stops:                                         # Software: the Tor module too
-            modules = list(json.loads((SOURCE.parent / "link/modules.json").read_text()))
-            guest.key("home")
-            for _ in range(modules.index("tor")):
-                guest.key("down")
-            guest.key("ret")
-            screenshots["software"] = guest.shot("tui-software")
         for _ in range(2):                                # Software, System: next
             guest.key("end")
             guest.key("ret")
@@ -391,79 +602,58 @@ def install_tui(args, iso, out, kernel, initrd, stops=False):
         guest.pump(15)
         screenshots["confirm"] = guest.shot("tui-confirm")
         guest.key("y")
-        wait_kmsg(guest, "installer: installing", 600)
-        guest.pump(60)
-        screenshots["progress"] = guest.shot("tui-progress")
+        wait_kmsg(guest, "installer: installing", REFRESH_WAIT)
         target = "/run/locachy-install-target"
-        stopped, retried, rounds = 0, 0, []
+        tui_provenance(guest, target, "capture")
         if stops:
-            # The network gone while the packages download: it stops; back,
-            # and it goes on from there.
-            guest.shell("timeout 3600 sh -c \"until grep -q ') downloading ' /run/locachy-installer/install.log; do sleep 1; done\"")
+            wait_download(guest, target, 3600)
+            record_target_identity(guest, target, "before")
+            guest.shell("cat /proc/sys/kernel/random/uuid > /run/installer-test-nonce && "
+                        f"cp /run/installer-test-nonce {target}/.locachy-installer/test-nonce")
+            log = target + "/.locachy-installer/pacman.log"
+            offset = int(guest.shell(f"state=$({KLOG}) && "
+                                     "! printf '%s\\n' \"$state\" | grep -qE 'installer: installation (completed|failed)' && "
+                                     f"! grep -qE '^(checking keys in keyring|installing )' {log} && stat -c %s {log}",
+                                     label="recheck target download before link cut", output=True))
             guest.command("set_link", {"name": "nic0", "up": False})
-            wait_kmsg(guest, "installer: installation failed", 3600)
-            stopped += 1
-            guest.pump(2)
+            wait_kmsg(guest, INSTALL_FAILED, 3600, fail=INSTALL_DONE)
+            verify_network_stop(guest, target, offset)
             screenshots["stopped-network"] = guest.shot("tui-stopped-network")
             guest.command("set_link", {"name": "nic0", "up": True})
-            guest.shell("nm-online -q -t 180")
+            tui_wait(guest, 180, "nm-online -q -t 170", "network reconnect")
             guest.key("c")
-            guest.shell("timeout 30 sh -c \"until " + KLOG + " | grep -q 'installer: continuing'; do sleep 1; done\"")
-            rounds.append("network")
-        while True:
-            state = guest_state(guest, "until " + KLOG + " | grep -q 'installer: installation completed' || [ " +
-                                kmsg_count("installer: installation failed") + " -gt " + str(stopped) + " ]; do sleep 5; done; "
-                                "if " + KLOG + " | grep -q 'installer: installation completed'; then s=done; "
-                                "elif [ -s " + target + "/var/lib/locachy/builder/untrusted-keys ]; then s=keys; else s=failed; fi")
-            if state == "done":
-                break
-            stopped += 1
-            guest.pump(2)
-            screenshots[f"stopped-{stopped}"] = guest.shot(f"tui-stopped-{stopped}")
-            # Why, from its log (the guest's /run goes with it), into serial.log.
-            guest.shell("tail -n 40 /run/locachy-installer/install.log; true")
-            if state == "keys":
-                trust_keys(guest, screenshots, stopped)
-                rounds.append("keys")
-            else:
-                retried += 1
-                if retried > 2:
-                    raise RuntimeError("The installation failed, and again when continued")
-                rounds.append("failed")
-            continuing = int(guest_state(guest, "s=" + kmsg_count("installer: continuing")))
-            guest.key("c")
-            guest.shell("timeout 30 sh -c \"until [ " + kmsg_count("installer: continuing") + " -gt " +
-                        str(continuing) + " ]; do sleep 1; done\"")
-        print("stops: " + (", ".join(rounds) or "none"), flush=True)
-        if stops and "keys" not in rounds:
-            raise RuntimeError("The installation never stopped for a source signing key")
+            wait_kmsg(guest, "installer: continuing", REFRESH_WAIT)
+            tui_provenance(guest, target, "capture-resume")
+        wait_kmsg(guest, INSTALL_DONE, args.timeout, fail=INSTALL_FAILED,
+                  after="installer: continuing" if stops else None,
+                  label="installation completion (no automatic source-key approval)")
+        if stops:
+            verify_resumed_target(guest, target)
+            print("PASS installer continued after network loss with unchanged partition, filesystem and install IDs", flush=True)
         guest.pump(2)
         screenshots["done"] = guest.shot("tui-done")
-        # The live entry fetched the newest source, and that one is installed.
-        guest.shell("grep -m1 '^Source' /run/locachy-installer/install.log && "
-                    "grep -q '^Source: .*, the newest, fetched now$' /run/locachy-installer/install.log && "
-                    "test \"$(git -C /run/locachy-source rev-parse HEAD)\" = \"$(cat " + target +
-                    "/usr/local/lib/locachy/source-commit)\"")
+        tui_provenance(guest, target, "verify-resume" if stops else "verify")
         guest.shell("test -s " + target + "/var/lib/locachy/install.json && grep -q '\"encrypted\": true' " + target +
                     "/var/lib/locachy/install.json && test -s " + target + "/efi/EFI/BOOT/BOOTX64.EFI && "
                     "test ! -e /run/locachy-installer/passphrase && test ! -e /run/locachy-installer/password && "
                     "cryptsetup isLuks /dev/sda3 && df -h " + target + " && du -sh " + target + "/var/cache/pacman/pkg")
-        guest.shell("printf 'boot_verbose=\"1\"\\nboot_cmdline=\"console=ttyS0\"\\n' >>" + target + "/etc/locachy/rc.conf && "
-                    "arch-chroot " + target + " /usr/local/bin/locachy-boot | grep -q 'console=ttyS0' && cmp " + target +
-                    "/efi/EFI/BOOT/BOOTX64.EFI " + target + "/efi/EFI/locachy/locachy.efi; sync; umount " + target +
-                    "/efi && umount " + target)
+        prepare_diagnostic_boot(guest, target)
         guest.shell("printf 'LOCACHY-GUEST-INSTALL-PASSED\\n'")
         guest.send("poweroff\n")
         while guest.alive:
             guest.pump(min(0.2, guest.remaining()))
         completed = True
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        tui_failure(guest, out, serial_ready)
+        raise
     finally:
         end_vm(process, guest, error, completed=completed)
     return disk, screenshots
 
 
-def target_boot(args, disk, out, passphrase=None, devices=rb"root: /dev/sda2, esp: /dev/sda1"):
-    process, guest, error = launch(out / "installed-boot", 300, disk=disk)
+def target_boot(disk, out, passphrase=None):
+    boot_out = out / DIAGNOSTIC_BOOT
+    process, guest, error = launch(boot_out, 300, disk=disk)
     completed = False
     screenshots = {}
     try:
@@ -473,7 +663,7 @@ def target_boot(args, disk, out, passphrase=None, devices=rb"root: /dev/sda2, es
             guest.pump(3)
             guest.type(passphrase)
             guest.key("ret")
-            guest.wait_for(rb"init: unlocked LUKS2")
+            guest.wait_for(rb"init: unlocked LUKS2 [^\r\n]+(?:\r?\n)")
         else:
             guest.wait_for(rb"init: locking")
             guest.wait_for(rb"init: started lock \(pid [0-9]+\)")
@@ -481,10 +671,15 @@ def target_boot(args, disk, out, passphrase=None, devices=rb"root: /dev/sda2, es
             screenshots["locked"] = guest.shot("locked")
             guest.type(PASSWORD)
             guest.key("ret")
-            guest.wait_for(rb"init: unlocked")
-        home = guest.any(rb"home: ([0-9]+) containers, [0-9]+ host programs")
-        napps = int(home.group(1))
+            guest.wait_for(rb"init: unlocked(?:\r?\n)")
         guest.wait_for(rb"home> ")
+        # Home can log its entry count before the unencrypted boot lock
+        # finishes. Read the complete log rather than the consumed buffer.
+        home = re.search(rb"home: ([0-9]+) containers, [0-9]+ host programs",
+                         (boot_out / "serial.log").read_bytes())
+        if home is None:
+            raise RuntimeError("Installed home did not report its launcher entries")
+        napps = int(home.group(1))
         if passphrase:
             # The passphrase typed at power-on was the boot's unlock (init:
             # no lock after it); the lock and its PAM password: Super+L.
@@ -496,14 +691,14 @@ def target_boot(args, disk, out, passphrase=None, devices=rb"root: /dev/sda2, es
             screenshots["locked"] = guest.shot("locked")
             guest.type(PASSWORD)
             guest.key("ret")
-            guest.wait_for(rb"init: unlocked")
+            guest.wait_for(rb"init: unlocked(?:\r?\n)")
             guest.wait_for(rb"home> ")
         screenshots["home"] = guest.shot("home")
-        # Production home lists configured applications (including host
-        # code/foot entries) before files and rc.conf's first program, term.
+        # Home's first section is apps, then Graphical Session and Files,
+        # then rc.conf's term and admin. Right advances one tile; Down skips rows.
         guest.key("home")
-        for _ in range(napps + 1):
-            guest.key("down")
+        for _ in range(napps + 2):
+            guest.key("right")
         guest.key("ret")
         # term: the user's shell (uid 1000), its exit status term's.
         guest.wait_for(rb"term: started /usr/local/lib/locachy/user-shell")
@@ -516,8 +711,8 @@ def target_boot(args, disk, out, passphrase=None, devices=rb"root: /dev/sda2, es
         guest.wait_for(rb"home> ")
         # admin, the next program: root's shell.
         guest.key("home")
-        for _ in range(napps + 2):
-            guest.key("down")
+        for _ in range(napps + 3):
+            guest.key("right")
         guest.key("ret")
         guest.wait_for(rb"term: started /bin/bash")
         guest.wait_for(rb"term: shown 1")
@@ -536,11 +731,17 @@ def target_boot(args, disk, out, passphrase=None, devices=rb"root: /dev/sda2, es
         guest.wait_for(rb"init: power off")
         while guest.alive:
             guest.pump(min(0.2, guest.remaining()))
-        log = (out / "installed-boot/serial.log").read_bytes()
-        if not re.search(devices, log):
-            raise RuntimeError("Installed root/ESP were not the test target disk")
-        if re.search(rb"Kernel panic|screen: none|cannot switch to the root|memory BAD", log):
-            raise RuntimeError("Installed guest reported a boot failure")
+        log = (boot_out / "serial.log").read_bytes()
+        expected = (rb"swap: /dev/dm-[0-9]+, root: /dev/dm-[0-9]+, esp: /dev/sda1"
+                    if passphrase else rb"root: /dev/sda2, esp: /dev/sda1")
+        if not re.search(expected, log):
+            raise RuntimeError("Installed root/ESP were not the expected target devices")
+        if re.search(rb"Kernel panic|screen: none|cannot switch to the root|memory BAD|"
+                     rb"init: cannot run|init: cannot send|init: the lock ended \(status [1-9]|"
+                     rb"cannot make / read-only|umount /efi:", log):
+            raise RuntimeError("Installed guest reported a boot or shutdown failure")
+        if (boot_out / "locked.ppm").read_bytes() == (boot_out / "home.ppm").read_bytes():
+            raise RuntimeError("Locked and unlocked screenshots are identical")
         completed = True
     finally:
         end_vm(process, guest, error, completed=completed)
@@ -574,16 +775,19 @@ def main():
         elif args.mode in ("tui", "tui-stops"):
             disk, screenshots = install_tui(args, iso, out, kernel, initrd, stops=args.mode == "tui-stops")
             # The whole disk: ESP, swap, root, both encrypted (locachy-install --disk).
-            screenshots.update(target_boot(args, disk, out, PASSWORD, rb"esp: /dev/sda1"))
+            screenshots.update(target_boot(disk, out, PASSWORD))
             (out / "result.json").write_text(json.dumps({"passed": True, "mode": args.mode, "iso": str(iso), "disk": str(disk),
-                                                         "screenshots": screenshots}, indent=2) + "\n")
-            print("PASS full-screen installer: terminal and back, whole encrypted disk, target PAM/home/terminal")
+                                                         **BOOT_EVIDENCE, "screenshots": screenshots}, indent=2) + "\n")
+            print("PASS full-screen installer and diagnostic serial UKI: encrypted target, PAM/home/terminal "
+                  "(original UKI boot and installer NVRAM not tested)")
         else:
             disk = install_guest(args, iso, out, kernel, initrd)
-            screenshots = target_boot(args, disk, out)
+            screenshots = target_boot(disk, out)
             (out / "result.json").write_text(json.dumps({"passed": True, "mode": "install", "cpu_level": args.level,
-                                                         "iso": str(iso), "disk": str(disk), "screenshots": screenshots}, indent=2) + "\n")
-            print("PASS installation: guest-local build, ISO removed, target PAM/home/terminal and clean power-off")
+                                                         "iso": str(iso), "disk": str(disk), **BOOT_EVIDENCE,
+                                                         "screenshots": screenshots}, indent=2) + "\n")
+            print("PASS installation and diagnostic serial UKI: guest-local build, PAM/home/terminal and clean power-off "
+                  "(original UKI boot and installer NVRAM not tested)")
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print("FAIL installer VM: " + str(error), file=sys.stderr)
         return 1

@@ -109,6 +109,22 @@ def query_view(source, directory, level, cpu, sections):
     return config, merged
 
 
+def recipe_view(source, directory):
+    """Copy the lookup inputs, not the private live checkout, for the build user."""
+    source = Path(source)
+    view = directory / 'source'
+    (view / 'link').mkdir(parents=True)
+    shutil.copyfile(source / 'link/locachy_upstream.py', view / 'link/locachy_upstream.py')
+    shutil.copytree(source / 'pkgbuilds', view / 'pkgbuilds', symlinks=True)
+    for path in sorted(view.rglob('*')):
+        # Let the adapter reject links inside recipe trees; never chmod the
+        # link's target or turn a link into a regular input by following it.
+        if not path.is_symlink():
+            path.chmod(0o755 if path.is_dir() else 0o644)
+    view.chmod(0o755)
+    return view
+
+
 def check(source, runtime, packages, level, cpu, repos, target=None):
     packages = sorted(set(packages))
     if not packages or any(not PACKAGE.fullmatch(p) for p in packages):
@@ -118,9 +134,11 @@ def check(source, runtime, packages, level, cpu, repos, target=None):
     # use the live disposable keyring; its public keys are preserved explicitly
     # after preflight, never merged by this check.
     with tempfile.TemporaryDirectory(prefix='locachy-install-keys-') as temporary:
-        config, database = query_view(source, Path(temporary), level, cpu, repos)
+        directory = Path(temporary)
+        config, database = query_view(source, directory, level, cpu, repos)
+        recipes = recipe_view(source, directory)
         command = [str(Path(source) / 'link/locachy-build'), '--check-keys', '--key-root', str(root),
-                   '--installation-db', str(config), str(database), str(Path(source)), *packages]
+                   '--installation-db', str(config), str(database), str(recipes), *packages]
         result = subprocess.run(command, capture_output=True, text=True, timeout=600)
     if result.stderr:
         print(result.stderr, end='', file=sys.stderr)

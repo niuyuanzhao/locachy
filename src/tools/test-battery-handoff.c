@@ -64,11 +64,130 @@ static void set_now(int64_t ts)
 static void reset_daemon_memory(void)
 {
     memset(slots, 0, sizeof slots);
+    last_ac_online = 0;
+    last_system_ac = BAT_AC_UNKNOWN;
+    cancelled_full_until = 0;
+    intent_loaded = intent_error = 0;
     nslots = 0;
     any_prior_pack = 0;
     active_dis_slot[0] = '\0';
     active_dis_pack[0] = '\0';
     active_dis_dpct = 0;
+}
+
+static struct bat_charge_slot_status charge_status_for(const char *slot, const char *state,
+                                                        int requested, int actual, int64_t full_until)
+{
+    struct bat_charge_status status;
+    assert(bat_read_charge_status(&status) == 0 && status.full_until == full_until);
+    for (int i = 0; i < status.nslots; i++) {
+        struct bat_charge_slot_status *s = &status.slots[i];
+        if (!strcmp(s->slot, slot)) {
+            assert(!strcmp(s->state, state) && s->requested_end == requested && s->actual_end == actual);
+            return *s;
+        }
+    }
+    assert(!"missing charge status slot");
+    abort();
+}
+
+static void test_adaptive(int64_t t0)
+{
+    const char *start = "sys/BAT0/charge_control_start_threshold";
+    const char *end = "sys/BAT0/charge_control_end_threshold";
+    const char *ac = "sys/AC/online";
+    char expiry[96], end_path[1280];
+    snprintf(end_path, sizeof end_path, "%s/%s", root, end);
+    put_txt(ac, "1\n");
+    put_txt("sys/BAT0/status", "Not charging\n");
+    put_txt("sys/BAT1/status", "Not charging\n");
+    put_txt("sys/BAT1/charge_control_start_threshold", "30\n");
+    put_txt("sys/BAT1/charge_behaviour", "[auto] inhibit-charge force-discharge\n");
+    put_txt(start, "63\n");
+    put_txt(end, "87\n");
+    put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    set_now(t0);
+    assert(record_snapshot(0) == 2);
+    charge_status_for("BAT0", "unsupported", -1, 87, 0);
+    charge_status_for("BAT1", "unsupported", -1, -1, 0);
+    assert(get_int(start) == 63 && get_int(end) == 87);
+    assert(get_int("sys/BAT1/charge_control_start_threshold") == 30);
+    put_txt("sys/BAT1/present", "0\n");
+    assert(record_snapshot(0) == 1);
+    charge_status_for("BAT0", "learning", -1, 87, 0);
+    assert(get_int(start) == 63 && get_int(end) == 87);
+
+    /* Repeated snapshots must not write unchanged threshold values. */
+    struct timespec stamps[2] = {{ .tv_sec = 100 }, { .tv_sec = 100 }};
+    assert(utimensat(AT_FDCWD, end_path, stamps, 0) == 0);
+    set_now(t0 + 60);
+    assert(record_snapshot(0) == 1);
+    struct stat st;
+    assert(stat(end_path, &st) == 0 && st.st_mtim.tv_sec == 100);
+
+    /* Supply verified history at the real idle-AC cadence. */
+    for (int64_t ts = t0 + 360; ts <= t0 + 3 * BAT_ADAPTIVE_DAY + 60; ts += 300) {
+        struct bat_sample sample = { .ts = ts, .decipct = 800, .state = 'N', .ac = 1, .ac_verified = 1 };
+        assert(bat_append_sample("Panasonic_CF-VZSU1QJS_9001", &sample) == 0);
+    }
+    t0 += 3 * BAT_ADAPTIVE_DAY;
+    set_now(t0 + 60);
+    assert(record_snapshot(1) == 1);
+    charge_status_for("BAT0", "mains", 80, 80, 0);
+    assert(get_int(start) == 75 && get_int(end) == 80);
+
+    /* Restart while adapted; an unrelated pack must not receive this baseline. */
+    reset_daemon_memory();
+    load_previous_slots();
+    put_txt("sys/BAT0/serial_number", "9002\n");
+    put_txt(start, "42\n");
+    put_txt(end, "73\n");
+    put_txt("rc.conf", "battery_charge_adaptive=\"0\"\n");
+    assert(record_snapshot(1) == 1);
+    charge_status_for("BAT0", "manual", -1, 73, 0);
+    assert(get_int(start) == 42 && get_int(end) == 73);
+    put_txt("sys/BAT0/serial_number", "9001\n");
+    put_txt(start, "75\n");
+    put_txt(end, "80\n");
+    assert(record_snapshot(0) == 1);
+    charge_status_for("BAT0", "manual", -1, 87, 0);
+    assert(get_int(start) == 63 && get_int(end) == 87);
+
+    /* One-time full while manual, cancel on unplug and keep it cancelled across restart. */
+    int64_t until = t0 + 1200;
+    snprintf(expiry, sizeof expiry, "battery_charge_full_until=\"%lld\"\n", (long long)until);
+    put_txt("rc.conf", expiry);
+    set_now(t0 + 120);
+    assert(record_snapshot(1) == 1);
+    charge_status_for("BAT0", "full", 100, 100, until);
+    put_txt(ac, "0\n");
+    assert(record_snapshot(0) == 1);
+    charge_status_for("BAT0", "manual", -1, 87, 0);
+    reset_daemon_memory();
+    load_previous_slots();
+    put_txt(ac, "1\n");
+    assert(record_snapshot(1) == 1);
+    charge_status_for("BAT0", "manual", -1, 87, 0);
+
+    /* An explicit newer request activates; an expired request restores once. */
+    until++;
+    snprintf(expiry, sizeof expiry, "battery_charge_full_until=\"%lld\"\n", (long long)until);
+    put_txt("rc.conf", expiry);
+    assert(record_snapshot(1) == 1);
+    charge_status_for("BAT0", "full", 100, 100, until);
+    set_now(until);
+    assert(record_snapshot(0) == 1);
+    charge_status_for("BAT0", "manual", -1, 87, 0);
+    assert(get_int(start) == 63 && get_int(end) == 87);
+
+    /* Present but unreadable threshold is an error, not unsupported or success. */
+    put_txt(end, "invalid\n");
+    put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    assert(record_snapshot(1) == 1);
+    charge_status_for("BAT0", "error", -1, -1, 0);
+    assert(get_int(start) == 63 && get_int("sys/BAT1/charge_control_start_threshold") == 30);
+    assert(bat_read_line(bat_supply_root(), "BAT1", "charge_behaviour", expiry, sizeof expiry) == 0 &&
+           !strcmp(expiry, "[auto] inhibit-charge force-discharge"));
 }
 
 int main(int argc, char **argv)
@@ -213,5 +332,8 @@ int main(int argc, char **argv)
 
     puts("PASS removable-battery handoff: per-pack identity, AC hot-unplug/insert, hibernate cold-swap, "
          "dual-battery BAT1->BAT0 discharge handoff, and automatic EC threshold re-apply");
+    test_adaptive(t0 + 10000);
+    puts("PASS adaptive battery charge handoff: unsupported/no-write, readback, per-pack restore, "
+         "one-time full expiry, restart persistence, and status");
     return 0;
 }

@@ -3596,6 +3596,78 @@ static void wipe_swap(void)
     say("init: %s: its content discarded", swap_dev);
 }
 
+/* Mount secondary storage volumes from /etc/locachy/volumes.json after drivers
+ * load (non-fatal: a missing secondary disk must never block boot), and unmount
+ * / close their LUKS mappers cleanly with a bounded wait at shutdown. */
+static void storage_mount_all(void)
+{
+    if (access("/etc/locachy/volumes.json", R_OK) != 0 ||
+        access("/usr/local/bin/locachy-storage", X_OK) != 0) {
+        return;
+    }
+    double t0 = uptime();
+    say("init: mounting storage volumes at %.3f s", t0);
+    pid_t spid = fork();
+    if (spid == 0) {
+        int log = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+        if (log >= 0) {
+            dup2(log, STDOUT_FILENO);
+            dup2(log, STDERR_FILENO);
+            close(log);
+        }
+        execl("/usr/local/bin/locachy-storage", "locachy-storage", "mount-all", (char *)NULL);
+        _exit(127);
+    }
+    if (spid > 0) {
+        int st = 0;
+        waitpid(spid, &st, 0);
+        if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            say("init: locachy-storage mount-all exited with status %d (continuing boot)",
+                WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        }
+        say("init: storage volumes checked at %.3f s (%.0f ms)", uptime(), (uptime() - t0) * 1000);
+    }
+}
+
+static void storage_umount_all(void)
+{
+    if (access("/etc/locachy/volumes.json", R_OK) != 0 ||
+        access("/usr/local/bin/locachy-storage", X_OK) != 0) {
+        return;
+    }
+    pid_t spid = fork();
+    if (spid == 0) {
+        execl("/usr/local/bin/locachy-storage", "locachy-storage", "umount-all", (char *)NULL);
+        _exit(127);
+    }
+    if (spid <= 0) {
+        return;
+    }
+    int done = 0;
+    for (int i = 0; i < 100; i++) { /* 5 s bounded wait */
+        int st = 0;
+        pid_t r = waitpid(spid, &st, WNOHANG);
+        if (r == spid) {
+            if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+                say("init: locachy-storage umount-all exited with status %d",
+                    WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+            }
+            done = 1;
+            break;
+        }
+        if (r < 0) {
+            done = 1;
+            break;
+        }
+        usleep(50000);
+    }
+    if (!done) {
+        say("init: locachy-storage umount-all timed out after 5 s");
+        kill(spid, SIGKILL);
+        waitpid(spid, NULL, 0);
+    }
+}
+
 static void shut_down(int how)
 {
     say(how == RB_POWER_OFF ? "init: power off" : "init: reboot");
@@ -3603,6 +3675,7 @@ static void shut_down(int how)
     reap_all(2000);
     kill(-1, SIGKILL);
     reap_all(2000);
+    storage_umount_all();
     wipe_swap();
     if (esp_dev[0] && umount("/efi") < 0) {
         say("init: umount /efi: %s", strerror(errno));
@@ -5016,13 +5089,19 @@ static void apply_power_profile(int force)
     }
 }
 
-static void flush_battery_history(void)
+static void signal_battery_history(int signo)
 {
+    static const char command[] = "/usr/local/lib/locachy/battery-history";
     for (size_t i = 0; i < nservices; i++) {
-        if (services[i].pid > 0 && strstr(services[i].command, "battery-history") != NULL) {
-            kill(services[i].pid, SIGUSR1);
+        if (services[i].pid > 0 && !services[i].retiring && strcmp(services[i].command, command) == 0) {
+            kill(services[i].pid, signo);
         }
     }
+}
+
+static void flush_battery_history(void)
+{
+    signal_battery_history(SIGUSR1);
 }
 
 /* Hibernate: the kernel writes everything in memory to the swap (resume_dev)
@@ -5161,6 +5240,7 @@ static void woke_up(double slept)
     blank_tried = 0;
     blank_active_at = now_ms();
     apply_power_profile(1);
+    signal_battery_history(SIGHUP); /* Recheck AC and charge limits even if the EC emits no event. */
     if (fork() == 0) {
         execl("/usr/local/bin/settings", "settings", "--apply", (char *)NULL);
         _exit(0);
@@ -5676,6 +5756,7 @@ int main(void)
         double t0 = uptime();
         esp_mount();
         say("init: ESP checked at %.3f s (%.0f ms)", uptime(), (uptime() - t0) * 1000);
+        storage_mount_all();
         t0 = uptime();
         apps_init();
         say("init: applications discovered at %.3f s (%.0f ms)", uptime(), (uptime() - t0) * 1000);
@@ -6033,6 +6114,7 @@ int main(void)
                             }
                             battery_check(); /* battery_critical: its trip points */
                             apply_power_profile(1);
+                            signal_battery_history(SIGHUP);
                         }
                     } else if (si.ssi_signo == SIGTERM) {
                         restart();

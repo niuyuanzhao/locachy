@@ -66,6 +66,14 @@
 #                 socket), for a program that has no Wayland; the X11 programs
 #                 on it can read each other's windows, input and selections
 #                 (XWAYLAND.md), so a program has it only when this says so
+#   vm            "1": a managed KVM virtual machine (tools/VM-APPS.md), shown
+#                 on the shared Wayland display in its own app_NAME cgroup with
+#                 QMP pause/resume/powerdown lifecycle; no OverlayFS or package
+#                 build. Keys: vm_kind (winmaint, compute, custom), vm_name
+#                 (compute VM name, default NAME), vm_freeze (qmp or none),
+#                 vm_display (default gtk), vm_memory, vm_cpus, vm_iso, and
+#                 command/arguments for custom launchers. A Windows custom VM
+#                 without vm_iso / vm_virtio_iso gets them from locachy-winiso.
 # A container sees the host root through its overlay, minus the host's own
 # state (/var/lib/locachy, /var/log/locachy). Its programs run as the user
 # (uid 1000, made by locachy-setup) with a home of their own, in which the
@@ -86,7 +94,7 @@ die() {
     exit 1
 }
 
-CGROUP_BASE="/sys/fs/cgroup"
+CGROUP_BASE="${LOCACHY_CGROUP_BASE:-/sys/fs/cgroup}"
 APP_UID=1000
 # The user directories every container shares with the host (XDG names).
 USER_DIRS="Documents Downloads Music Pictures Videos"
@@ -98,6 +106,10 @@ APP_INIT="${LOCACHY_APP_INIT:-/usr/local/lib/locachy/app-init}"
 CLIPBOARD="${LOCACHY_CLIPBOARD_TOOL:-/usr/local/lib/locachy/clipboard}"
 TOR_ENFORCE="${LOCACHY_TOR_ENFORCE:-/usr/local/lib/locachy/tor-enforce}"
 RC_CONF="${LOCACHY_RC_CONF:-/etc/locachy/rc.conf}"
+WINMAINT_TOOL="${LOCACHY_WINMAINT_TOOL:-/usr/local/bin/locachy-winmaint}"
+COMPUTE_TOOL="${LOCACHY_COMPUTE_TOOL:-/usr/local/bin/locachy-compute}"
+# The installation ISOs a Windows VM without vm_iso / vm_virtio_iso is given (tools/WINISO.md).
+WINISO_TOOL="${LOCACHY_WINISO_TOOL:-/usr/local/bin/locachy-winiso}"
 FOOT_WRAPPER=/usr/local/lib/locachy/locachy-foot
 # The containers' sound: the directories of the restricted sockets of the
 # host's servers (audio-client; 50-locachy-sockets.conf, 50-locachy-pulse.conf).
@@ -117,8 +129,9 @@ DOCS_VIEWS=$DOCS_DIR/views
 # These overrides are intentionally a root-only integration-test seam. They
 # cannot be used to redirect a normal unprivileged invocation, and all paths
 # must be absolute so the test namespace cannot be selected accidentally.
-for override_name in LOCACHY_CONT_BASE LOCACHY_CONT_CONF LOCACHY_APP_RUNTIME LOCACHY_APP_INIT LOCACHY_CLIPBOARD_TOOL \
-    LOCACHY_TOR_ENFORCE LOCACHY_RC_CONF; do
+for override_name in LOCACHY_CGROUP_BASE LOCACHY_CONT_BASE LOCACHY_CONT_CONF LOCACHY_APP_RUNTIME LOCACHY_APP_INIT \
+    LOCACHY_CLIPBOARD_TOOL LOCACHY_TOR_ENFORCE LOCACHY_RC_CONF LOCACHY_WINMAINT_TOOL LOCACHY_COMPUTE_TOOL \
+    LOCACHY_VM_STATE LOCACHY_QEMU_BIN LOCACHY_VIRTIOFSD LOCACHY_SWTPM LOCACHY_WINISO_TOOL; do
     if [ -n "${!override_name+x}" ]; then
         [ "$(id -u)" = 0 ] || die "${override_name} override requires root"
         override_value=${!override_name}
@@ -140,6 +153,654 @@ declare -A APP_CONF=()
 
 is_host() { # NAME: managed real-system access (host="1"), no private filesystem
     [ "$(conf_value "$1" host)" = 1 ]
+}
+
+is_vm() { # NAME: managed KVM virtual machine (vm="1"), no container package build
+    [ "$(conf_value "$1" vm)" = 1 ]
+}
+
+vm_qmp_sock() {
+    # In the VM's own state directory: QEMU runs as the VM's uid and must be
+    # able to create this socket; $APP_RUNTIME is root's.
+    printf '%s/%s/qmp.sock\n' "$VM_STATE" "$1"
+}
+
+vm_paused_file() {
+    printf '%s/%s/vm-paused\n' "$APP_RUNTIME" "$1"
+}
+
+vm_freeze_mode() {
+    local mode
+    mode=$(conf_value "$1" vm_freeze)
+    case "${mode:-qmp}" in
+    qmp|none) printf '%s\n' "${mode:-qmp}" ;;
+    *) die "$1: unknown vm_freeze \"$mode\" (expected qmp or none)" ;;
+    esac
+}
+
+# Send one QMP command to SOCK (greeting -> qmp_capabilities -> COMMAND).
+# Bounded timeout so a stalled or absent monitor never hangs freeze/resume/stop.
+vm_qmp() { # SOCK COMMAND [TIMEOUT_SECONDS]
+    local sock="$1" cmd="$2" timeout="${3:-3}"
+    [ -S "$sock" ] || return 1
+    python3 -I - "$sock" "$cmd" "$timeout" <<'PY'
+import json
+import socket
+import sys
+
+sock_path, cmd, timeout_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    s.settimeout(timeout_s)
+    s.connect(sock_path)
+    buf = b""
+
+    def next_msg():
+        global buf
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                raise RuntimeError("QMP closed the connection")
+            buf += chunk
+        line, buf = buf.split(b"\n", 1)
+        return json.loads(line.decode("utf-8"))
+
+    greeting = next_msg()
+    if "QMP" not in greeting:
+        raise RuntimeError("unexpected QMP greeting")
+    s.sendall(b'{"execute":"qmp_capabilities"}\n')
+    while True:
+        msg = next_msg()
+        if "return" in msg:
+            break
+        if "error" in msg:
+            raise RuntimeError(f"QMP capabilities rejected: {msg['error']}")
+    s.sendall((json.dumps({"execute": cmd}) + "\n").encode("utf-8"))
+    while True:
+        msg = next_msg()
+        if "return" in msg:
+            sys.exit(0)
+        if "error" in msg:
+            raise RuntimeError(f"QMP {cmd} failed: {msg['error']}")
+PY
+}
+
+# Build the foreground launcher command for a vm="1" app into vm_cmd.
+vm_command() { # NAME QMP_SOCK
+    local name="$1" qmp_sock="$2" kind display mem cpus iso vname nic bus virtio_iso
+    kind=$(conf_value "$name" vm_kind)
+    display=$(conf_value "$name" vm_display)
+    [ -n "$display" ] || display=gtk
+    [[ "$display" =~ ^[A-Za-z0-9][A-Za-z0-9_,=.-]{0,63}$ ]] || die "$name: invalid vm_display ($display)"
+    vm_cmd=()
+    case "$kind" in
+    winmaint)
+        [ -x "$WINMAINT_TOOL" ] || die "$name: $WINMAINT_TOOL is not installed"
+        vm_cmd=("$WINMAINT_TOOL" vm --display "$display" --qmp-sock "$qmp_sock")
+        mem=$(conf_value "$name" vm_memory)
+        cpus=$(conf_value "$name" vm_cpus)
+        iso=$(conf_value "$name" vm_iso)
+        if [ -n "$mem" ]; then
+            [[ "$mem" =~ ^[1-9][0-9]*$ ]] || die "$name: invalid vm_memory ($mem)"
+            vm_cmd+=(--memory "$mem")
+        fi
+        if [ -n "$cpus" ]; then
+            [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || die "$name: invalid vm_cpus ($cpus)"
+            vm_cmd+=(--cpus "$cpus")
+        fi
+        if [ -n "$iso" ]; then
+            case $iso in /*) ;; *) die "$name: vm_iso must be an absolute path: $iso" ;; esac
+            vm_iso_ok "$name" vm_iso "$iso"
+            vm_cmd+=(--iso "$iso")
+        fi
+        nic=$(conf_value "$name" vm_nic)
+        if [ -n "$nic" ]; then
+            case $nic in virtio|e1000e) ;; *) die "$name: unknown vm_nic \"$nic\" for winmaint (expected virtio or e1000e)" ;; esac
+            vm_cmd+=(--nic "$nic")
+        fi
+        bus=$(conf_value "$name" vm_disk_bus)
+        if [ -n "$bus" ]; then
+            case $bus in virtio|nvme) ;; *) die "$name: unknown vm_disk_bus \"$bus\" for winmaint (expected virtio or nvme)" ;; esac
+            vm_cmd+=(--disk-bus "$bus")
+        fi
+        virtio_iso=$(conf_value "$name" vm_virtio_iso)
+        if [ -n "$virtio_iso" ]; then
+            case $virtio_iso in /*) ;; *) die "$name: vm_virtio_iso must be an absolute path: $virtio_iso" ;; esac
+            vm_iso_ok "$name" vm_virtio_iso "$virtio_iso"
+            vm_cmd+=(--virtio-iso "$virtio_iso")
+        fi
+        ;;
+    compute)
+        [ -x "$COMPUTE_TOOL" ] || die "$name: $COMPUTE_TOOL is not installed"
+        vname=$(conf_value "$name" vm_name)
+        [ -n "$vname" ] || vname=$name
+        valid_name "$vname" || die "$name: invalid vm_name ($vname)"
+        vm_cmd=("$COMPUTE_TOOL" vm run "$vname" --display "$display" --qmp-sock "$qmp_sock")
+        ;;
+    custom|"")
+        if [ -n "$(conf_value "$name" command)" ]; then
+            [ -z "$(conf_value "$name" vm_base)$(conf_value "$name" vm_disk)" ] ||
+                die "$name: command= is exclusive with vm_base and vm_disk (command= is a launcher, not a disk)"
+            saved_command "$name"
+            vm_cmd=("${saved_cmd[@]}")
+        else
+            vm_custom_build "$name" "$qmp_sock" "$3"
+        fi
+        ;;
+    *)
+        die "$name: unknown vm_kind \"$kind\" (expected winmaint, compute, or custom)"
+        ;;
+    esac
+}
+
+# The vm_* keys a VM's configuration may have; any other vm_* key is refused.
+VM_KEYS=" vm_kind vm_name vm_freeze vm_display vm_memory vm_cpus vm_iso vm_base vm_disk vm_uefi vm_tpm vm_share_home vm_virtio_iso vm_os vm_nic vm_gpu vm_disk_bus vm_audio "
+VM_STATE="${LOCACHY_VM_STATE:-/var/lib/locachy/vms}"
+vm_drop=()
+vm_helpers=()
+vm_need_tpm=0
+vm_need_vfs=0
+vm_vfs_dir=
+
+vm_check_keys() { # NAME: refuse unknown vm_* keys and keys that do not apply to the kind
+    local name="$1" line key kind
+    [ -r "$CONT_CONF/$name.conf" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line#"${line%%[![:space:]]*}"}
+        key=${line%%=*}
+        case $key in
+        vm_*)
+            case $VM_KEYS in
+            *" $key "*) ;;
+            *) die "$name: unknown $key in $CONT_CONF/$name.conf (the vm_* keys are a closed set: see VM-APPS.md)" ;;
+            esac
+            ;;
+        esac
+    done <"$CONT_CONF/$name.conf"
+    kind=$(conf_value "$name" vm_kind)
+    case $kind in
+    winmaint)
+        # winmaint takes its NIC, disk bus and virtio-win ISO (locachy-winmaint's
+        # --nic, --disk-bus, --virtio-iso); the other custom-only keys do not apply.
+        for key in vm_base vm_disk vm_uefi vm_tpm vm_share_home vm_os vm_gpu vm_audio; do
+            [ -z "$(conf_value "$name" "$key")" ] || die "$name: $key is for vm_kind custom only (vm_kind is $kind)"
+        done
+        ;;
+    compute)
+        for key in vm_base vm_disk vm_uefi vm_tpm vm_share_home vm_virtio_iso vm_os vm_nic vm_gpu vm_disk_bus vm_audio; do
+            [ -z "$(conf_value "$name" "$key")" ] || die "$name: $key is for vm_kind custom only (vm_kind is $kind)"
+        done
+        ;;
+    esac
+    if [ "$kind" = compute ]; then
+        for key in vm_memory vm_cpus vm_iso; do
+            [ -z "$(conf_value "$name" "$key")" ] || die "$name: $key does not apply to vm_kind compute (the VM keeps its own hardware)"
+        done
+    fi
+    if [ "$kind" != compute ] && [ -n "$(conf_value "$name" vm_name)" ]; then
+        die "$name: vm_name applies to vm_kind compute only"
+    fi
+    # Checked here, not only in vm_command: start NAME COMMAND... skips that,
+    # and the name goes into /run/locachy/compute/vm-NAME as real root.
+    if [ "$kind" = compute ] && [ -n "$(conf_value "$name" vm_name)" ]; then
+        valid_name "$(conf_value "$name" vm_name)" || die "$name: invalid vm_name ($(conf_value "$name" vm_name))"
+    fi
+}
+
+# True when running as real init_user_ns root (not a rootless --map-root-user namespace).
+vm_real_root() {
+    local a b c
+    [ "$(id -u)" = 0 ] || return 1
+    [ -r /proc/self/uid_map ] || return 0
+    while read -r a b c; do
+        [ "$a" = 0 ] && [ "$b" = 0 ] && [ "$c" -gt "$APP_UID" ] && return 0
+    done </proc/self/uid_map
+    return 1
+}
+
+# The launch prefix of a VM's helpers and QEMU: uid 1000 with the kvm group and
+# no_new_privs when running as real host root; nothing in unprivileged namespaces.
+vm_set_drop() {
+    local gid kvm_gid
+    vm_drop=()
+    vm_real_root || return 0
+    gid=$(getent passwd "$APP_UID" | cut -d: -f4)
+    [ -n "$gid" ] || die "there is no user with uid $APP_UID: create it with locachy-setup"
+    kvm_gid=$(getent group kvm | cut -d: -f3 || true)
+    if [ -n "$kvm_gid" ]; then
+        vm_drop=(setpriv --reuid="$APP_UID" --regid="$gid" --groups="$kvm_gid" --no-new-privs --)
+    else
+        vm_drop=(setpriv --reuid="$APP_UID" --regid="$gid" --clear-groups --no-new-privs --)
+    fi
+}
+
+# A path a VM is given: absolute, without . or .., and never inside the VM
+# state directory, which remove deletes (a user's disk is never removed).
+vm_path_ok() { # NAME KEY PATH
+    local name="$1" key="$2" path="$3"
+    case $path in
+    /*) ;;
+    *) die "$name: $key must be an absolute path: $path" ;;
+    esac
+    case $path in
+    */../*|*/..|*/./*|*/.) die "$name: $key has . or .. in it: $path" ;;
+    "$VM_STATE"/*) die "$name: $key is inside $VM_STATE, which remove deletes: $path" ;;
+    esac
+    [ -e "$path" ] || die "$name: $key does not exist: $path"
+}
+
+# An ISO a VM is given is a regular file (after links), never a directory or a
+# block device: QEMU (as root for winmaint) reads it.
+vm_iso_ok() { # NAME KEY PATH
+    [ -f "$3" ] || die "$1: $2 must be a regular file (not a directory or a device): $3"
+}
+
+# The VM's uid can read (r) or write (w) PATH; nothing is changed on PATH.
+vm_app_can() { # NAME KEY r|w PATH
+    local name="$1" key="$2" access="$3" path="$4"
+    if ! ${vm_drop[@]+"${vm_drop[@]}"} test "-$access" "$path"; then
+        die "$name: $key ($path) is not $([ "$access" = r ] && echo readable || echo writable) by uid $APP_UID"
+    fi
+}
+
+# The format qemu-img reads for an image (raw or qcow2 only), as the VM's uid.
+vm_disk_format() { # NAME KEY PATH
+    local name="$1" key="$2" path="$3" fmt
+    fmt=$(${vm_drop[@]+"${vm_drop[@]}"} qemu-img info --output=json "$path" 2>/dev/null |
+        python3 -I -c 'import json, sys; print(json.load(sys.stdin)["format"])' 2>/dev/null) ||
+        die "$name: $key is not an image qemu-img can read: $path"
+    case $fmt in
+    raw|qcow2) printf '%s\n' "$fmt" ;;
+    *) die "$name: $key has format $fmt: only raw and qcow2 are taken" ;;
+    esac
+}
+
+# The VM's own state directory (overlay, UEFI variables, TPM state, which
+# remove deletes). Copy-on-write is turned off for it on Btrfs, best effort:
+# Btrfs checksums and compression are then not kept for the VM images in it.
+vm_state_dir() { # NAME
+    local dir="$VM_STATE/$1"
+    if vm_real_root; then
+        install -d -m 0711 "$VM_STATE"
+        install -d -o "$APP_UID" -m 0700 "$dir"
+    else
+        mkdir -p -m 0700 "$VM_STATE" "$dir"
+    fi
+    chattr +C "$dir" >/dev/null 2>&1 || true
+    printf '%s\n' "$dir"
+}
+
+# DIR/disk.qcow2: a copy-on-write overlay over the read-only BASE, made once
+# (the base is only ever read). Prints the overlay's path.
+vm_overlay() { # NAME BASE DIR
+    local name="$1" base="$2" dir="$3" fmt overlay="$3/disk.qcow2"
+    if [ ! -e "$overlay" ]; then
+        fmt=$(vm_disk_format "$name" vm_base "$base")
+        ${vm_drop[@]+"${vm_drop[@]}"} qemu-img create -f qcow2 -F "$fmt" -b "$base" "$overlay" >/dev/null ||
+            die "$name: cannot create its overlay over $base"
+    fi
+    printf '%s\n' "$overlay"
+}
+
+# Helpers of a VM (swtpm, virtiofsd) run as the VM's uid, in its cgroup; they
+# are stopped when the launcher ends, and cgroup.kill covers them on stop.
+vm_helper_stop() {
+    local p
+    for p in ${vm_helpers[@]+"${vm_helpers[@]}"}; do kill -TERM "$p" 2>/dev/null || true; done
+    for p in ${vm_helpers[@]+"${vm_helpers[@]}"}; do wait "$p" 2>/dev/null || true; done
+    vm_helpers=()
+}
+
+vm_wait_socket() { # NAME PID PATH: the helper made its socket, or it ended
+    local name="$1" pid="$2" sock="$3" i
+    for ((i = 0; i < 100; ++i)); do
+        [ -S "$sock" ] && return 0
+        kill -0 "$pid" 2>/dev/null || die "$name: a helper ended before it made $sock"
+        sleep 0.05
+    done
+    die "$name: a helper did not make $sock"
+}
+
+vm_ovmf_pair() { # NAME DIR: prints CODE and a private writable VARS in DIR
+    local name="$1" dir="$2" c v code= vars=
+    for c in /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd \
+        /usr/share/OVMF/x64/OVMF_CODE.4m.fd /usr/share/edk2/x64/OVMF_CODE.fd; do
+        [ -r "$c" ] && { code=$c; break; }
+    done
+    for v in /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd \
+        /usr/share/OVMF/x64/OVMF_VARS.4m.fd /usr/share/edk2/x64/OVMF_VARS.fd; do
+        [ -r "$v" ] && { vars=$v; break; }
+    done
+    [ -n "$code" ] && [ -n "$vars" ] || die "$name: UEFI requested (vm_uefi=\"1\") but OVMF firmware is not installed"
+    if [ ! -e "$dir/ovmf-vars.fd" ]; then
+        ${vm_drop[@]+"${vm_drop[@]}"} cp "$vars" "$dir/ovmf-vars.fd" ||
+            die "$name: cannot copy OVMF variables into $dir"
+    fi
+    printf '%s\n%s\n' "$code" "$dir/ovmf-vars.fd"
+}
+
+vm_virtiofsd_bin() {
+    local b
+    if [ -n "${LOCACHY_VIRTIOFSD:-}" ]; then
+        printf '%s\n' "$LOCACHY_VIRTIOFSD"
+        return 0
+    fi
+    for b in /usr/lib/virtiofsd /usr/libexec/virtiofsd; do
+        [ -x "$b" ] && { printf '%s\n' "$b"; return 0; }
+    done
+    command -v virtiofsd 2>/dev/null || return 1
+}
+
+vm_note() {
+    printf 'locachy-app: %s\n' "$*" >&2
+}
+
+# The installation ISO locachy-winiso supplies (KIND windows or virtio-win), or
+# nothing: it has none (status 3), it is not installed, or its answer is unusable.
+vm_winiso_path() { # NAME KIND
+    local out rc=0
+    [ -x "$WINISO_TOOL" ] || return 0
+    out=$("$WINISO_TOOL" path "$2" </dev/null 2>/dev/null) || rc=$?
+    case $rc in
+    0) ;;
+    3) return 0 ;;
+    *) vm_note "$1: locachy-winiso path $2 failed (status $rc): none supplied"; return 0 ;;
+    esac
+    if [[ "$out" == /* && "$out" != *$'\n'* ]] && [ -f "$out" ]; then
+        printf '%s\n' "$out"
+    else
+        vm_note "$1: locachy-winiso path $2 gave no usable path: none supplied"
+    fi
+}
+
+# Nothing is on the disk yet (qemu-img map, its backing chain included: no
+# extent with data that is not known to be zeros), so nothing is installed on
+# it. qemu-img create writes the first block of a raw image (zeros): a raw
+# image whose few data blocks (1 MiB at most) are all zeros is still blank.
+# Read as the VM's uid. Unreadable: not blank.
+vm_disk_blank() { # PATH FORMAT
+    ${vm_drop[@]+"${vm_drop[@]}"} python3 -I -c '
+import json, subprocess, sys
+path, fmt = sys.argv[1], sys.argv[2]
+out = subprocess.run(["qemu-img", "map", "--output=json", "-f", fmt, path],
+                     check=True, capture_output=True, text=True).stdout
+data = [e for e in json.loads(out) if e.get("data") and not e.get("zero")]
+if not data:
+    sys.exit(0)
+if fmt != "raw" or sum(e["length"] for e in data) > (1 << 20):
+    sys.exit(1)
+with open(path, "rb") as f:
+    for e in data:
+        f.seek(e.get("offset", e["start"]))
+        if f.read(e["length"]).strip(b"\0"):
+            sys.exit(1)
+' "$1" "$2" 2>/dev/null
+}
+
+# DIR/drivers.img: viostor and NetKVM as $WinPEDriver$, which Windows Setup
+# loads by itself from a removable disk, made from VIRTIO_ISO by locachy-winmaint
+# driver-seed as the VM's uid; made again only when the ISO is newer. Prints its path.
+vm_driver_seed() { # NAME VIRTIO_ISO DIR
+    local name="$1" virtio="$2" seed="$3/drivers.img" out
+    if [ -s "$seed" ] && [ ! "$virtio" -nt "$seed" ]; then
+        printf '%s\n' "$seed"
+        return 0
+    fi
+    if [ ! -x "$WINMAINT_TOOL" ]; then
+        vm_note "$name: no drivers seed: $WINMAINT_TOOL is not installed"
+        return 1
+    fi
+    if ! out=$(${vm_drop[@]+"${vm_drop[@]}"} "$WINMAINT_TOOL" driver-seed --virtio-iso "$virtio" --out "$seed" </dev/null); then
+        vm_note "$name: no drivers seed: locachy-winmaint driver-seed failed"
+        return 1
+    fi
+    if [ "$out" != "$seed" ] || [ ! -s "$seed" ]; then
+        vm_note "$name: no drivers seed: locachy-winmaint driver-seed did not make $seed"
+        return 1
+    fi
+    printf '%s\n' "$seed"
+}
+
+# Build the QEMU argv for a declarative custom VM (vm_base or vm_disk, no
+# command=) into vm_cmd, and record any helper commands to start (vm_need_tpm,
+# vm_need_vfs, vm_vfs_dir) after entering app_NAME. Never starts helpers here:
+# helpers must live inside app_NAME so freeze and stop include them.
+vm_custom_build() { # NAME QMP_SOCK WANT_NET
+    local name="$1" qmp_sock="$2" want_net="$3"
+    local os base disk iso virtio_iso mem cpus display uefi tpm share_home nic gpu bus audio
+    local state_dir disk_path disk_fmt aio qemu accel cpu_arg machine code vars_fd
+    local iso_boot=1 blank=0 seed= record=()
+    vm_need_tpm=0
+    vm_need_vfs=0
+    vm_vfs_dir=
+    vm_state_used=
+    vm_check_keys "$name"
+    os=$(conf_value "$name" vm_os)
+    [ -n "$os" ] || os=linux
+    case $os in
+    linux|windows) ;;
+    *) die "$name: unknown vm_os \"$os\" (expected linux or windows)" ;;
+    esac
+    base=$(conf_value "$name" vm_base)
+    disk=$(conf_value "$name" vm_disk)
+    [ -n "$base" ] || [ -n "$disk" ] ||
+        die "$name: custom VM needs command=, vm_base=, or vm_disk= in $CONT_CONF/$name.conf"
+    [ -z "$base" ] || [ -z "$disk" ] ||
+        die "$name: set either vm_base= (overlay) or vm_disk= (direct image), not both"
+    mem=$(conf_value "$name" vm_memory); [ -n "$mem" ] || mem=4096
+    cpus=$(conf_value "$name" vm_cpus); [ -n "$cpus" ] || cpus=4
+    display=$(conf_value "$name" vm_display); [ -n "$display" ] || display=gtk
+    [[ "$mem" =~ ^[1-9][0-9]*$ ]] || die "$name: invalid vm_memory ($mem)"
+    [[ "$cpus" =~ ^[1-9][0-9]*$ ]] || die "$name: invalid vm_cpus ($cpus)"
+    [[ "$display" =~ ^[A-Za-z0-9][A-Za-z0-9_,=.-]{0,63}$ ]] || die "$name: invalid vm_display ($display)"
+    uefi=$(conf_value "$name" vm_uefi)
+    [ -n "$uefi" ] || { [ "$os" = windows ] && uefi=1 || uefi=0; }
+    tpm=$(conf_value "$name" vm_tpm)
+    if [ -z "$tpm" ]; then
+        tpm=0
+        [ "$os" = windows ] && command -v "${LOCACHY_SWTPM:-swtpm}" >/dev/null 2>&1 && tpm=1
+    fi
+    share_home=$(conf_value "$name" vm_share_home); [ -n "$share_home" ] || share_home=0
+    # virtio-blk (iothread, io_uring) and virtio-net are the fast defaults. A
+    # Windows guest's are decided once its disk and virtio-win are known (below).
+    nic=$(conf_value "$name" vm_nic)
+    [ -n "$nic" ] || [ "$os" = windows ] || nic=virtio
+    gpu=$(conf_value "$name" vm_gpu); [ -n "$gpu" ] || gpu=2d
+    bus=$(conf_value "$name" vm_disk_bus)
+    [ -n "$bus" ] || [ "$os" = windows ] || bus=virtio
+    audio=$(conf_value "$name" vm_audio); [ -n "$audio" ] || audio=0
+    case $uefi in 0|1) ;; *) die "$name: vm_uefi must be 0 or 1" ;; esac
+    case $tpm in 0|1) ;; *) die "$name: vm_tpm must be 0 or 1" ;; esac
+    case $share_home in 0|1) ;; *) die "$name: vm_share_home must be 0 or 1" ;; esac
+    case $audio in 0|1) ;; *) die "$name: vm_audio must be 0 or 1" ;; esac
+    [ -z "$nic" ] || case $nic in virtio|e1000e) ;; *) die "$name: unknown vm_nic \"$nic\" (expected virtio or e1000e)" ;; esac
+    case $gpu in 2d|gl) ;; *) die "$name: unknown vm_gpu \"$gpu\" (expected 2d or gl)" ;; esac
+    [ "$gpu" = gl ] && [ "$os" = windows ] && die "$name: vm_gpu=\"gl\" (virgl) is for Linux guests only"
+    [ -z "$bus" ] || case $bus in virtio|nvme|sata) ;; *) die "$name: unknown vm_disk_bus \"$bus\" (expected virtio, nvme, or sata)" ;; esac
+    case $display in gtk|sdl|none) ;; *) die "$name: unknown vm_display \"$display\" (expected gtk, sdl, or none)" ;; esac
+
+    qemu=${LOCACHY_QEMU_BIN:-qemu-system-x86_64}
+    command -v "$qemu" >/dev/null 2>&1 || die "$name: $qemu is not installed"
+    command -v qemu-img >/dev/null 2>&1 || die "$name: qemu-img is not installed"
+
+    state_dir=$(vm_state_dir "$name") || exit 1
+    vm_state_used=$state_dir
+    if [ -n "$base" ]; then
+        vm_path_ok "$name" vm_base "$base"
+        vm_app_can "$name" vm_base r "$base"
+        disk_path=$(vm_overlay "$name" "$base" "$state_dir") || exit 1
+        disk_fmt=qcow2
+    else
+        vm_path_ok "$name" vm_disk "$disk"
+        vm_app_can "$name" vm_disk r "$disk"
+        vm_app_can "$name" vm_disk w "$disk"
+        disk_path=$disk
+        disk_fmt=$(vm_disk_format "$name" vm_disk "$disk") || exit 1
+    fi
+    iso=$(conf_value "$name" vm_iso)
+    virtio_iso=$(conf_value "$name" vm_virtio_iso)
+    if [ "$os" = windows ]; then
+        if vm_disk_blank "$disk_path" "$disk_fmt"; then blank=1; fi
+        if [ -z "$iso" ]; then
+            iso=$(vm_winiso_path "$name" windows)
+            # The supplied installer boots first while the disk is blank (the
+            # installation); later the firmware's own order decides, which puts
+            # Windows Boot Manager first once Windows is installed.
+            [ -z "$iso" ] || [ "$blank" = 1 ] || iso_boot=0
+            [ -n "$iso" ] || [ "$blank" = 0 ] ||
+                vm_note "$name: its disk is blank and it has no Windows installation ISO: set vm_iso, or run locachy-winiso fetch windows"
+        fi
+        [ -n "$virtio_iso" ] || virtio_iso=$(vm_winiso_path "$name" virtio-win)
+    fi
+    if [ -n "$iso" ]; then
+        vm_path_ok "$name" vm_iso "$iso"
+        vm_iso_ok "$name" vm_iso "$iso"
+        vm_app_can "$name" vm_iso r "$iso"
+    fi
+    if [ -n "$virtio_iso" ]; then
+        vm_path_ok "$name" vm_virtio_iso "$virtio_iso"
+        vm_iso_ok "$name" vm_virtio_iso "$virtio_iso"
+        vm_app_can "$name" vm_virtio_iso r "$virtio_iso"
+    fi
+    if [ "$os" = windows ]; then
+        # With virtio-win, Windows Setup loads viostor and NetKVM from the seed by itself.
+        [ -z "$virtio_iso" ] || seed=$(vm_driver_seed "$name" "$virtio_iso" "$state_dir") || seed=
+        # Defaults, written into the configuration so that later starts keep
+        # them whatever virtio-win becomes. virtio only for a blank disk that
+        # Setup installs with the drivers seed; otherwise NVMe and e1000e, which
+        # Windows has drivers for: a disk with data may hold a Windows installed
+        # without viostor (INACCESSIBLE_BOOT_DEVICE on virtio-blk), vm_virtio_iso or not.
+        if [ -z "$bus" ]; then
+            [ "$blank" = 1 ] && [ -n "$seed" ] && bus=virtio || bus=nvme
+            record+=(vm_disk_bus "$bus")
+        fi
+        if [ -z "$nic" ]; then
+            [ "$blank" = 1 ] && [ -n "$seed" ] && nic=virtio || nic=e1000e
+            record+=(vm_nic "$nic")
+        fi
+        if [ "${#record[@]}" -gt 0 ]; then
+            if [ "$blank" = 1 ] && [ -z "$seed" ]; then
+                if [ -z "$virtio_iso" ]; then
+                    vm_note "$name: virtio-win is not available (no vm_virtio_iso, and locachy-winiso has none: the virtio-win package): NVMe disk and e1000e network, which Windows has drivers for"
+                else
+                    vm_note "$name: Windows Setup cannot load the virtio-win drivers by itself (no drivers seed): NVMe disk and e1000e network, which Windows has drivers for"
+                fi
+            fi
+            conf_set "$name" "${record[@]}"
+            vm_note "$name: recorded $(printf '%s="%s" ' "${record[@]}")in $CONT_CONF/$name.conf"
+        fi
+    fi
+    if [ "$share_home" = 1 ]; then
+        local uhome
+        uhome=$(getent passwd "$APP_UID" | cut -d: -f6 || true)
+        [ -n "$uhome" ] && [ -d "$uhome" ] || die "$name: vm_share_home=\"1\" but uid $APP_UID has no home directory"
+        vm_virtiofsd_bin >/dev/null || die "$name: vm_share_home=\"1\" requires virtiofsd"
+        vm_need_vfs=1
+        vm_vfs_dir=$uhome
+    fi
+    if [ "$tpm" = 1 ]; then
+        local swtpm_bin=${LOCACHY_SWTPM:-swtpm}
+        command -v "$swtpm_bin" >/dev/null 2>&1 || die "$name: vm_tpm=\"1\" requires $swtpm_bin"
+        vm_need_tpm=1
+    fi
+    if [ "$audio" = 1 ] && [ ! -S "$PULSE_SOCKETS/native" ]; then
+        die "$name: vm_audio=\"1\" needs the sound server (no restricted socket at $PULSE_SOCKETS/native)"
+    fi
+
+    accel=tcg; cpu_arg=max
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+        accel=kvm
+        if [ "$os" = windows ]; then
+            cpu_arg=host,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-time,hv-vpindex,hv-synic,hv-stimer,hv-stimer-direct,hv-reset,hv-frequencies,hv-tlbflush,hv-ipi
+        else
+            cpu_arg=host
+        fi
+    fi
+    machine="q35,accel=$accel"
+    [ "$os" = windows ] && [ "$uefi" = 1 ] && machine="$machine,smm=on"
+    [ "$vm_need_vfs" = 1 ] && machine="$machine,memory-backend=mem"
+
+    # io_uring is the disk engine; the host kernel must allow it (kernel.io_uring_disabled).
+    aio=io_uring
+    # 2d leaves OpenGL off; gl turns it on with virtio-vga-gl (Linux guests only).
+    # window-close=off: closing the window (its button, the bar, the overview)
+    # never pulls the guest's power; stop is QMP cont + system_powerdown.
+    local display_arg=$display
+    if [ "$display" = gtk ] || [ "$display" = sdl ]; then
+        if [ "$gpu" = gl ]; then display_arg="$display,gl=on"; else display_arg="$display,gl=off"; fi
+        display_arg="$display_arg,window-close=off"
+    fi
+
+    # The window tag: QEMU's title is "QEMU (TAG)" (GTK) or "QEMU (TAG-N)" (SDL).
+    # Brackets never occur in an app name, so one VM's tag never prefixes another's.
+    vm_cmd=("$qemu" -name "locachy-vm[$name]" -machine "$machine" -cpu "$cpu_arg" -smp "$cpus" -m "$mem")
+    if [ "$vm_need_vfs" = 1 ]; then
+        vm_cmd+=(-object "memory-backend-memfd,id=mem,size=${mem}M,share=on")
+    fi
+    if [ "$uefi" = 1 ]; then
+        local ovmf_out
+        ovmf_out=$(vm_ovmf_pair "$name" "$state_dir") || exit 1
+        code=${ovmf_out%%$'\n'*}
+        vars_fd=${ovmf_out#*$'\n'}
+        vm_cmd+=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$code"
+                 -drive "if=pflash,format=raw,unit=1,file=$vars_fd")
+    fi
+    case $bus in
+    virtio)
+        vm_cmd+=(-object iothread,id=io0
+                 -drive "file=$disk_path,format=$disk_fmt,if=none,id=hd0,cache=none,aio=$aio,discard=unmap"
+                 -device "virtio-blk-pci,drive=hd0,iothread=io0") ;;
+    nvme)
+        vm_cmd+=(-drive "file=$disk_path,format=$disk_fmt,if=none,id=hd0,cache=none,aio=$aio,discard=unmap"
+                 -device "nvme,drive=hd0,serial=locachy-$name") ;;
+    sata)
+        vm_cmd+=(-drive "file=$disk_path,format=$disk_fmt,if=none,id=hd0,cache=none,aio=$aio,discard=unmap"
+                 -device "ide-hd,drive=hd0,bus=ide.0") ;;
+    esac
+    # Each port of q35's AHCI controller (ide.0 to ide.5) takes one device:
+    # the SATA disk, the installer and the virtio-win CD get one each.
+    if [ -n "$iso" ]; then
+        if [ "$iso_boot" = 1 ]; then
+            vm_cmd+=(-drive "file=$iso,media=cdrom,readonly=on,if=none,id=cd0" -device "ide-cd,drive=cd0,bus=ide.1,bootindex=1")
+        else
+            vm_cmd+=(-drive "file=$iso,media=cdrom,readonly=on,if=none,id=cd0" -device "ide-cd,drive=cd0,bus=ide.1")
+        fi
+    fi
+    if [ -n "$virtio_iso" ]; then
+        vm_cmd+=(-drive "file=$virtio_iso,media=cdrom,readonly=on,if=none,id=cd1" -device "ide-cd,drive=cd1,bus=ide.2")
+    fi
+    if [ "$display" != none ]; then
+        if [ "$gpu" = gl ]; then
+            vm_cmd+=(-device virtio-vga-gl)
+        else
+            vm_cmd+=(-device virtio-vga)
+        fi
+    fi
+    if [ "$display" != none ] || [ -n "$seed" ]; then
+        vm_cmd+=(-device qemu-xhci,id=xhci)
+    fi
+    [ "$display" = none ] || vm_cmd+=(-device usb-tablet,bus=xhci.0)
+    if [ -n "$seed" ]; then
+        vm_cmd+=(-drive "file=$seed,format=raw,readonly=on,if=none,id=drv0" -device "usb-storage,drive=drv0,bus=xhci.0,removable=on")
+    fi
+    vm_cmd+=(-display "$display_arg" -qmp "unix:$qmp_sock,server=on,wait=off")
+    if [ "$want_net" = 1 ]; then
+        local nic_dev=virtio-net-pci
+        [ "$nic" = e1000e ] && nic_dev=e1000e
+        vm_cmd+=(-nic "user,model=$nic_dev")
+    else
+        vm_cmd+=(-nic none)
+    fi
+    if [ "$audio" = 1 ]; then
+        vm_cmd+=(-audiodev pa,id=snd0 -device ich9-intel-hda -device hda-duplex,audiodev=snd0)
+    fi
+    if [ "$vm_need_tpm" = 1 ]; then
+        vm_cmd+=(-chardev "socket,id=chrtpm,path=$state_dir/swtpm.sock"
+                 -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0)
+    fi
+    if [ "$vm_need_vfs" = 1 ]; then
+        vm_cmd+=(-chardev "socket,id=vfs0,path=$state_dir/vfs-home.sock"
+                 -device vhost-user-fs-pci,queue-size=1024,chardev=vfs0,tag=home)
+    fi
 }
 
 conf_value() {
@@ -580,10 +1241,11 @@ PY
 }
 
 # cgroup.events accounts for the entire subtree, even with no direct procs.
-# Sixty 50ms polls bound each kernel transition to approximately three seconds.
+# Sixty 50ms polls bound each kernel transition to approximately three seconds;
+# an optional fourth argument sets a custom poll count (e.g. 160 = ~8 s).
 wait_event() {
-    local cg="$1" key="$2" expected="$3" i
-    for ((i = 0; i < 60; ++i)); do
+    local cg="$1" key="$2" expected="$3" polls="${4:-60}" i
+    for ((i = 0; i < polls; ++i)); do
         [ "$(cg_event "$cg" "$key" || true)" = "$expected" ] && return 0
         sleep 0.05
     done
@@ -628,19 +1290,60 @@ stop_reclaim() {
     fi
 }
 do_resume() {
-    local name="$1" cg
+    local name="$1" cg qmp_sock paused_file
     cg=$(cg_path "$name")
     is_running "$name" || die "$name is not running"
     stop_reclaim "$name"
     printf '0\n' >"$cg/cgroup.freeze"
     wait_event "$cg" frozen 0 || die "timed out resuming $name"
     is_running "$name" || die "$name exited while resuming"
+    if is_vm "$name"; then
+        qmp_sock=$(vm_qmp_sock "$name")
+        paused_file=$(vm_paused_file "$name")
+        if [ -e "$paused_file" ]; then
+            if [ -S "$qmp_sock" ]; then
+                vm_qmp "$qmp_sock" cont || die "$name: QMP cont failed while resuming"
+            fi
+            rm -f "$paused_file"
+        fi
+    fi
 }
 
 do_freeze() {
-    local name="$1" cg bytes clipboard=$CLIPBOARD
+    local name="$1" cg bytes clipboard=$CLIPBOARD mode qmp_sock paused_file qmp_paused=0
     cg=$(cg_path "$name")
     is_running "$name" || die "$name is not running"
+    if is_vm "$name"; then
+        mode=$(vm_freeze_mode "$name")
+        if [ "$mode" = none ]; then
+            return 0
+        fi
+        is_frozen "$name" && return 0
+        qmp_sock=$(vm_qmp_sock "$name")
+        paused_file=$(vm_paused_file "$name")
+        # Sync clipboard before pausing vCPUs, then pause QEMU cleanly via QMP
+        # BEFORE freezing the cgroup so guest virtual clocks and virtio queues
+        # halt at a clean boundary and zero host wakeups occur while frozen.
+        if [ -x "$clipboard" ]; then
+            "$clipboard" sync >/dev/null 2>&1 || true
+        fi
+        if [ -S "$qmp_sock" ]; then
+            vm_qmp "$qmp_sock" stop || die "$name: QMP stop failed; not frozen"
+            : >"$paused_file"
+            qmp_paused=1
+        fi
+        # The compositor gates the cgroup through the clipboard handover, as for
+        # containers. Failing that, the VM is resumed rather than frozen unguarded.
+        if [ ! -x "$clipboard" ] || ! "$clipboard" freeze "$cg"; then
+            if [ "$qmp_paused" = 1 ]; then
+                vm_qmp "$qmp_sock" cont 2>/dev/null || true
+                rm -f "$paused_file"
+            fi
+            die "clipboard handover failed; $name was not frozen"
+        fi
+        is_running "$name" || die "$name exited while freezing"
+        return 0
+    fi
     is_frozen "$name" && return 0
     # The operation runs outside app_NAME, not in process 1. Its pending job
     # keeps the shared display active until the clipboard owns all bytes.
@@ -665,13 +1368,15 @@ do_freeze() {
 }
 
 request_term() {
-    local name="$1" pid= ticks= stat_line fields
+    local name="$1" pid= ticks= stat_line fields cg
+    cg=$(cg_path "$name")
     if [ -r "$APP_RUNTIME/$name/reaper.pid" ]; then
         read -r pid ticks <"$APP_RUNTIME/$name/reaper.pid" || true
     fi
     # Verify cgroup and start time rather than trusting a reusable host PID.
     if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$ticks" =~ ^[0-9]+$ ]] &&
-       grep -qxF "0::/app_$name" "/proc/$pid/cgroup" 2>/dev/null &&
+       { { [ "$CGROUP_BASE" = /sys/fs/cgroup ] && grep -qxF "0::/app_$name" "/proc/$pid/cgroup" 2>/dev/null; } ||
+         { [ "$CGROUP_BASE" != /sys/fs/cgroup ] && grep -qxF "$pid" "$cg/cgroup.procs" 2>/dev/null; }; } &&
        { read -r stat_line <"/proc/$pid/stat"; } 2>/dev/null; then
         fields=${stat_line##*) }
         read -r -a fields <<<"$fields"
@@ -682,7 +1387,7 @@ request_term() {
 }
 
 do_stop() {
-    local name="$1" cg
+    local name="$1" cg qmp_sock paused_file
     cg=$(cg_path "$name")
     stop_reclaim "$name"
     if is_running "$name"; then
@@ -696,21 +1401,49 @@ do_stop() {
             "$CLIPBOARD" sync >/dev/null ||
                 printf 'locachy-app: %s: clipboard was not saved before stopping\n' "$name" >&2
         fi
-        # Ask open Wayland windows to close cleanly first so browsers flush
-        # cookies and storage to disk before falling back to SIGTERM.
-        if [ -x /usr/local/lib/locachy/labwc-control ] && [ -S "$RUNTIME_DIR/locachy-control.sock" ] &&
-           /usr/local/lib/locachy/labwc-control --close "$name" 2>/dev/null; then
-            wait_event "$cg" populated 0 || true
-        fi
-        if is_running "$name"; then
-            request_term "$name"
-            # Allow up to three seconds for the reaper and launcher to exit.
-            wait_event "$cg" populated 0 || true
-            printf '1\n' >"$cg/cgroup.kill"
-            wait_event "$cg" populated 0 || die "timed out stopping $name after cgroup.kill"
+        if is_vm "$name"; then
+            wait_event "$cg" frozen 0 || true
+            qmp_sock=$(vm_qmp_sock "$name")
+            paused_file=$(vm_paused_file "$name")
+            if [ -e "$paused_file" ]; then
+                if [ -S "$qmp_sock" ]; then
+                    vm_qmp "$qmp_sock" cont 2>/dev/null || true
+                fi
+                rm -f "$paused_file"
+            fi
+            # Graceful ACPI power button via QMP so Windows/Linux guests flush
+            # disks and run shutdown hooks (up to ~8 s), then SIGTERM so the
+            # launcher's finally block tears down dm-linear/loop/swtpm cleanly.
+            if [ -S "$qmp_sock" ]; then
+                vm_qmp "$qmp_sock" system_powerdown 2>/dev/null || true
+                wait_event "$cg" populated 0 160 || true
+            fi
+            if is_running "$name"; then
+                request_term "$name"
+                wait_event "$cg" populated 0 60 || true
+            fi
+            if is_running "$name"; then
+                printf '1\n' >"$cg/cgroup.kill"
+                wait_event "$cg" populated 0 || die "timed out stopping $name after cgroup.kill"
+            fi
+        else
+            # Ask open Wayland windows to close cleanly first so browsers flush
+            # cookies and storage to disk before falling back to SIGTERM.
+            if [ -x /usr/local/lib/locachy/labwc-control ] && [ -S "$RUNTIME_DIR/locachy-control.sock" ] &&
+               /usr/local/lib/locachy/labwc-control --close "$name" 2>/dev/null; then
+                wait_event "$cg" populated 0 || true
+            fi
+            if is_running "$name"; then
+                request_term "$name"
+                # Allow up to three seconds for the reaper and launcher to exit.
+                wait_event "$cg" populated 0 || true
+                printf '1\n' >"$cg/cgroup.kill"
+                wait_event "$cg" populated 0 || die "timed out stopping $name after cgroup.kill"
+            fi
         fi
     fi
-    rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/tor-mode" "$APP_RUNTIME/$name.ready"
+    rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/tor-mode" "$APP_RUNTIME/$name.ready" \
+          "$APP_RUNTIME/$name/vm-paused" "$(vm_qmp_sock "$name")" "$VM_STATE/$name/swtpm.sock" "$VM_STATE/$name/vfs-home.sock"
     if [ "$(conf_value "$name" tor)" = 1 ]; then
         "$TOR_ENFORCE" app-remove "$name" || die "$name: cannot remove its Tor firewall"
         rm -f "$APP_RUNTIME/$name/tor-firewall"
@@ -728,6 +1461,11 @@ do_stop() {
 do_open_running() { # NAME TARGET COMMAND...
     local name=$1 target=$2 pid= ticks= kv uid= gid= home=/ nnp=
     shift 2
+    if is_vm "$name"; then
+        # A VM is a single-instance machine: never spawn a second QEMU on its disk.
+        is_frozen "$name" && do_resume "$name"
+        return 0
+    fi
     if [ "$(conf_value "$name" network)" = 1 ] && [ "$(conf_value "$name" tor)" = 1 ]; then
         local tor_mode=system
         [ ! -r "$APP_RUNTIME/$name/tor-mode" ] || IFS= read -r tor_mode <"$APP_RUNTIME/$name/tor-mode" || tor_mode=system
@@ -782,6 +1520,9 @@ do_open_running() { # NAME TARGET COMMAND...
 do_build() {
     local name="$1" attempt cbase="$CONT_BASE/$1" pkg_cache=/var/cache/locachy-pkgs
     local packages repo_pkgs=() aur_pkgs=() p missing command
+    if [ "$(conf_value "$name" vm)" = 1 ]; then
+        die "$name is a VM app: it has no container package build"
+    fi
     if is_host "$name"; then
         # The same store build action installs a recipe with real-system
         # access on the host. The configuration grants that access; packages
@@ -945,13 +1686,17 @@ do_build() {
 # The previous upper back (upper.prev), the current one kept in its place.
 do_rollback() {
     local cbase="$CONT_BASE/$1"
+    if is_vm "$1"; then
+        die "$1 is a VM app: it has no container package build"
+    fi
     generation_tool rollback "$cbase" || die "$1: cannot roll back its build"
     printf 'locachy-app: %s rolled back (the other one is upper.prev)\n' "$1"
 }
 
 # The container gone: its configuration, its builds; its home only if asked.
 do_remove() {
-    local name="$1" cbase="$CONT_BASE/$1"
+    local name="$1" cbase="$CONT_BASE/$1" was_vm=0
+    is_vm "$name" && was_vm=1
     if [ "$(conf_value "$name" tor)" = 1 ]; then
         "$TOR_ENFORCE" app-remove "$name" || die "$name: cannot remove its Tor firewall"
         rm -f "$APP_RUNTIME/$name/tor-firewall"
@@ -961,6 +1706,15 @@ do_remove() {
     [ ! -e "$CONT_CONF/$name.conf" ] && [ ! -L "$CONT_CONF/$name.conf" ] ||
         config_action remove "$CONT_CONF/$name.conf" ||
         die "$name: $CONT_CONF/$name.conf is not a regular file: nothing removed; remove it by hand"
+    if [ "$was_vm" = 1 ]; then
+        # Remove the VM's managed state (overlay, OVMF vars, TPM state) and
+        # runtime bookkeeping; never touch user-supplied vm_base/vm_disk images
+        # or Maintenance Windows partitions.
+        rm -rf "$APP_RUNTIME/$name" "$APP_RUNTIME/$name.ready" "$APP_RUNTIME/$name.log" "$VM_STATE/$name"
+        rmdir "$(cg_path "$name")" 2>/dev/null || true
+        printf 'locachy-app: %s removed (user disk images and Maintenance Windows partitions are kept)\n' "$name"
+        return 0
+    fi
     if [ "${2:-}" = --data ]; then
         rm -rf "$cbase"
     elif [ -d "$cbase" ]; then
@@ -973,6 +1727,9 @@ do_remove() {
 # PKG... added to the container's extras, and the container built anew.
 do_install() {
     local name="$1"; shift
+    if is_vm "$name"; then
+        die "$name is a VM app: it has no container package build"
+    fi
     [ $# -gt 0 ] || { echo "usage: locachy-app install NAME PKG..." >&2; exit 2; }
     local extras
     extras=$(printf '%s\n' $(conf_value "$name" extras) "$@" | sort -u | tr '\n' ' ')
@@ -1092,7 +1849,7 @@ do_cameras() {
     for conf in "$CONT_CONF"/*.conf; do
         [ -f "$conf" ] || continue
         name=$(basename "$conf" .conf)
-        [ "$(conf_value "$name" camera)" = 1 ] && ! is_host "$name" && is_running "$name" || continue
+        [ "$(conf_value "$name" camera)" = 1 ] && ! is_host "$name" && ! is_vm "$name" && is_running "$name" || continue
         pid=
         read -r pid ticks <"$APP_RUNTIME/$name/reaper.pid" 2>/dev/null || continue
         [[ "$pid" =~ ^[1-9][0-9]*$ ]] && grep -qxF "0::/app_$name" "/proc/$pid/cgroup" 2>/dev/null || continue
@@ -1238,10 +1995,15 @@ build)
     # transaction (app-host-build, in the package domain), any other a
     # container's own build (app-build). The service checks the same at acceptance.
     load_config_snapshot "$name"
+    is_vm "$name" && die "$name is a VM app: it has no container package build"
     kind=app-build
     [ "$(conf_value "$name" host)" = 1 ] && kind=app-host-build
     route_app_job "$kind" "$name" "$@" ;;
-rollback|remove) route_app_job "app-$operation" "$name" "$@" ;;
+rollback)
+    load_config_snapshot "$name"
+    is_vm "$name" && die "$name is a VM app: it has no container package build"
+    route_app_job "app-$operation" "$name" "$@" ;;
+remove) route_app_job "app-$operation" "$name" "$@" ;;
 esac
 lock_app "$name"
 load_config_snapshot "$name"
@@ -1259,12 +2021,14 @@ resume) do_resume "$name"; exit 0 ;;
 freeze) do_freeze "$name"; exit 0 ;;
 stop|kill) do_stop "$name"; exit 0 ;;
 install|-S)
+    is_vm "$name" && die "$name is a VM app: it has no container package build"
     is_host "$name" && die "$name is a host program: its packages are the host's (locachy-pkg install)"
     is_running "$name" && die "stop $name before installing packages"
     do_install "$name" "$@"
     exit 0
     ;;
 build|rollback)
+    is_vm "$name" && die "$name is a VM app: it has no container package build"
     [ "$operation" = rollback ] && is_host "$name" && die "$name is a host program: it has no build to roll back"
     is_running "$name" && die "stop $name before it is built or rolled back"
     "do_$operation" "$name"
@@ -1276,6 +2040,11 @@ remove)
     exit 0
     ;;
 again)
+    if is_vm "$name"; then
+        is_running "$name" || die "$name is not running"
+        is_frozen "$name" && do_resume "$name"
+        exit 0
+    fi
     # Its own command once more, in the running container: asked first by
     # locachy-bar, since a program that runs more than once starts a second
     # copy rather than showing its window.
@@ -1289,31 +2058,52 @@ new)
     # A window of it, as the shared display's terminal key asks: its command
     # once more in it if it runs (a terminal: another one), else it starts.
     exec >>"$APP_RUNTIME/$name.log" 2>&1
-    saved_command "$name"
-    if is_running "$name"; then
-        is_frozen "$name" && do_resume "$name"
-        do_open_running "$name" "" "${saved_cmd[@]}"
-        exit 0
+    if is_vm "$name"; then
+        if is_running "$name"; then
+            is_frozen "$name" && do_resume "$name"
+            exit 0
+        fi
+        operation=start
+    else
+        saved_command "$name"
+        if is_running "$name"; then
+            is_frozen "$name" && do_resume "$name"
+            do_open_running "$name" "" "${saved_cmd[@]}"
+            exit 0
+        fi
+        operation=start
     fi
-    operation=start
     ;;
 open)
     # The container's own command with TARGET (a path or URL): run in the
     # container if it runs (a single-instance program hands it to its
     # window), else the container starts with it, below.
     target=$1
-    saved_command "$name"
-    if is_running "$name"; then
-        is_frozen "$name" && do_resume "$name"
-        do_open_running "$name" "$target" "${saved_cmd[@]}"
-        exit 0
+    if is_vm "$name"; then
+        if is_running "$name"; then
+            is_frozen "$name" && do_resume "$name"
+            exit 0
+        fi
+        set --
+        operation=start
+    else
+        saved_command "$name"
+        if is_running "$name"; then
+            is_frozen "$name" && do_resume "$name"
+            do_open_running "$name" "$target" "${saved_cmd[@]}"
+            exit 0
+        fi
+        set -- "${saved_cmd[@]}" "$target"
+        operation=start
     fi
-    set -- "${saved_cmd[@]}" "$target"
-    operation=start
     ;;
 esac
 
 if is_running "$name"; then
+    if is_vm "$name" && is_frozen "$name"; then
+        do_resume "$name"
+        exit 0
+    fi
     printf 'locachy-app: %s is already running; window activation is not requested\n' "$name" >&2
     exit 0
 fi
@@ -1324,6 +2114,227 @@ shared_wayland=${LOCACHY_WAYLAND_DISPLAY:-locachy-0}
 [[ "$shared_wayland" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,107}$ ]] || die 'invalid LOCACHY_WAYLAND_DISPLAY socket name'
 [ "$shared_wayland" != bus ] || die 'Wayland socket name conflicts with the session bus'
 [ -S "$RUNTIME_DIR/$shared_wayland" ] || die "Wayland socket is not available: $RUNTIME_DIR/$shared_wayland"
+
+if is_vm "$name"; then
+    [ -x "$APP_INIT" ] || die "container reaper is not installed: $APP_INIT"
+    for tool in unshare mount mkfifo; do
+        command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
+    done
+    if [ "$want_net" = 1 ] && [ -f "$CONT_CONF/$name.conf" ]; then
+        conf_set "$name" network 1
+    elif [ "$(conf_value "$name" network)" = 1 ]; then
+        want_net=1
+    fi
+    vm_kind=$(conf_value "$name" vm_kind)
+    vm_check_keys "$name"
+    vm_drop=()
+    vm_run_as_user=0
+    if [ "$vm_kind" != winmaint ]; then
+        vm_set_drop
+        [ "${#vm_drop[@]}" -gt 0 ] && vm_run_as_user=1
+    fi
+    # Every VM keeps its own state directory (owned by uid 1000 when dropped)
+    # so QEMU/swtpm/virtiofsd can create sockets there even when unprivileged.
+    vm_sdir=$(vm_state_dir "$name") || exit 1
+    qmp_sock=$(vm_qmp_sock "$name")
+    if [ $# -eq 0 ]; then
+        vm_command "$name" "$qmp_sock" "$want_net"
+        set -- "${vm_cmd[@]}"
+    fi
+    cg=$(cg_path "$name")
+    mkdir -p "$cg"
+    chmod 0755 "$cg"
+    [ -w "$cg/cgroup.freeze" ] && [ -w "$cg/cgroup.kill" ] || die 'a writable cgroup v2 freezer and cgroup.kill are required'
+    # Fail closed, as containers do: on locachy-net when it exists, else a
+    # private namespace with loopback only (never the host network).
+    net_prefix=()
+    net_args=(--net)
+    if [ "$want_net" = 1 ] && [ -e /run/netns/locachy-net ]; then
+        net_prefix=(nsenter --net=/run/netns/locachy-net)
+        net_args=()
+    fi
+    if [ "$want_net" = 1 ] && rc_has_key service_clash && [ "$(rc_key_value clash_mode)" = proxy ]; then
+        export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890
+        export no_proxy=localhost,127.0.0.1,::1,.local,.ts.net
+        export HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy ALL_PROXY=$all_proxy NO_PROXY=$no_proxy
+    fi
+    vm_uid=0; vm_gid=0; vm_uhome=/root
+    if [ "$vm_run_as_user" = 1 ]; then
+        IFS=: read -r _ _ vm_uid vm_gid _ vm_uhome _ <<<"$(getent passwd "$APP_UID" || true)"
+        [ -n "$vm_uid" ] && [ -n "$vm_gid" ] || die "there is no user with uid $APP_UID: create it with locachy-setup"
+    fi
+    if [ "$vm_kind" = compute ] && [ "$vm_run_as_user" = 1 ]; then
+        # locachy-compute runs as uid 1000 and keeps this VM's run directory
+        # (/run/locachy/compute/vm-NAME) there; the name was checked above.
+        compute_vname=$(conf_value "$name" vm_name)
+        [ -n "$compute_vname" ] || compute_vname=$name
+        install -d -m 0711 /run/locachy/compute
+        install -d -o "$vm_uid" -g "$vm_gid" -m 0700 "/run/locachy/compute/vm-$compute_vname"
+    fi
+    vm_audio_pw=
+    vm_audio_pulse=
+    if [ -S "$PULSE_SOCKETS/native" ]; then
+        vm_audio_pulse="unix:$PULSE_SOCKETS/native"
+    elif [ "$vm_run_as_user" = 0 ] && [ -S "$RUNTIME_DIR/pulse/native" ]; then
+        vm_audio_pulse="unix:$RUNTIME_DIR/pulse/native"
+    fi
+    if [ -S "$PIPEWIRE_SOCKETS/pipewire-0" ]; then
+        vm_audio_pw="$PIPEWIRE_SOCKETS/pipewire-0"
+    elif [ "$vm_run_as_user" = 0 ] && [ -S "$RUNTIME_DIR/pipewire-0" ]; then
+        vm_audio_pw="$RUNTIME_DIR/pipewire-0"
+    fi
+    ready_dir=$(mktemp -d "$APP_RUNTIME/$name/.start.XXXXXXXX")
+    trap 'rm -f "$ready_dir/ready"; rmdir "$ready_dir" 2>/dev/null || true' EXIT
+    mkfifo -m 0600 "$ready_dir/ready"
+    exec {READY_FD}<>"$ready_dir/ready"
+    rm -f "$ready_dir/ready"
+    rmdir "$ready_dir"
+    trap - EXIT
+    rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/tor-mode" "$APP_RUNTIME/$name.ready" \
+          "$APP_RUNTIME/$name/vm-paused" "$qmp_sock" "$vm_sdir/swtpm.sock" "$vm_sdir/vfs-home.sock"
+    caller_cg=$CGROUP_BASE
+    while IFS= read -r _cg_line; do
+        case $_cg_line in 0::*) caller_cg="$CGROUP_BASE${_cg_line#0::}"; break ;; esac
+    done </proc/self/cgroup 2>/dev/null || true
+    printf '0\n' >"$cg/cgroup.freeze"
+    printf '%s\n' "$$" >"$cg/cgroup.procs"
+    # Helpers (swtpm, virtiofsd) start AFTER entering app_NAME so freeze and
+    # stop cover them alongside QEMU, and run under the same uid/group drop.
+    # The trap comes first: a helper that fails or times out (die) stops the
+    # ones already started, and app_NAME is left without processes.
+    trap 'vm_helper_stop' EXIT
+    if [ "$vm_need_tpm" = 1 ]; then
+        tpm_state="$vm_sdir/swtpm"
+        if [ "$vm_run_as_user" = 1 ]; then
+            install -d -o "$vm_uid" -g "$vm_gid" -m 0700 "$tpm_state"
+        else
+            mkdir -p -m 0700 "$tpm_state"
+        fi
+        ${vm_drop[@]+"${vm_drop[@]}"} "${LOCACHY_SWTPM:-swtpm}" socket --tpm2 \
+            --tpmstate "dir=$tpm_state" --ctrl "type=unixio,path=$vm_sdir/swtpm.sock" \
+            </dev/null >>"$APP_RUNTIME/$name.log" 2>&1 {APP_LOCK_FD}>&- {READY_FD}>&- &
+        vm_helpers+=("$!")
+        vm_wait_socket "$name" "$!" "$vm_sdir/swtpm.sock"
+    fi
+    if [ "$vm_need_vfs" = 1 ]; then
+        vfs_bin=$(vm_virtiofsd_bin) || die "$name: virtiofsd is not installed"
+        ${vm_drop[@]+"${vm_drop[@]}"} "$vfs_bin" --socket-path="$vm_sdir/vfs-home.sock" \
+            --shared-dir="$vm_vfs_dir" --sandbox=namespace --cache=auto \
+            </dev/null >>"$APP_RUNTIME/$name.log" 2>&1 {APP_LOCK_FD}>&- {READY_FD}>&- &
+        vm_helpers+=("$!")
+        vm_wait_socket "$name" "$!" "$vm_sdir/vfs-home.sock"
+    fi
+    "${net_prefix[@]}" unshare --mount --pid --fork --kill-child --propagation slave "${net_args[@]}" bash -euc '
+        display=$1; init=$2; ready_fd=$3; host_runtime=$4; state_dir=$5; qmp_sock=$6
+        pulse_srv=$7; pw_sock=$8; rc_conf=$9; cg_procs=${10}; want_net=${11}
+        run_user=${12}; uid=${13}; gid=${14}; uhome=${15}; vm_sdir=${16}
+        pw_sockets=${17}; pulse_sockets=${18}; shift 18
+        host_pid=; start_ticks=
+        while read -r key value rest; do
+            if [ "$key" = Pid: ]; then host_pid=$value; break; fi
+        done </proc/self/status
+        read -r stat_line </proc/self/stat
+        stat_fields=${stat_line##*) }
+        read -r -a stat_fields <<<"$stat_fields"
+        start_ticks=${stat_fields[19]}
+        [ -n "$host_pid" ] && [ -n "$start_ticks" ] || { printf "locachy-app: cannot read reaper identity\n" >&2; exit 125; }
+        printf "%s %s\n" "$host_pid" "$start_ticks" >"$state_dir/reaper.pid"
+        if [ -n "$cg_procs" ]; then
+            printf "%s\n" "$host_pid" >>"$cg_procs" 2>/dev/null || true
+        fi
+        ip link set lo up 2>/dev/null || true
+        if [ "$want_net" = 1 ] && [ -f /etc/netns/locachy-net/resolv.conf ]; then
+            mount --bind -o ro /etc/netns/locachy-net/resolv.conf /etc/resolv.conf 2>/dev/null || true
+        fi
+        if [ "$run_user" = 1 ]; then
+            # Project only the display socket (and restricted sound) into a
+            # tmpfs owned by uid 1000 so unprivileged QEMU never needs access
+            # to root'\''s 0700 /run/user/0.
+            vm_run="$vm_sdir/run"
+            install -d -o "$uid" -g "$gid" -m 0700 "$vm_run"
+            mount -t tmpfs -o "mode=0700,uid=$uid,gid=$gid,nosuid,nodev" vmrun "$vm_run"
+            chmod 0666 "$host_runtime/$display" 2>/dev/null || true
+            touch "$vm_run/$display"
+            mount --bind "$host_runtime/$display" "$vm_run/$display"
+            if [ -d "$pulse_sockets" ]; then
+                install -d -o "$uid" -g "$gid" -m 0700 "$vm_run/pulse"
+                mount --bind -o ro "$pulse_sockets" "$vm_run/pulse"
+                pulse_srv="unix:$vm_run/pulse/native"
+            fi
+            if [ -d "$pw_sockets" ]; then
+                install -d -o "$uid" -g "$gid" -m 0700 "$vm_run/pipewire"
+                mount --bind -o ro "$pw_sockets" "$vm_run/pipewire"
+                pw_sock="$vm_run/pipewire/pipewire-0"
+            fi
+            export XDG_RUNTIME_DIR="$vm_run"
+            export HOME="$uhome"
+        else
+            export XDG_RUNTIME_DIR="$host_runtime"
+        fi
+        export LOCACHY_APP_READY_FD="$ready_fd"
+        export LOCACHY_VM_QMP_SOCK="$qmp_sock"
+        export WAYLAND_DISPLAY="$display"
+        export GDK_BACKEND="wayland"
+        export SDL_VIDEODRIVER="wayland"
+        unset WAYLAND_SOCKET DISPLAY XAUTHORITY SEATD_SOCK LOCACHY_APP_UID LOCACHY_APP_GID LOCACHY_APP_NO_NEW_PRIVS
+        if [ -n "$pulse_srv" ]; then
+            export PULSE_SERVER="$pulse_srv"
+        fi
+        if [ -n "$pw_sock" ]; then
+            export PIPEWIRE_REMOTE="$pw_sock"
+        fi
+        sys_lang=
+        if [ -r "$rc_conf" ]; then
+            while IFS= read -r _rcline || [ -n "$_rcline" ]; do
+                _rcline=${_rcline#"${_rcline%%[![:space:]]*}"}
+                case $_rcline in
+                language=\"*\"*)
+                    sys_lang=${_rcline#language=\"}
+                    sys_lang=${sys_lang%%\"*}
+                    ;;
+                esac
+            done <"$rc_conf"
+        fi
+        if [ -n "$sys_lang" ]; then
+            export LANG="$sys_lang"
+            export LANGUAGE="${sys_lang%%.*}:en_US"
+        fi
+        exec "$init" "$@"
+    ' bash "$shared_wayland" "$APP_INIT" "$READY_FD" "$RUNTIME_DIR" "$APP_RUNTIME/$name" "$qmp_sock" \
+        "$vm_audio_pulse" "$vm_audio_pw" "$RC_CONF" "$([ "$CGROUP_BASE" != /sys/fs/cgroup ] && printf '%s/cgroup.procs' "$cg" || true)" \
+        "$want_net" "$vm_run_as_user" "$vm_uid" "$vm_gid" "$vm_uhome" "$vm_sdir" "$PIPEWIRE_SOCKETS" "$PULSE_SOCKETS" \
+        ${vm_drop[@]+"${vm_drop[@]}"} "$@" {APP_LOCK_FD}>&- &
+    launcher=$!
+    ready_why=
+    if ! wait_ready "$READY_FD" "$launcher"; then
+        exec {READY_FD}>&-
+        case $ready_why in
+        ended)
+            status=0
+            wait "$launcher" || status=$?
+            printf 'locachy-app: %s ended before it was ready (status %s)\n' "$name" "$status" >&2 ;;
+        line) printf 'locachy-app: %s wrote a malformed readiness line\n' "$name" >&2 ;;
+        *) printf 'locachy-app: %s failed to initialize within six seconds\n' "$name" >&2 ;;
+        esac
+        vm_helper_stop
+        [ ! -w "$caller_cg/cgroup.procs" ] || printf '%s\n' "$$" >"$caller_cg/cgroup.procs" 2>/dev/null || true
+        printf '1\n' >"$cg/cgroup.kill"
+        wait_event "$cg" populated 0 || true
+        rm -f "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/vm-paused" "$qmp_sock" \
+              "$vm_sdir/swtpm.sock" "$vm_sdir/vfs-home.sock"
+        exit 125
+    fi
+    exec {READY_FD}>&-
+    touch "$APP_RUNTIME/$name.ready"
+    unlock_app
+    status=0
+    wait "$launcher" || status=$?
+    vm_helper_stop
+    rm -f "$APP_RUNTIME/$name.ready" "$APP_RUNTIME/$name/reaper.pid" "$APP_RUNTIME/$name/vm-paused" "$qmp_sock" \
+          "$vm_sdir/swtpm.sock" "$vm_sdir/vfs-home.sock"
+    [ ! -w "$caller_cg/cgroup.procs" ] || printf '%s\n' "$$" >"$caller_cg/cgroup.procs" 2>/dev/null || true
+    exit "$status"
+fi
 # The shared Xwayland display, for a program whose configuration asks for it
 # (x11="1"), as labwc's xinitrc published it once the user may connect; never
 # inherited from a caller or guessed as :0. None: Wayland only. A program

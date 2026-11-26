@@ -26,7 +26,9 @@ rc_value() {
 }
 
 mkdir -p "$BASE"/{images,envs,vms,jobs,data} "$RUN"
-chmod 0700 "$RUN"
+# Traverse only: a VM app's QEMU (uid 1000) reaches its own vm-NAME (0700) here
+# without listing the others.
+chmod 0711 "$RUN"
 
 # Wait briefly at boot for network-client to create locachy-net instead of
 # hitting process 1's 5 s restart backoff immediately.

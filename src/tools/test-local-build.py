@@ -344,6 +344,37 @@ class LocalBuild(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
 
+class KeyringPath(unittest.TestCase):
+    def test_installer_key_root_uses_the_already_open_home(self):
+        text = SOURCE.read_text()
+        function = text[text.index("\nkeyring_open() {"):].split("\n}\n", 1)[0] + "\n}\n"
+        with tempfile.TemporaryDirectory(prefix="keyring-path-", dir=SCRATCH) as temp:
+            home = Path(temp) / "home"
+            home.mkdir()
+            script = '''set -e
+home=$1
+key_uid=$2
+as_builder() {
+    if [ "$1" = install ]; then
+        if [ -n "$key_uid" ]; then
+            [ "${@: -1}" = .gnupg ] || return 1
+            (cd "$home" && "$@")
+        else
+            [ "${@: -1}" = "$home/.gnupg" ] || return 1
+            "$@"
+        fi
+    fi
+}
+''' + function + "keyring_open\n"
+            for key_uid in ("123", ""):
+                with self.subTest(key_uid=key_uid):
+                    result = subprocess.run(["bash", "-c", script, "keyring-path", str(home), key_uid],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue((home / ".gnupg").is_dir())
+                    self.assertEqual((home / ".gnupg").stat().st_mode & 0o777, 0o700)
+
+
 class BuildUserKeyring(unittest.TestCase):
     """locachy-build's keyring_open and keyring_close with the real GnuPG, a
     keyboxd keyring as GnuPG 2.4 makes one, and build roots of their own (a

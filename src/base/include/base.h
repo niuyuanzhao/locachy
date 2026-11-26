@@ -680,6 +680,7 @@ int open_normalize(const char *target, char *out, size_t size); /* file:// URL -
 int open_type(const char *target, char *type, size_t size);     /* 0, or -1: cannot tell */
 int open_shared(const char *path, char *why, size_t size);      /* 1: in a shared folder */
 int open_host(const char *name);                                 /* 1: a host program (host="1") */
+int open_vm(const char *name);                                   /* 1: a managed VM app (vm="1") */
 void open_user_dirs(char *home, size_t hsize, char *dirs, size_t dsize);
 int open_candidates(const char *type, char names[][OPEN_NAME], int max);
 int open_containers(char names[][OPEN_NAME], int max);
@@ -690,6 +691,17 @@ int open_containers(char names[][OPEN_NAME], int max);
  * file chooser) is its parent window's (wlr-foreign-toplevel's parent). */
 #define OPEN_WINDOW_ID 128
 int open_window_ids(const char *name, char ids[][OPEN_WINDOW_ID], int max);
+/* Does window (app_id, title) belong to container or VM app name? Every
+ * QEMU window has a "qemu" app id (open_window_qemu), so a vm="1" app's is
+ * named by the -name its launcher gives QEMU, in the title: "QEMU (TAG)"
+ * (GTK, anything after it) or "QEMU (TAG-N)" (SDL), TAG "locachy-vm[NAME]",
+ * "locachy-compute[VMNAME]" or "locachy-winmaint". A QEMU window with such a
+ * title (open_window_vm_tagged) is that VM's alone: no app id claims it.
+ * Other windows are matched by app id (open_window_ids), a VM's only if it
+ * has a command. */
+int open_window_matches(const char *name, const char *app_id, const char *title);
+int open_window_qemu(const char *app_id);                          /* 1: QEMU's app id */
+int open_window_vm_tagged(const char *app_id, const char *title);  /* 1: a managed VM's title */
 void open_label(const char *name, const char *type, char *label, size_t size);
 int open_rule(const char *type, char *name, size_t size);       /* OPEN_NO_RULE...; name if CONTAINER */
 int open_set_rule(const char *type, const char *value);         /* a container, "ask", or NULL */

@@ -428,11 +428,90 @@ const char *extdisplay_setup_reason_text(const char *reason)
     if (!reason) return N_("The broker ended the pairing.");
     if (strcmp(reason, "handshake-failed") == 0) return N_("The sender failed the handshake. Check the code and try again.");
     if (strcmp(reason, "timeout") == 0) return N_("The sender did not answer in time.");
-    if (strcmp(reason, "carrier-lost") == 0) return N_("The cable link went down.");
+    if (strcmp(reason, "carrier-lost") == 0) return N_("The cable was unplugged. Waiting for the cable.");
     if (strcmp(reason, "released") == 0) return N_("Disconnected.");
     if (strcmp(reason, "cancelled") == 0) return N_("Pairing cancelled.");
     if (strcmp(reason, "error") == 0) return N_("The connection ended, or the broker failed.");
     return N_("The broker ended the pairing.");
+}
+
+static int same_iface(const struct extdisplay_iface *a, const struct extdisplay_iface *b)
+{
+    return a->ifindex == b->ifindex && strcmp(a->address, b->address) == 0;
+}
+
+void extdisplay_auto_init(struct extdisplay_auto *a)
+{
+    memset(a, 0, sizeof *a);
+    a->enabled = 1;
+}
+
+void extdisplay_auto_on_event(struct extdisplay_auto *a, struct extdisplay_setup *s, enum extdisplay_setup_event ev)
+{
+    switch (ev) {
+    case EXTDISPLAY_SETUP_EV_CHANGED:
+        if (s->state == EXTDISPLAY_SETUP_LIST || s->state == EXTDISPLAY_SETUP_SCANNING) a->enabled = 1;
+        break;
+    case EXTDISPLAY_SETUP_EV_LIST: {
+        int blocked_present = 0;
+        for (int i = 0; i < s->count; i++) {
+            if (same_iface(&a->selection, &s->ifaces[i])) a->selected = i;
+            if (same_iface(&a->suppressed_iface, &s->ifaces[i])) {
+                blocked_present = 1;
+                if (s->ifaces[i].carrier != a->suppressed_iface.carrier) {
+                    a->suppressed_iface.carrier = s->ifaces[i].carrier;
+                    if (a->suppressed_iface.carrier) a->suppressed = 0;
+                }
+            }
+        }
+        if (!blocked_present) a->suppressed = 0;
+        break;
+    }
+    case EXTDISPLAY_SETUP_EV_ERROR:
+        a->enabled = 0;
+        a->suppressed = 1;
+        a->suppressed_iface = a->selection;
+        if (s->state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(s);
+        break;
+    case EXTDISPLAY_SETUP_EV_ENDED:
+        if (strcmp(s->reason, "cancelled") != 0) a->suppressed = 0;
+        a->enabled = !a->suppressed;
+        a->suppressed_iface = a->selection;
+        if (s->state == EXTDISPLAY_SETUP_IDLE || s->state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(s);
+        break;
+    default:
+        break;
+    }
+    if (s->state == EXTDISPLAY_SETUP_LIST && s->count && a->selected >= s->count) a->selected = 0;
+}
+
+void extdisplay_auto_after_session(struct extdisplay_auto *a, struct extdisplay_setup *s)
+{
+    a->enabled = 1;
+    a->suppressed = 0;
+    a->suppressed_iface = a->selection;
+    if (s->state == EXTDISPLAY_SETUP_IDLE || s->state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(s);
+}
+
+int extdisplay_auto_step(struct extdisplay_auto *a, struct extdisplay_setup *s)
+{
+    if (s->state != EXTDISPLAY_SETUP_LIST) return 0;
+    if (s->changed) {
+        extdisplay_setup_scan(s);
+        return 1;
+    }
+    if (a->enabled && !a->suppressed) {
+        int choice = extdisplay_setup_automatic(s);
+        if (choice >= 0) {
+            a->selected = choice;
+            a->selection = s->ifaces[choice];
+            s->error[0] = s->reason[0] = '\0';
+            a->enabled = 0;
+            extdisplay_setup_pair(s, a->selection.name);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* The broker's end of the channel is fd 3; everything else the child holds is

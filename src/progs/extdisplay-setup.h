@@ -87,6 +87,25 @@ void extdisplay_setup_forget(struct extdisplay_setup *s);
 /* "carrier lost" and the like, for the status line; NULL if unknown. */
 const char *extdisplay_setup_reason_text(const char *reason);
 
+/* Frontend auto-pair and hot-plug policy layered over extdisplay_setup:
+ * remembers user selection and manual suppression (Esc/F5/error), and re-arms
+ * automatic pairing after a session ends or carrier is lost so replugging the
+ * cable reconnects without user input while ambiguity still waits for a choice. */
+struct extdisplay_auto {
+    int enabled;
+    int suppressed;
+    int selected;
+    struct extdisplay_iface selection;
+    struct extdisplay_iface suppressed_iface;
+};
+
+void extdisplay_auto_init(struct extdisplay_auto *a);
+void extdisplay_auto_on_event(struct extdisplay_auto *a, struct extdisplay_setup *s, enum extdisplay_setup_event ev);
+void extdisplay_auto_after_session(struct extdisplay_auto *a, struct extdisplay_setup *s);
+/* Advances pending rescan or automatic pair when s is in EXTDISPLAY_SETUP_LIST.
+ * Returns 1 if a scan or pair was started, 0 otherwise. */
+int extdisplay_auto_step(struct extdisplay_auto *a, struct extdisplay_setup *s);
+
 /* The broker is a child of extdisplay: "extdisplay-broker --control-fd 3", with stdio on
  * /dev/null and nothing else open (the session owner's descriptor included).
  * Returns its pid and the caller's end of the control channel, or -1. */

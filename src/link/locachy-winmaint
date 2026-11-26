@@ -11,13 +11,17 @@ Subcommands:
   create --size-gib N [--disk /dev/...] [--image FILE] [--no-boot-rebuild]
   finalize-create [--no-boot-rebuild]
   reclaim [--disk /dev/...] [--image FILE] [--force-no-efi]
-  vm [--iso FILE] [--memory MIB] [--cpus N] [--display SPEC | --vnc ADDR]
-     [--no-tpm] [--dry-run]
+  vm [--iso FILE] [--virtio-iso FILE] [--memory MIB] [--cpus N]
+     [--disk-bus nvme|virtio] [--nic e1000e|virtio] [--share-dir PATH[:TAG]]
+     [--display SPEC | --vnc ADDR] [--qmp-sock PATH] [--no-tpm] [--dry-run]
+  vm-stop [--qmp-sock PATH] [--wait SEC] [--quit-after] [--powerdown-only]
   boot-once [--reboot] [--esp /efi]
+  boot-default windows|locachy [--reboot] [--esp /efi]
   sanitize-esp [--part DEV | --image FILE --offset-sectors N]
   heal-boot [--esp /efi]
   boot-guard [--esp /efi]
-  build-seed --output FILE
+  build-seed --output FILE [--virtio-iso FILE]
+  driver-seed --virtio-iso PATH --out IMG [--virtio-os w11|w10]
   build-virtual-gpt --disk PATH --head-out FILE --tail-out FILE
 """
 import argparse
@@ -32,6 +36,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import stat
 import struct
 import subprocess
@@ -52,6 +57,7 @@ SHRINK_STATUS_VAR = STATE_DIR / "shrink-last.status"
 OVMF_VARS_STATE = STATE_DIR / "ovmf-vars.fd"
 SWTPM_STATE_DIR = STATE_DIR / "swtpm"
 RUN_DIR = Path("/run/locachy/winmaint")
+QMP_SOCK = RUN_DIR / "qmp.sock"
 LOCK_PATH = Path("/run/locachy/winmaint.lock")
 DM_NAME = "locachy-winmaint-disk"
 
@@ -106,6 +112,14 @@ LABEL_C = "LOCACHY_WIN_C"
 FAT_LABEL_ESP = "WINMAINT_EP"
 WIN_EFI_LABEL = "LOCachy Maintenance Windows"
 WIN_EFI_LOADER = r"\EFI\Microsoft\Boot\bootmgfw.efi"
+# boot-default windows: the firmware entry that starts Windows first (locachy-efi
+# --windows-first). The Windows-side guard reads this description too.
+WIN_FIRST_LABEL = "LOCachy Maintenance Windows (default)"
+BOOT_DEFAULTS = ("locachy", "windows")
+EFI_RELEASED = 3  # locachy-efi --ensure-first --keep-windows-first: LOCachy was made first again
+EFI_DIR = Path("/sys/firmware/efi")
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+WINISO_UNAVAILABLE = 3  # locachy-winiso path KIND: the ISO is not available
 
 OVMF_CODE_CANDIDATES = (
     "/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd",
@@ -117,6 +131,17 @@ OVMF_VARS_CANDIDATES = (
     "/usr/share/edk2/x64/OVMF_VARS.4m.fd",
     "/usr/share/OVMF/x64/OVMF_VARS.4m.fd",
 )
+VIRTIOFSD_CANDIDATES = (
+    "/usr/lib/virtiofsd",
+    "/usr/libexec/virtiofsd",
+    "/usr/bin/virtiofsd",
+)
+VM_DISK_BUSES = ("nvme", "virtio")
+VM_NICS = ("e1000e", "virtio")
+VIRTIO_OS_CHOICES = ("w10", "w11")
+# Driver folders staged for Windows Setup as $WinPEDriver$ on the seed (removable media root):
+# Setup scans that folder itself; nothing is also injected into boot.wim.
+VIRTIO_SEED_DRIVERS = ("viostor", "NetKVM")
 
 
 def run_cmd(args, input_text=None, check=True, timeout=120):
@@ -171,6 +196,67 @@ def boot_helper_path():
     if sib.is_file():
         return sib
     return Path("/usr/local/bin/locachy-boot")
+
+
+def winiso_helper_path():
+    """locachy-winiso (installation ISOs), next to this program or installed; None without it."""
+    for cand in (Path(__file__).with_name("locachy-winiso"), Path("/usr/local/bin/locachy-winiso")):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def winiso_path(kind):
+    """`locachy-winiso path KIND` (windows, virtio-win): its one absolute path, or None when
+    the command is absent, has no such ISO (exit 3) or answers anything else (warned)."""
+    helper = winiso_helper_path()
+    if helper is None:
+        return None
+    try:
+        res = run_cmd([str(helper), "path", kind], check=False, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"locachy-winmaint: warning: locachy-winiso path {kind}: {e}", file=sys.stderr)
+        return None
+    if res.returncode == WINISO_UNAVAILABLE:
+        return None
+    lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    path = lines[0] if res.returncode == 0 and len(lines) == 1 else ""
+    try:
+        regular = os.path.isabs(path) and stat.S_ISREG(os.stat(path).st_mode)
+    except OSError:
+        regular = False
+    if not regular:
+        why = res.stderr.strip() or f"exit {res.returncode}, output {res.stdout.strip()!r}"
+        print(f"locachy-winmaint: warning: locachy-winiso path {kind} gave no usable path ({why})", file=sys.stderr)
+        return None
+    return path
+
+
+def current_boot_id():
+    """This boot's id (the kernel's random boot_id); empty when unreadable."""
+    try:
+        return BOOT_ID_PATH.read_text(encoding="ascii").strip()
+    except OSError:
+        return ""
+
+
+def boot_default_of(state):
+    """The recorded start mode: "windows" (Windows first until switched back) or "locachy"."""
+    return "windows" if state and state.get("boot_default") == "windows" else "locachy"
+
+
+def clear_boot_default(state):
+    state.pop("boot_default", None)
+    state.pop("boot_default_boot_id", None)
+
+
+def request_reboot():
+    """A clean reboot through process 1 (it waits for a running system job first)."""
+    reboot_bin = Path("/usr/local/bin/reboot")
+    if reboot_bin.is_file():
+        run_cmd([str(reboot_bin)])
+    else:
+        os.kill(1, signal.SIGTERM)
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +391,129 @@ def parse_gpt_disk(path):
             "last_lba": last_lba,
             "partitions": parts,
         }
+
+
+LSBLK_GPT_COLUMNS = "PATH,TYPE,PKNAME,MODEL,SERIAL,SIZE,PTTYPE,PTUUID,START,PARTN,PARTUUID,PARTLABEL,PARTTYPE"
+
+
+def _gpt_from_lsblk_node(dev, children):
+    """Build a parse_gpt_disk()-shaped dict from a single lsblk disk node and its partition nodes."""
+    path = str(dev.get("path") or "")
+    pttype = str(dev.get("pttype") or "").lower()
+    ptuuid = str(dev.get("ptuuid") or "").strip()
+    if pttype != "gpt" or not ptuuid:
+        raise RuntimeError(f"{path}: not a GPT disk in lsblk metadata")
+    size_bytes = int(dev.get("size") or 0)
+    if size_bytes < 68 * SECTOR_SIZE:
+        raise RuntimeError(f"{path}: disk too small for GPT ({size_bytes} bytes)")
+    total_sectors = size_bytes // SECTOR_SIZE
+    disk_guid = str(uuid.UUID(ptuuid)).lower()
+
+    parts = []
+    for child in children:
+        if child.get("type") != "part":
+            continue
+        partn = child.get("partn")
+        start = child.get("start")
+        psize = child.get("size")
+        partuuid = str(child.get("partuuid") or "").strip()
+        parttype = str(child.get("parttype") or "").strip()
+        if partn is None or start is None or psize is None:
+            raise RuntimeError(f"{path}: incomplete lsblk partition geometry")
+        sectors = int(psize) // SECTOR_SIZE
+        if sectors <= 0:
+            continue
+        start_lba = int(start)
+        parts.append({
+            "partn": int(partn),
+            "type_guid": str(uuid.UUID(parttype)).lower() if parttype else "",
+            "part_guid": str(uuid.UUID(partuuid)).lower() if partuuid else "",
+            "start_lba": start_lba,
+            "end_lba": start_lba + sectors - 1,
+            "sectors": sectors,
+            "attributes": 0,
+            "name": str(child.get("partlabel") or ""),
+        })
+    parts.sort(key=lambda p: p["partn"])
+    return {
+        "path": path,
+        "size_bytes": size_bytes,
+        "total_sectors": total_sectors,
+        "disk_guid": disk_guid,
+        "my_lba": 1,
+        "alt_lba": total_sectors - 1,
+        "first_lba": 34,
+        "last_lba": total_sectors - 34,
+        "partitions": parts,
+    }
+
+
+def _lsblk_gpt_map(disk_path=None):
+    """Query lsblk once and return {realpath: gpt_dict} for whole GPT disks (unprivileged read-only)."""
+    cmd = ["lsblk", "--json", "--tree", "--bytes", "--paths", "--output", LSBLK_GPT_COLUMNS]
+    if disk_path is not None:
+        cmd.append(str(disk_path))
+    res = run_cmd(cmd, check=False)
+    if res.returncode != 0 or not res.stdout.strip():
+        return {}
+    try:
+        devs = json.loads(res.stdout).get("blockdevices") or []
+    except ValueError:
+        return {}
+
+    # Support both --tree output (children nested) and flat output (children linked by pkname).
+    flat_parts = {}
+    disks = []
+    for node in devs:
+        ntype = node.get("type")
+        if ntype == "disk":
+            disks.append(node)
+        elif ntype == "part" and node.get("pkname"):
+            flat_parts.setdefault(os.path.realpath(str(node["pkname"])), []).append(node)
+
+    out = {}
+    for dev in disks:
+        path = str(dev.get("path") or "")
+        if not path or os.path.basename(path).startswith(SKIP_BLOCK_PREFIXES):
+            continue
+        key = os.path.realpath(path)
+        children = dev.get("children")
+        if children is None:
+            children = flat_parts.get(key, [])
+        try:
+            gpt = _gpt_from_lsblk_node(dev, children)
+        except (RuntimeError, ValueError, TypeError):
+            continue
+        out[key] = gpt
+    return out
+
+
+def parse_gpt_via_lsblk(disk_path):
+    """Read GPT metadata for one disk from lsblk/udev without raw block-device read access."""
+    key = os.path.realpath(str(disk_path))
+    gpt_map = _lsblk_gpt_map(disk_path)
+    if key in gpt_map:
+        return gpt_map[key]
+    raise RuntimeError(f"{disk_path}: GPT metadata unavailable via lsblk")
+
+
+def _parse_gpt_readonly(path, lsblk_cache=None):
+    """Read GPT directly; fall back to lsblk metadata ONLY when raw open fails with PermissionError."""
+    try:
+        return parse_gpt_disk(path)
+    except PermissionError:
+        pass
+    except OSError as e:
+        if e.errno not in (errno.EACCES, errno.EPERM):
+            raise
+    if lsblk_cache is not None:
+        if "map" not in lsblk_cache:
+            lsblk_cache["map"] = _lsblk_gpt_map()
+        key = os.path.realpath(str(path))
+        if key in lsblk_cache["map"]:
+            return lsblk_cache["map"][key]
+        raise RuntimeError(f"{path}: GPT metadata unavailable via lsblk")
+    return parse_gpt_via_lsblk(path)
 
 
 def find_winmaint_triplet(gpt):
@@ -640,6 +849,39 @@ def save_state(state, path=None):
     atomic_write_text(p, json.dumps(state, indent=2, sort_keys=True) + "\n", mode=0o600)
 
 
+def state_path_for_root(root):
+    """state.json of the system installed under root ("/" is this running system)."""
+    return Path(root) / "var/lib/locachy/winmaint/state.json"
+
+
+# The container entry locachy-app runs Windows by: written with the Maintenance
+# Windows triplet, removed with it, and never over a file someone else wrote.
+CONTAINER_CONF_REL = Path("etc/locachy/containers/winmaint.conf")
+CONTAINER_CONF_TEXT = 'vm="1"\nvm_kind="winmaint"\nvm_freeze="qmp"\nnetwork="1"\n'
+
+
+def write_container_conf(root):
+    """Write the managed container entry under root, unless one already exists there."""
+    path = Path(root) / CONTAINER_CONF_REL
+    if os.path.lexists(path):
+        return False
+    atomic_write_text(path, CONTAINER_CONF_TEXT, mode=0o644)
+    return True
+
+
+def remove_container_conf(root):
+    """Remove the container entry under root only if it is the managed vm_kind="winmaint" file."""
+    path = Path(root) / CONTAINER_CONF_REL
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if 'vm_kind="winmaint"' not in [line.strip() for line in lines]:
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
 def verify_state_against_gpt(state, gpt):
     """Confirm disk GUID and all 3 partition GUIDs/types/names match state.json."""
     if gpt["disk_guid"].lower() != state["disk_guid"].lower():
@@ -659,19 +901,131 @@ def verify_state_against_gpt(state, gpt):
     return triplet
 
 
+SKIP_BLOCK_PREFIXES = ("zram", "loop", "sr", "ram")
+
+
+def _is_block_device_path(path):
+    """Return True if path refers to a /dev/... device path or block device node."""
+    s = str(path)
+    if s.startswith("/dev/"):
+        return True
+    try:
+        return stat.S_ISBLK(os.stat(s).st_mode)
+    except OSError:
+        return False
+
+
+def _whole_disks():
+    """Whole-disk block devices as {path, model, serial, size_bytes}; virtual and optical ones are left out."""
+    res = run_cmd(["lsblk", "--json", "--nodeps", "--bytes", "--paths", "--output", "PATH,TYPE,MODEL,SERIAL,SIZE"],
+                  check=False)
+    out = []
+    if res.returncode == 0 and res.stdout.strip():
+        for dev in json.loads(res.stdout).get("blockdevices") or []:
+            path = dev.get("path") or ""
+            if dev.get("type") != "disk" or not path or os.path.basename(path).startswith(SKIP_BLOCK_PREFIXES):
+                continue
+            out.append({
+                "path": path,
+                "model": str(dev.get("model") or "").strip(),
+                "serial": str(dev.get("serial") or "").strip(),
+                "size_bytes": int(dev.get("size") or 0),
+            })
+        return out
+    sys_block = Path("/sys/block")
+    if not sys_block.is_dir():
+        return []
+    for entry in sorted(sys_block.iterdir()):
+        if entry.name.startswith(SKIP_BLOCK_PREFIXES) or not os.path.exists(f"/dev/{entry.name}"):
+            continue
+        try:
+            size = int((entry / "size").read_text().strip()) * SECTOR_SIZE
+        except (OSError, ValueError):
+            size = 0
+        try:
+            model = (entry / "device/model").read_text().strip()
+        except OSError:
+            model = ""
+        try:
+            serial = (entry / "device/serial").read_text().strip()
+        except OSError:
+            serial = ""
+        out.append({"path": f"/dev/{entry.name}", "model": model, "serial": serial, "size_bytes": size})
+    return out
+
+
+def _scan_whole_disk_candidates():
+    return [d["path"] for d in _whole_disks()]
+
+
+def resolve_state_disk(state, *, disk_candidates=None, allow_lsblk_fallback=False):
+    """Resolve state['disk'] to the live disk whose GPT Disk GUID matches state['disk_guid'].
+
+    A regular file image (--image, tests) is read as its own GPT, never scanned.
+    For a block device (or when disk_candidates is given) every whole disk is
+    read and the one carrying state['disk_guid'] is returned, so a swap of
+    nvme0n1 and nvme1n1 across boots resolves. Two disks carrying the GUID (a
+    raw clone attached at the same time) are refused, even when the recorded
+    path is one of them: the GUID alone cannot say which is the real disk.
+    """
+    recorded = str(state["disk"])
+    expected = str(state["disk_guid"]).lower()
+    lsblk_cache = {} if allow_lsblk_fallback else None
+    read_gpt = (lambda p: _parse_gpt_readonly(p, lsblk_cache=lsblk_cache)) if allow_lsblk_fallback else parse_gpt_disk
+
+    if disk_candidates is None and not _is_block_device_path(recorded):
+        gpt = read_gpt(recorded)
+        if gpt["disk_guid"].lower() != expected:
+            raise RuntimeError(
+                f"Disk GUID mismatch on {recorded}: GPT has {gpt['disk_guid']}, state expects {state['disk_guid']}"
+            )
+        return recorded, gpt
+
+    if disk_candidates is None:
+        candidates = _scan_whole_disk_candidates()
+    else:
+        candidates = [str(c) for c in disk_candidates]
+    matches = []
+    seen = set()
+    for cand in [recorded] + candidates:
+        key = os.path.realpath(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            gpt = read_gpt(cand)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if gpt["disk_guid"].lower() == expected:
+            matches.append((cand, gpt))
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        paths = ", ".join(p for p, _ in matches)
+        raise RuntimeError(
+            f"Ambiguous disk GUID {state['disk_guid']}: {len(matches)} disks carry it ({paths}); refusing to operate"
+        )
+    raise RuntimeError(
+        f"Disk GUID mismatch: no disk carries GUID {state['disk_guid']} (recorded as {recorded})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # System inspection helpers
 # ---------------------------------------------------------------------------
 
-def detect_root_layout():
-    """Inspect active LOCachy root filesystem, LUKS2 status, and underlying disk/partition."""
-    fm = json.loads(run_cmd(["findmnt", "--json", "--mountpoint", "/", "--output", "SOURCE,FSTYPE"]).stdout)
+def detect_root_layout(*, allow_lsblk_fallback=False, mountpoint="/"):
+    """Inspect the root filesystem mounted at mountpoint (this system's by default; create
+    --root's target), its LUKS2 status, and the underlying disk/partition."""
+    fm = json.loads(run_cmd(["findmnt", "--json", "--mountpoint", str(mountpoint), "--output",
+                             "SOURCE,FSTYPE"]).stdout)
     root_fs_dev = os.path.realpath(fm["filesystems"][0]["source"])
     is_luks = False
     phys_part = root_fs_dev
     luks_payload_offset = 32768
 
-    blk = json.loads(run_cmd(["lsblk", "--json", "--paths", "--inverse", "--output",
+    blk = json.loads(run_cmd(["lsblk", "--json", "--tree", "--paths", "--inverse", "--output",
                               "PATH,TYPE,PKNAME,PARTN,PARTUUID,PTTYPE", root_fs_dev]).stdout)
     node = blk["blockdevices"][0]
     if node.get("type") == "crypt":
@@ -680,12 +1034,20 @@ def detect_root_layout():
         if not children:
             raise RuntimeError(f"Cannot resolve underlying partition for LUKS device {root_fs_dev}")
         phys_part = children[0]["path"]
-        dump = run_cmd(["cryptsetup", "luksDump", phys_part]).stdout
-        m = re.search(r"offset:\s*(\d+)\s*\[bytes\]", dump)
-        if m:
-            luks_payload_offset = int(m.group(1)) // SECTOR_SIZE
+        if not allow_lsblk_fallback:
+            dump = run_cmd(["cryptsetup", "luksDump", phys_part]).stdout
+            m = re.search(r"offset:\s*(\d+)\s*\[bytes\]", dump)
+            if m:
+                luks_payload_offset = int(m.group(1)) // SECTOR_SIZE
+        else:
+            r_dump = run_cmd(["cryptsetup", "luksDump", phys_part], check=False)
+            if r_dump.returncode == 0:
+                m = re.search(r"offset:\s*(\d+)\s*\[bytes\]", r_dump.stdout)
+                if m:
+                    luks_payload_offset = int(m.group(1)) // SECTOR_SIZE
 
-    part_info = json.loads(run_cmd(["lsblk", "--json", "--nodeps", "--paths", "--properties-by", "blkid",
+    props_by = "blkid,udev" if allow_lsblk_fallback else "blkid"
+    part_info = json.loads(run_cmd(["lsblk", "--json", "--nodeps", "--paths", "--properties-by", props_by,
                                     "--output", "PATH,TYPE,PKNAME,PARTN,PARTUUID,PTTYPE", phys_part]).stdout)
     p = part_info["blockdevices"][0]
     if p.get("type") != "part" or p.get("pttype") != "gpt":
@@ -694,7 +1056,7 @@ def detect_root_layout():
     partn = int(p["partn"])
     partuuid = str(uuid.UUID(p["partuuid"])).lower()
 
-    gpt = parse_gpt_disk(disk)
+    gpt = _parse_gpt_readonly(disk) if allow_lsblk_fallback else parse_gpt_disk(disk)
     cur_part = next((x for x in gpt["partitions"] if x["partn"] == partn), None)
     if not cur_part:
         raise RuntimeError(f"Root partition {partn} not found in GPT of {disk}")
@@ -747,6 +1109,54 @@ def free_tail_sectors(gpt):
     if start > gpt["last_lba"]:
         return 0, start
     return gpt["last_lba"] - start + 1, start
+
+
+def live_medium_disks():
+    """Whole disks the live medium was started from (archiso's boot mount): never a target."""
+    disks = set()
+    try:
+        src = run_cmd(["findmnt", "--noheadings", "--output", "SOURCE",
+                       "--mountpoint", "/run/archiso/bootmnt"], check=False).stdout.strip()
+        if src.startswith("/dev/"):
+            data = json.loads(run_cmd(["lsblk", "--json", "--nodeps", "--paths", "--output", "PATH,TYPE,PKNAME",
+                                       src], check=False).stdout or "{}")
+            for dev in data.get("blockdevices") or []:
+                if dev.get("type") == "part" and dev.get("pkname"):
+                    disks.add(dev["pkname"])
+                elif dev.get("path"):
+                    disks.add(dev["path"])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return disks
+
+
+def candidate_disks(root_disk=None):
+    """Whole GPT disks that may host Maintenance Windows: not the live medium, readable GPT only."""
+    live = {os.path.realpath(d) for d in live_medium_disks()}
+    root_real = os.path.realpath(root_disk) if root_disk else None
+    lsblk_cache = {}
+    out = []
+    for dev in _whole_disks():
+        path = dev["path"]
+        if os.path.realpath(path) in live:
+            continue
+        try:
+            gpt = _parse_gpt_readonly(path, lsblk_cache=lsblk_cache)
+            has_triplet = find_winmaint_triplet(gpt) is not None
+        except (OSError, RuntimeError, ValueError, struct.error):
+            continue
+        avail, _ = free_tail_sectors(gpt)
+        out.append({
+            "path": path,
+            "model": dev["model"],
+            "serial": dev.get("serial", ""),
+            "size_bytes": dev["size_bytes"],
+            "is_root": root_real is not None and os.path.realpath(path) == root_real,
+            "free_tail_gib": round(avail * SECTOR_SIZE / (1024 ** 3), 2),
+            "disk_guid": gpt["disk_guid"],
+            "has_maintenance_windows": has_triplet,
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1030,83 +1440,520 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v Hiberbo
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation" /v RealTimeIsUniversal /t REG_DWORD /d 1 /f
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v PreventDeviceEncryption /t REG_DWORD /d 1 /f
 
-rem Install Layer-4 shutdown script to keep LOCachy first in UEFI BootOrder.
-if not exist "C:\ProgramData\LOCachy" mkdir "C:\ProgramData\LOCachy"
-copy /Y "%SEED%\locachy-win-shutdown.ps1" "C:\ProgramData\LOCachy\locachy-win-shutdown.ps1" >nul
-
-rem Register Local Group Policy shutdown script and Event 1074 scheduled task.
-set "GPKEY=HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Shutdown\0"
-reg add "%GPKEY%" /v GPO-ID /t REG_SZ /d LocalGPO /f
-reg add "%GPKEY%" /v SOM-ID /t REG_SZ /d Local /f
-reg add "%GPKEY%" /v FileSysPath /t REG_SZ /d "C:\Windows\System32\GroupPolicy\Machine" /f
-reg add "%GPKEY%" /v DisplayName /t REG_SZ /d "Local Group Policy" /f
-reg add "%GPKEY%\0" /v Script /t REG_SZ /d "powershell.exe" /f
-reg add "%GPKEY%\0" /v Parameters /t REG_SZ /d "-NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\LOCachy\locachy-win-shutdown.ps1" /f
-reg add "%GPKEY%\0" /v IsPowershell /t REG_DWORD /d 0 /f
-reg add "%GPKEY%\0" /v ExecTime /t REG_QWORD /d 0 /f
-
-schtasks /Create /F /RU SYSTEM /TN "LOCachyKeepBootOrder" ^
-  /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\LOCachy\locachy-win-shutdown.ps1" ^
-  /SC ONEVENT /EC System /MO "*[System[(EventID=1074)]]" >nul 2>&1
-
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\ProgramData\LOCachy\locachy-win-shutdown.ps1"
-endlocal
+rem Keep SYSTEM's scripts in a directory backed by Windows system-directory ACLs.
+set "LOCACHY=%SystemRoot%\System32\LOCachy"
+if not exist "%LOCACHY%\" mkdir "%LOCACHY%" || exit /b 1
+for %%s in (locachy-win-shutdown locachy-storage locachy-return locachy-register) do (
+    copy /Y "%SEED%\%%s.ps1" "%LOCACHY%\%%s.ps1" >nul || exit /b 1
+)
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%LOCACHY%\locachy-register.ps1"
+exit /b %errorlevel%
 """
 
-SHUTDOWN_PS1 = r"""# Layer-4 Windows-side boot order protection: keep LOCachy first in {fwbootmgr}.
-$ErrorActionPreference = 'SilentlyContinue'
-$lines = bcdedit /enum firmware
-if (-not $lines) { exit 0 }
+REGISTER_PS1 = r"""# Install the machine startup task and the synchronous Local Group Policy shutdown hook.
+$ErrorActionPreference = 'Stop'
+$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$repair = Join-Path $PSScriptRoot 'locachy-win-shutdown.ps1'
+$argsForRepair = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $repair + '"'
+$taskAction = New-ScheduledTaskAction -Execute $powershell -Argument $argsForRepair
+$taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName 'LOCachyStorageBoot' -Action $taskAction -Settings $taskSettings `
+    -Trigger (New-ScheduledTaskTrigger -AtStartup) -User 'SYSTEM' -Force | Out-Null
 
-$currentId = $null
-$locachyId = $null
-$winMaintIds = @()
+# Event 1074 cannot keep Windows waiting for a scheduled task at shutdown.
+# The synchronous shutdown policy only repairs storage. Its service token on
+# Windows 11 26H2 cannot open the firmware BCD store; do that work at startup.
+if (Get-ScheduledTask -TaskName 'LOCachyKeepBootOrder' -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName 'LOCachyKeepBootOrder' -Confirm:$false
+}
 
-foreach ($line in $lines) {
-    if ($line -match '^\s*identifier\s+(\{[0-9a-fA-F-]+\})\s*$') {
-        $currentId = $Matches[1]
-    } elseif ($currentId -and $line -match '^\s*description\s+(.+?)\s*$') {
-        $desc = $Matches[1].Trim()
-        if ($desc -eq 'LOCachy') {
-            $locachyId = $currentId
-        } elseif ($desc -eq 'LOCachy Maintenance Windows') {
-            $winMaintIds += $currentId
+# Add only our entries to the machine scripts policy and bump the machine half of GPT's version.
+function Get-IniSection([string]$path, [string]$section) {
+    $lines = if (Test-Path -LiteralPath $path) { @(Get-Content -LiteralPath $path) }
+    $before = New-Object 'System.Collections.Generic.List[string]'
+    $after = New-Object 'System.Collections.Generic.List[string]'
+    $body = New-Object 'System.Collections.Generic.List[string]'
+    $part = $before
+    $found = $false
+    foreach ($line in $lines) {
+        if ($line -match '^\s*\[([^\]]+)\]\s*$') {
+            if ($Matches[1].Trim() -eq $section) {
+                if ($found) { throw "Duplicate [$section] section in $path" }
+                $found = $true
+                $part = $body
+                continue
+            }
+            if ($found) { $part = $after }
+        }
+        $part.Add($line)
+    }
+    return @{ Before = $before; Body = $body; After = $after }
+}
+
+function Write-IniSection($path, $section, $ini, $encoding) {
+    $lines = @($ini.Before.ToArray()) + "[$section]" + @($ini.Body.ToArray()) + @($ini.After.ToArray())
+    [IO.File]::WriteAllLines($path, [string[]]$lines, $encoding)
+}
+
+$policy = Join-Path $env:SystemRoot 'System32\GroupPolicy'
+$scriptsDir = Join-Path $policy 'Machine\Scripts'
+$shutdownDir = Join-Path $scriptsDir 'Shutdown'
+[IO.Directory]::CreateDirectory($shutdownDir) | Out-Null
+$launcher = Join-Path $shutdownDir 'locachy-shutdown.cmd'
+[IO.File]::WriteAllLines($launcher, [string[]]@(
+    '@echo off',
+    '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemRoot%\System32\LOCachy\locachy-storage.ps1"',
+    'exit /b %errorlevel%'
+), [Text.Encoding]::ASCII)
+$scriptsPath = Join-Path $scriptsDir 'scripts.ini'
+$scripts = Get-IniSection $scriptsPath 'Shutdown'
+$slot = 0
+$installed = $false
+foreach ($line in $scripts.Body) {
+    if ($line -match '^(\d+)CmdLine=(.*)$') {
+        $slot = [Math]::Max($slot, 1 + [int]$Matches[1])
+        if ($Matches[2] -eq $launcher -and $scripts.Body.Contains(($Matches[1] + 'Parameters='))) {
+            $installed = $true
         }
     }
 }
-
-foreach ($wid in $winMaintIds) {
-    bcdedit /set '{fwbootmgr}' displayorder $wid /remove | Out-Null
+if (-not $installed) {
+    $scripts.Body.Add("${slot}CmdLine=$launcher")
+    $scripts.Body.Add("${slot}Parameters=")
+    Write-IniSection $scriptsPath 'Shutdown' $scripts ([Text.Encoding]::Unicode)
 }
-if ($locachyId) {
-    bcdedit /set '{fwbootmgr}' displayorder $locachyId /addfirst | Out-Null
+
+$gptPath = Join-Path $policy 'gpt.ini'
+$gpt = Get-IniSection $gptPath 'General'
+$extension = '[{42B5FAAE-6536-11D2-AE5A-0000F87571E3}{40B6664F-4972-11D1-A7CA-0000F87571E3}]'
+$extensionKey = 'gPCMachineExtensionNames='
+$version = [int64]0
+$extensions = ''
+for ($i = $gpt.Body.Count - 1; $i -ge 0; $i--) {
+    $line = $gpt.Body[$i]
+    if ($line -match '^Version=(\d+)$') {
+        $version = [int64]$Matches[1]
+        $gpt.Body.RemoveAt($i)
+    } elseif ($line.StartsWith($extensionKey, [StringComparison]::OrdinalIgnoreCase)) {
+        $extensions = $line.Substring($extensionKey.Length)
+        $gpt.Body.RemoveAt($i)
+    }
+}
+if ($extensions.IndexOf($extension, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    $groups = [regex]::Matches($extensions, '\[[^\[\]]+\]') | ForEach-Object { $_.Value }
+    $extensions = (@($groups) + $extension | Sort-Object) -join ''
+}
+if (-not ($gpt.Body -match '^gPCFunctionalityVersion=')) {
+    $gpt.Body.Add('gPCFunctionalityVersion=2')
+}
+$gpt.Body.Add($extensionKey + $extensions)
+$machineVersion = ($version + 1L) -band 65535
+if ($machineVersion -eq 0) { $machineVersion = 1 }
+$gpt.Body.Add('Version=' + (($version -band 4294901760L) + $machineVersion))
+Write-IniSection $gptPath 'General' $gpt ([Text.Encoding]::ASCII)
+& (Join-Path $env:SystemRoot 'System32\gpupdate.exe') /target:computer /force /wait:60
+if ($LASTEXITCODE -ne 0) { throw 'Could not refresh local computer policy.' }
+
+# First-logon setup and the public desktop shortcut go through the same scripts as later use.
+& $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'locachy-return.ps1') -InstallShortcut
+if ($LASTEXITCODE -ne 0) { throw 'Could not install the Return to LOCachy shortcut.' }
+& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $repair
+exit $LASTEXITCODE
+"""
+
+# Shared by the guard and the Return to LOCachy script: parses `bcdedit /enum firmware /v` by
+# block structure and invariant values, never localized field labels (such as English
+# identifier/displayorder/description vs Chinese/German/etc.):
+# - Blocks are separated by blank lines or a '---...' underline.
+# - The first line in a block ending in a {GUID} (or {fwbootmgr}/{bootmgr}) is its identifier;
+#   {fwbootmgr} is {a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba} under /v (both recognised).
+# - Inside {fwbootmgr}'s block, the first field after identifier whose value is a {...} is
+#   displayorder (plus all indented continuation {...} lines); stops at the next key-value line.
+# - Inside every other block, a key-value line whose value equals one of the exact ASCII UEFI
+#   descriptions written by locachy-efi (never localized) identifies that entry.
+# Keep pure ASCII: Windows PowerShell 5.1 reads UTF-8 without BOM in the system ANSI codepage.
+FIRMWARE_PS_FUNCTIONS = r"""function Get-LOCachyFirmware {
+    $fw = @{ Order = @(); LOCachy = $null; WinMaint = @(); WinFirst = @() }
+    $lines = bcdedit /enum firmware /v
+    if (-not $lines) { return $fw }
+    $fwMgr = '{a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}'
+    $current = $null
+    $isFwMgr = $false
+    $orderState = 0  # 0: before displayorder, 1: collecting displayorder, 2: finished
+    foreach ($line in $lines) {
+        if ($line -match '^\s*$' -or $line -match '^\s*-{3,}\s*$') {
+            $current = $null
+            $isFwMgr = $false
+            $orderState = 0
+            continue
+        }
+        if (-not $current) {
+            if ($line -match '^\s*\S.*?\s+(\{(?:[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}|fwbootmgr|bootmgr)\})\s*$') {
+                $current = $Matches[1].ToLowerInvariant()
+                $isFwMgr = ($current -eq '{fwbootmgr}' -or $current -eq $fwMgr)
+                $orderState = 0
+            }
+            continue
+        }
+        if ($isFwMgr) {
+            # The first key line after the identifier is displayorder (its first entry is on that
+            # line); indented GUID lines continue it; any other key line (bootsequence, timeout) ends it.
+            if ($orderState -eq 0) {
+                if ($line -match '^\s*\S.*?\s+(\{(?:[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}|[a-zA-Z0-9_-]+)\})\s*$') {
+                    $fw.Order += $Matches[1].ToLowerInvariant()
+                    $orderState = 1
+                } else {
+                    $orderState = 2
+                }
+                continue
+            }
+            if ($orderState -eq 1) {
+                if ($line -match '^\s+(\{(?:[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}|[a-zA-Z0-9_-]+)\})\s*$') {
+                    $fw.Order += $Matches[1].ToLowerInvariant()
+                } else {
+                    $orderState = 2
+                }
+            }
+            continue
+        }
+        $val = $null
+        if ($line -match '^\s*\S.*?\s{2,}(.+?)\s*$') {
+            $val = $Matches[1]
+        } elseif ($line -match '^\s*\S+\s+(.+?)\s*$') {
+            $val = $Matches[1]
+        }
+        if ($null -eq $val) { continue }
+        if ($val -ceq 'LOCachy') {
+            $fw.LOCachy = $current
+        } elseif ($val -ceq 'LOCachy Maintenance Windows') {
+            $fw.WinMaint += $current
+        } elseif ($val -ceq 'LOCachy Maintenance Windows (default)') {
+            $fw.WinFirst += $current
+        }
+    }
+    return $fw
+}
+
+# Windows first (locachy-winmaint boot-default windows) while an entry described as
+# 'LOCachy Maintenance Windows (default)' precedes LOCachy in {fwbootmgr}'s display order.
+function Test-LOCachyWindowsFirst($fw) {
+    $loc = -1
+    if ($fw.LOCachy) { $loc = [array]::IndexOf([object[]]$fw.Order, $fw.LOCachy) }
+    foreach ($id in $fw.WinFirst) {
+        $i = [array]::IndexOf([object[]]$fw.Order, $id)
+        if ($i -ge 0 -and ($loc -lt 0 -or $i -lt $loc)) { return $true }
+    }
+    return $false
+}
+"""
+
+SHUTDOWN_PS1 = r"""# Layer-4 Windows-side boot order protection: keep LOCachy first in {fwbootmgr}.
+# It stands down, changing nothing in the boot order, while LOCachy's Windows-first
+# mode is set; Return to LOCachy (locachy-return.ps1) ends that mode and re-arms it.
+$ErrorActionPreference = 'SilentlyContinue'
+@@FIRMWARE_PS_FUNCTIONS@@
+$fw = Get-LOCachyFirmware
+if (-not (Test-LOCachyWindowsFirst $fw)) {
+    foreach ($wid in @($fw.WinMaint) + @($fw.WinFirst)) {
+        bcdedit /set '{fwbootmgr}' displayorder $wid /remove | Out-Null
+    }
+    if ($fw.LOCachy) {
+        bcdedit /set '{fwbootmgr}' displayorder $fw.LOCachy /addfirst | Out-Null
+    }
+}
+$storage = Join-Path $PSScriptRoot 'locachy-storage.ps1'
+if (Test-Path $storage) { & $storage }
+""".replace("@@FIRMWARE_PS_FUNCTIONS@@", FIRMWARE_PS_FUNCTIONS)
+
+# The all-users desktop's "Return to LOCachy": LOCachy first in the firmware boot order again
+# (bcdedit /set {fwbootmgr} displayorder ID /addfirst), the guard re-armed (the Windows-first
+# entry leaves the display order), and a restart offered. It elevates itself (UAC).
+# The script ran in a Windows 11 VM; physical firmware behavior is separate (WINMAINT.md).
+RETURN_PS1 = r"""# Return to LOCachy: LOCachy starts first again (the end of locachy-winmaint's
+# Windows-first mode), the boot order guard is re-armed, and a restart is offered.
+param([switch]$InstallShortcut)
+$ErrorActionPreference = 'Continue'
+$self = $PSCommandPath
+$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if ($InstallShortcut) {
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut((Join-Path $env:PUBLIC 'Desktop\Return to LOCachy.lnk'))
+    $link.TargetPath = $powershell
+    $link.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$self`""
+    $link.Description = 'Start LOCachy first again'
+    $link.Save()
+    exit 0
+}
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$admin = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $admin) {
+    Start-Process -FilePath $powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$self`""
+    exit 0
+}
+@@FIRMWARE_PS_FUNCTIONS@@
+$fw = Get-LOCachyFirmware
+if (-not $fw.LOCachy) {
+    Write-Host "No firmware boot entry is described as 'LOCachy' (bcdedit /enum firmware /v); nothing was changed."
+    Read-Host 'Press Enter to close' | Out-Null
+    exit 1
+}
+bcdedit /set '{fwbootmgr}' displayorder $fw.LOCachy /addfirst
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'bcdedit could not put LOCachy first; nothing else was changed.'
+    Read-Host 'Press Enter to close' | Out-Null
+    exit 1
+}
+# Re-arm the guard: with the Windows-first entry out of the display order the shutdown
+# guard keeps LOCachy first again; it runs once now.
+foreach ($id in $fw.WinFirst) {
+    bcdedit /set '{fwbootmgr}' displayorder $id /remove | Out-Null
+}
+$guard = Join-Path $PSScriptRoot 'locachy-win-shutdown.ps1'
+if (Test-Path $guard) { & $powershell -NoProfile -ExecutionPolicy Bypass -File $guard }
+Write-Host 'LOCachy starts first again.'
+$answer = Read-Host 'Restart now? [y/N]'
+if ($answer -match '^\s*(y|yes)\s*$') {
+    shutdown.exe /r /t 0
+}
+""".replace("@@FIRMWARE_PS_FUNCTIONS@@", FIRMWARE_PS_FUNCTIONS)
+
+# Clears StartOverride (Windows writes it on boot-start drivers it finds unused) and makes
+# the NVMe and virtio storage drivers boot-start, so a VM run that used virtio-blk does not
+# leave the same Windows unable to boot bare-metal NVMe. Runs at install, at each boot
+# (LOCachyStorageBoot) and at each shutdown. UNVERIFIED on hardware: see WINMAINT.md.
+STORAGE_PS1 = r"""# LOCachy storage boot guard: stornvme (in-box NVMe) and viostor (virtio-win) must load at boot.
+$ErrorActionPreference = 'SilentlyContinue'
+foreach ($svc in @('stornvme', 'viostor')) {
+    $base = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+    if (-not (Test-Path $base)) { continue }
+    $override = Join-Path $base 'StartOverride'
+    if (Test-Path $override) { Remove-Item -Path $override -Recurse -Force }
+    Set-ItemProperty -Path $base -Name Start -Value 0 -Type DWord
 }
 """
 
 
-def build_seed_image(output_path):
-    """Build a 4 MiB FAT12 seed image carrying autounattend.xml and hardening scripts."""
+def regular_file(path, what):
+    """path, when it names a regular file (a link to one is followed): a root QEMU and bsdtar
+    read ISO paths, so block devices, directories and every other kind are refused."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        raise RuntimeError(f"{what} not found: {path}") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise RuntimeError(f"{what} must be a regular file: {path}")
+    return str(path)
+
+
+def find_virtio_iso(explicit=None):
+    """The --virtio-iso path: a virtio-win ISO, a regular file."""
+    if not explicit:
+        return None
+    return regular_file(explicit, "virtio-win ISO")
+
+
+def _find_ci(root, rel):
+    """Directory rel (a/b/c) under root, matched case-insensitively; None when absent."""
+    cur = Path(root)
+    for part in rel.split("/"):
+        if not cur.is_dir():
+            return None
+        cur = next((p for p in cur.iterdir() if p.name.lower() == part.lower()), None)
+        if cur is None:
+            return None
+    return cur if cur.is_dir() else None
+
+
+def stage_virtio_drivers(virtio_src, os_dir, stage):
+    """Copy the amd64 viostor and NetKVM folders of os_dir (w10 or w11) from virtio-win (an
+    ISO, or a directory tree of it) into stage/$WinPEDriver$/<name>/ for Windows Setup."""
+    if os_dir not in VIRTIO_OS_CHOICES:
+        raise RuntimeError(f"--virtio-os must be one of {', '.join(VIRTIO_OS_CHOICES)}")
+    src = Path(virtio_src)
+    rels = {name: f"{name}/{os_dir}/amd64" for name in VIRTIO_SEED_DRIVERS}
+    if src.is_dir():
+        tree = src
+    else:
+        tree = Path(stage) / "_iso"
+        tree.mkdir(parents=True, exist_ok=True)
+        # Real virtio-win ISOs deduplicate identical files across directories as
+        # ISO-9660 shared-extent hard links (e.g. viostor/w11/amd64/viostor.sys
+        # "link to amd64/w11/viostor.sys"). Include every hard-link target in the
+        # extraction list so bsdtar can resolve each link in a single pass.
+        entries = []
+        links = {}
+        for line in run_cmd(["bsdtar", "-tvf", str(src)]).stdout.splitlines():
+            parts = line.split(None, 8)
+            if len(parts) < 9:
+                continue
+            rest = parts[8]
+            if " link to " in rest:
+                name, target = rest.rsplit(" link to ", 1)
+                links[name] = target
+            else:
+                name = rest.split(" -> ", 1)[0]
+            entries.append(name)
+        wanted = [e for e in entries
+                  if any(e.lstrip("./").lower().startswith(rel.lower() + "/") and not e.endswith("/")
+                         for rel in rels.values())]
+        if not wanted:
+            raise RuntimeError(f"{virtio_src} has no {os_dir}/amd64 viostor or NetKVM folders (use --virtio-os)")
+        to_extract = []
+        seen = set()
+        for e in wanted:
+            cur = e
+            chain = [cur]
+            while cur in links and links[cur] not in seen:
+                cur = links[cur]
+                chain.append(cur)
+            for item in reversed(chain):
+                if item not in seen:
+                    seen.add(item)
+                    to_extract.append(item)
+        run_cmd(["bsdtar", "--no-same-permissions", "-xf", str(src), "-C", str(tree), *to_extract])
+    dest = Path(stage) / "$WinPEDriver$"
+    for name, rel in rels.items():
+        found = _find_ci(tree, rel)
+        if found is None:
+            raise RuntimeError(f"{virtio_src} has no {rel} folder (virtio-win build for {os_dir})")
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(found, dest / name, dirs_exist_ok=True)
+    if tree != src:
+        shutil.rmtree(tree, ignore_errors=True)
+    return sorted(VIRTIO_SEED_DRIVERS)
+
+
+SEED_PART_OFFSET_SECTORS = 2048
+SEED_PART_OFFSET_BYTES = SEED_PART_OFFSET_SECTORS * SECTOR_SIZE
+
+
+def _write_mbr_fat_image(dest_path, size_mib, fat_bits, label, populate_fn):
+    """Build an MBR-partitioned single-partition FAT disk image at dest_path.
+
+    Observed in QEMU 11.1 with Windows 11 26H2 Setup: a seed attached as
+    usb-storage with removable=on and an MBR partition table (partition 1 at
+    1 MiB) is listed as a removable volume and its $WinPEDriver$ drivers load
+    (the virtio disk then appears in Setup). Without removable=on the drivers
+    on it are not loaded; the superfloppy layout was not tested with
+    removable=on, so this layout is what the code produces.
+    """
+    total_sectors = size_mib * (1024 * 1024 // SECTOR_SIZE)
+    part_sectors = total_sectors - SEED_PART_OFFSET_SECTORS
+    if part_sectors <= 0:
+        raise RuntimeError(f"seed image size too small for 1 MiB MBR offset: {size_mib} MiB")
+    ptype = {"12": "1", "16": "e", "32": "c"}[str(fat_bits)]
+    with tempfile.TemporaryDirectory(prefix="winmaint-fat-") as td:
+        td_path = Path(td)
+        part_img = td_path / "part.fat"
+        with open(part_img, "wb") as f:
+            f.truncate(part_sectors * SECTOR_SIZE)
+        run_cmd(["mkfs.fat", "-F", str(fat_bits), "-n", label, str(part_img)])
+        populate_fn(part_img)
+        disk_img = td_path / "disk.img"
+        with open(disk_img, "wb") as f:
+            f.truncate(total_sectors * SECTOR_SIZE)
+        run_cmd(
+            ["sfdisk", "--quiet", "--no-reread", str(disk_img)],
+            input_text=f"label: dos\nstart={SEED_PART_OFFSET_SECTORS}, size={part_sectors}, type={ptype}\n",
+        )
+        with open(disk_img, "r+b") as df, open(part_img, "rb") as pf:
+            df.seek(SEED_PART_OFFSET_BYTES)
+            shutil.copyfileobj(pf, df)
+        shutil.copyfile(disk_img, dest_path)
+
+
+def build_seed_image(output_path, virtio_iso=None, virtio_os="w11"):
+    """Build the MBR-partitioned FAT seed image: autounattend.xml, hardening
+    scripts, and (with virtio_iso) the viostor and NetKVM drivers as
+    $WinPEDriver$ at its root. 16 MiB FAT16 without drivers; FAT32 with drivers."""
     ET.fromstring(AUTOUNATTEND_XML)  # self-validate XML
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="winmaint-seed-") as td:
         td_path = Path(td)
-        img = td_path / "seed.img"
-        with open(img, "wb") as f:
-            f.truncate(4 * 1024 * 1024)
-        run_cmd(["mkfs.fat", "-F", "12", "-n", "WINSEED", str(img)])
+        stage = td_path / "stage"
+        stage.mkdir()
+        if virtio_iso:
+            stage_virtio_drivers(virtio_iso, virtio_os, stage)
+        payload = sum(p.stat().st_size for p in stage.rglob("*") if p.is_file())
+        if payload:
+            size_mib = max(64, payload // (1024 * 1024) + 16)
+            fat_bits = "32"
+        else:
+            size_mib = 16
+            fat_bits = "16"
         files = {
             "autounattend.xml": AUTOUNATTEND_XML,
             "locachy-postinstall.cmd": POSTINSTALL_CMD.replace("\n", "\r\n"),
+            "locachy-register.ps1": REGISTER_PS1.replace("\n", "\r\n"),
             "locachy-win-shutdown.ps1": SHUTDOWN_PS1.replace("\n", "\r\n"),
+            "locachy-storage.ps1": STORAGE_PS1.replace("\n", "\r\n"),
+            "locachy-return.ps1": RETURN_PS1.replace("\n", "\r\n"),
             "LOCACHY_WINSEED_MARKER": "locachy-winmaint\n",
         }
+        staged_files = []
         for name, content in files.items():
             src = td_path / name
             src.write_text(content, encoding="utf-8")
-            run_cmd(["mcopy", "-o", "-i", str(img), str(src), f"::/{name}"])
-        shutil.copyfile(img, out)
+            staged_files.append((name, src))
+
+        def populate(part_img):
+            for name, src in staged_files:
+                run_cmd(["mcopy", "-o", "-i", str(part_img), str(src), f"::/{name}"])
+            if payload:
+                run_cmd(["mcopy", "-s", "-o", "-i", str(part_img), str(stage / "$WinPEDriver$"), "::/"])
+
+        _write_mbr_fat_image(out, size_mib, fat_bits, "WINSEED", populate)
     return out
+
+
+def build_driver_seed(output_path, virtio_iso, virtio_os="w11"):
+    """A small MBR-partitioned FAT16 image with only $WinPEDriver$\\viostor and
+    $WinPEDriver$\\NetKVM (amd64) at its root, staged from virtio-win as the
+    seed's are: Windows Setup loads drivers from that folder on any removable
+    disk (locachy-app attaches it read-only as usb-storage,removable=on).
+    Rootless. Returns the absolute path; IMG is replaced as a whole."""
+    out = Path(output_path).absolute()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="winmaint-drivers-") as td:
+        td_path = Path(td)
+        stage = td_path / "stage"
+        stage.mkdir()
+        stage_virtio_drivers(virtio_iso, virtio_os, stage)
+        payload = sum(p.stat().st_size for p in stage.rglob("*") if p.is_file())
+        size_mib = max(16, -(-payload // (1024 * 1024)) + 9)
+        img = td_path / "drivers.img"
+
+        def populate(part_img):
+            run_cmd(["mcopy", "-s", "-o", "-i", str(part_img), str(stage / "$WinPEDriver$"), "::/"])
+
+        _write_mbr_fat_image(img, size_mib, "16", "LOCDRIVERS", populate)
+        fd, tmp = tempfile.mkstemp(prefix=out.name + ".", dir=str(out.parent))
+        os.close(fd)
+        try:
+            shutil.copyfile(img, tmp)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, out)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    return out
+
+
+def windows_installed(esp_dev):
+    """Whether the Maintenance Windows ESP holds \\EFI\\Microsoft\\Boot\\bootmgfw.efi, read with
+    mtools (never mounted, never written); None when the partition cannot be read."""
+    if not os.access(str(esp_dev), os.R_OK):
+        return None
+    try:
+        if run_cmd(["mdir", "-b", "-i", str(esp_dev), "::/"], check=False).returncode != 0:
+            return None
+        res = run_cmd(["mdir", "-b", "-i", str(esp_dev), "::/EFI/Microsoft/Boot"], check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return res.returncode == 0 and any(line.strip().lower().endswith("/bootmgfw.efi")
+                                       for line in res.stdout.splitlines())
 
 
 # ---------------------------------------------------------------------------
@@ -1120,6 +1967,94 @@ def pick_first_existing(paths):
     return None
 
 
+# Hyper-V enlightenments as QEMU's docs list them. hv-passthrough is not used (QEMU's docs
+# advise against passthrough for production) and hv-default is not used either.
+HYPERV_CPU = ("host,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-time,hv-vpindex,hv-synic,"
+              "hv-stimer,hv-stimer-direct,hv-reset,hv-frequencies,hv-tlbflush,hv-ipi")
+_QEMU_HELP = {}
+
+
+def _qemu_help_lines(flag):
+    """Lines of `qemu-system-x86_64 FLAG help`; empty when QEMU cannot run here."""
+    if flag not in _QEMU_HELP:
+        try:
+            res = subprocess.run(["qemu-system-x86_64", flag, "help"], stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, timeout=30)
+            _QEMU_HELP[flag] = res.stdout.splitlines()
+        except (OSError, subprocess.SubprocessError):
+            _QEMU_HELP[flag] = []
+    return _QEMU_HELP[flag]
+
+
+def qemu_device_names():
+    """Devices this host's QEMU has. Modules ship in packages: virtio-vga is in
+    qemu-hw-display-virtio-vga (part of Arch's qemu-desktop), not in qemu-system-x86."""
+    names = set()
+    for line in _qemu_help_lines("-device"):
+        m = re.match(r'\s*name "([^"]+)"', line)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def choose_netdev():
+    """passt when passt is on PATH and this QEMU has the netdev; user-mode NAT otherwise."""
+    if shutil.which("passt") and "passt" in {ln.strip() for ln in _qemu_help_lines("-netdev")}:
+        return "passt"
+    return "user"
+
+
+def find_virtiofsd():
+    """virtiofsd: LOCACHY_VIRTIOFSD, then PATH, then the usual install places."""
+    override = os.environ.get("LOCACHY_VIRTIOFSD", "").strip()
+    if override:
+        found = override if (os.path.isfile(override) and os.access(override, os.X_OK)) else shutil.which(override)
+        if not found:
+            raise RuntimeError(f"LOCACHY_VIRTIOFSD is not executable: {override!r}")
+        return found
+    found = shutil.which("virtiofsd")
+    if found:
+        return found
+    for cand in VIRTIOFSD_CANDIDATES:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    raise RuntimeError("--share-dir needs virtiofsd (install it, for example at /usr/lib/virtiofsd)")
+
+
+def virtiofsd_argv(binary, host_dir, sock_path):
+    """virtiofsd for one share: a vhost-user socket, namespace sandbox, cache=auto (as locachy-compute)."""
+    return [binary, f"--socket-path={sock_path}", f"--shared-dir={host_dir}",
+            "--sandbox=namespace", "--cache=auto"]
+
+
+def parse_share_dir(raw, index):
+    """PATH[:TAG] for --share-dir: an absolute existing directory and the tag the guest mounts."""
+    host, sep, tag = raw.rpartition(":")
+    if not sep:
+        host, tag = raw, ""
+    if not os.path.isabs(host) or not os.path.isdir(host):
+        raise RuntimeError(f"--share-dir needs an absolute existing directory: {host!r}")
+    tag = tag or f"share{index}"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,31}", tag):
+        raise RuntimeError(f"invalid --share-dir tag {tag!r}: 1 to 31 of A-Z a-z 0-9 _ . -")
+    return {"host": host, "tag": tag}
+
+
+def stop_virtiofsd(procs, socks):
+    """Stop the share daemons (after QEMU has exited) and remove their sockets."""
+    for proc in procs:
+        if proc.poll() is None:
+            proc.terminate()
+    for proc in procs:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    for sock in socks:
+        Path(sock).unlink(missing_ok=True)
+
+
 def build_qemu_argv(
     dm_dev,
     ovmf_code,
@@ -1131,22 +2066,57 @@ def build_qemu_argv(
     tpm_sock=None,
     display_spec=None,
     vnc_addr=None,
+    qmp_sock=None,
+    disk_bus="nvme",
+    nic="e1000e",
+    netdev="user",
+    gpu="virtio-vga",
+    virtio_iso=None,
+    share_sockets=(),
 ):
+    """QEMU argv for the Windows VM. disk_bus: nvme (the default; the same stornvme path as
+    bare metal) or virtio (virtio-blk with an iothread, for virtio-win). nic: e1000e (inbox
+    driver, the default) or virtio (virtio-net, for NetKVM). gpu: virtio-vga, or std for a
+    QEMU without the module (its default VGA). share_sockets: (tag, socket) per --share-dir."""
+    if disk_bus not in VM_DISK_BUSES:
+        raise ValueError(f"unknown disk bus {disk_bus!r}")
+    if nic not in VM_NICS:
+        raise ValueError(f"unknown NIC {nic!r}")
+    if netdev not in ("user", "passt"):
+        raise ValueError(f"unknown netdev {netdev!r}")
+    if gpu not in ("virtio-vga", "std"):
+        raise ValueError(f"unknown GPU {gpu!r}")
+    nic_model = "virtio-net-pci" if nic == "virtio" else "e1000e"
+    machine = "q35,smm=on" + (",memory-backend=mem" if share_sockets else "")
     argv = [
         "qemu-system-x86_64",
+        "-name", "locachy-winmaint",
         "-enable-kvm",
-        "-machine", "q35,smm=on",
-        "-cpu", "host,hv_relaxed,hv_spinlocks=0x1fff,hv_vapic,hv_time",
+        "-machine", machine,
+        "-cpu", HYPERV_CPU,
         "-smp", str(int(cpus)),
         "-m", str(int(memory_mib)),
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={ovmf_code}",
         "-drive", f"if=pflash,format=raw,unit=1,file={ovmf_vars}",
-        "-drive", f"file={dm_dev},format=raw,if=none,id=nvme0,cache=none,aio=native",
-        "-device", "nvme,drive=nvme0,serial=locachy-winmaint",
+    ]
+    if share_sockets:
+        argv += ["-object", f"memory-backend-memfd,id=mem,size={int(memory_mib)}M,share=on"]
+    disk = f"file={dm_dev},format=raw,if=none,id=disk0,cache=none,aio=io_uring"
+    if disk_bus == "virtio":
+        argv += [
+            "-object", "iothread,id=io0",
+            "-drive", disk,
+            "-device", "virtio-blk-pci,drive=disk0,iothread=io0,discard=on,serial=locachy-winmaint",
+        ]
+    else:
+        argv += ["-drive", disk, "-device", "nvme,drive=disk0,serial=locachy-winmaint"]
+    argv += [
+        "-object", "rng-builtin,id=rng0",
+        "-device", "virtio-rng-pci,rng=rng0",
         "-device", "qemu-xhci,id=xhci",
         "-device", "usb-tablet,bus=xhci.0",
-        "-netdev", "user,id=net0",
-        "-device", "e1000e,netdev=net0",
+        "-netdev", f"{netdev},id=net0",
+        "-device", f"{nic_model},netdev=net0",
     ]
     if tpm_sock:
         argv += [
@@ -1154,25 +2124,133 @@ def build_qemu_argv(
             "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
             "-device", "tpm-tis,tpmdev=tpm0",
         ]
+    # Each port of q35's AHCI controller (ide.0..ide.5) accepts only one device;
+    # assign explicit buses so both the Windows ISO and virtio-win CD coexist.
     if iso_path:
         argv += [
             "-drive", f"file={iso_path},media=cdrom,readonly=on,if=none,id=cd0",
-            "-device", "ide-cd,drive=cd0,bootindex=1",
+            "-device", "ide-cd,drive=cd0,bus=ide.0,bootindex=1",
         ]
     if seed_path:
         argv += [
             "-drive", f"file={seed_path},format=raw,readonly=on,if=none,id=seed0",
-            "-device", "usb-storage,drive=seed0,bus=xhci.0",
+            "-device", "usb-storage,drive=seed0,bus=xhci.0,removable=on",
         ]
+    if virtio_iso:
+        argv += [
+            "-drive", f"file={virtio_iso},media=cdrom,readonly=on,if=none,id=cd1",
+            "-device", "ide-cd,drive=cd1,bus=ide.1",
+        ]
+    for idx, (tag, sock) in enumerate(share_sockets):
+        argv += [
+            "-chardev", f"socket,id=vfs{idx},path={sock}",
+            "-device", f"vhost-user-fs-pci,queue-size=1024,chardev=vfs{idx},tag={tag}",
+        ]
+    if gpu == "virtio-vga":
+        # Unverified in Windows: whether it gets UEFI GOP or a viogpudo driver is not tested here.
+        argv += ["-vga", "none", "-device", "virtio-vga"]
+    if qmp_sock:
+        # QMP over a unix socket: locachy-app asks QEMU to stop and freeze through it.
+        argv += ["-qmp", f"unix:{qmp_sock},server=on,wait=off"]
     if vnc_addr:
         argv += ["-display", "none", "-vnc", vnc_addr]
     elif display_spec:
-        argv += ["-display", display_spec]
+        argv += ["-display", qemu_gtk_display(display_spec)]
     elif os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
-        argv += ["-display", "gtk"]
+        argv += ["-display", qemu_gtk_display("gtk")]
     else:
         argv += ["-display", "none", "-vnc", "127.0.0.1:0"]
     return argv
+
+
+def qemu_gtk_display(spec):
+    """GTK on a Wayland session runs with OpenGL off: QEMU's GL path needs an EGL setup
+    LOCachy's session does not provide. Every GTK display gets window-close=off: QEMU's
+    default quits at once on a window close (the bar's middle-click, the overview's close,
+    the window's own button), pulling Windows' power with NTFS on the real partition left
+    dirty; stopping is QMP system_powerdown (vm-stop) or a shutdown inside Windows. Other
+    displays keep the spec as given."""
+    if spec != "gtk" and not spec.startswith("gtk,"):
+        return spec
+    if spec == "gtk" and os.environ.get("WAYLAND_DISPLAY"):
+        spec = "gtk,gl=off"
+    if "window-close=" not in spec:
+        spec += ",window-close=off"
+    return spec
+
+
+def qmp_execute(sock_path, command, timeout=5.0):
+    """Send one QMP command to a QEMU monitor unix socket and wait for its return."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(str(sock_path))
+        buf = b""
+
+        def next_msg():
+            nonlocal buf
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    raise RuntimeError("QMP closed the connection")
+                buf += chunk
+            line, buf = buf.split(b"\n", 1)
+            return json.loads(line.decode("utf-8"))
+
+        greeting = next_msg()
+        if "QMP" not in greeting:
+            raise RuntimeError("unexpected QMP greeting")
+        s.sendall(b'{"execute":"qmp_capabilities"}\n')
+        while True:
+            msg = next_msg()
+            if "return" in msg:
+                break
+            if "error" in msg:
+                raise RuntimeError(f"QMP capabilities rejected: {msg['error']}")
+        s.sendall((json.dumps({"execute": command}) + "\n").encode("utf-8"))
+        while True:
+            msg = next_msg()
+            if "return" in msg:
+                return msg["return"]
+            if "error" in msg:
+                raise RuntimeError(f"QMP {command} failed: {msg['error']}")
+
+
+def cmd_vm_stop(args):
+    """Ask a running Maintenance Windows QEMU instance to shut down cleanly via QMP."""
+    sock = Path(args.qmp_sock or os.environ.get("LOCACHY_VM_QMP_SOCK") or QMP_SOCK)
+    if not sock.exists():
+        return 0
+    if args.powerdown_only:
+        qmp_execute(sock, "system_powerdown", timeout=args.timeout)
+        return 0
+    deadline = time.monotonic() + float(args.wait)
+    try:
+        qmp_execute(sock, "system_powerdown", timeout=args.timeout)
+    except OSError:
+        return 0
+    while sock.exists() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    if sock.exists() and args.quit_after:
+        try:
+            qmp_execute(sock, "quit", timeout=args.timeout)
+        except OSError:
+            pass
+    return 0
+
+
+def _vm_sigterm(vm_state):
+    """SIGTERM to a Maintenance Windows VM: forwarded to QEMU, which powers the guest off
+    (cleanup follows its exit); before QEMU runs it unwinds through cmd_vm's cleanup so no
+    dm-linear, loop device or swtpm is left behind; ignored while that cleanup runs."""
+    def handle(signum, frame):
+        if vm_state.get("cleaning"):
+            return
+        proc = vm_state.get("qemu")
+        if proc is None:
+            raise SystemExit(128 + signum)
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+    return handle
 
 
 def cmd_vm(args):
@@ -1181,8 +2259,7 @@ def cmd_vm(args):
     state = load_state()
     if not state:
         raise RuntimeError("Maintenance Windows is not configured (run 'locachy-winmaint create' first)")
-    disk = state["disk"]
-    gpt = parse_gpt_disk(disk)
+    disk, gpt = resolve_state_disk(state)
     triplet = verify_state_against_gpt(state, gpt)
     esp_dev = partition_child(disk, triplet["esp"]["partn"])
     msr_dev = partition_child(disk, triplet["msr"]["partn"])
@@ -1193,8 +2270,25 @@ def cmd_vm(args):
     if not ovmf_code or not ovmf_vars_tpl:
         raise RuntimeError("OVMF firmware images not found under /usr/share/edk2/x64")
 
-    if args.iso and not Path(args.iso).is_file():
-        raise RuntimeError(f"ISO not found: {args.iso}")
+    iso, virtio_arg = args.iso, args.virtio_iso
+    if not (iso and virtio_arg) and windows_installed(esp_dev) is not True:
+        # Installation media from locachy-winiso when it is there and has them (explicit
+        # options win; once Windows is installed nothing is attached unasked).
+        if not iso:
+            iso = winiso_path("windows")
+        if not virtio_arg:
+            virtio_arg = winiso_path("virtio-win")
+    if iso:
+        iso = regular_file(iso, "ISO")
+    virtio_iso = find_virtio_iso(virtio_arg)
+    shares = [parse_share_dir(raw, idx) for idx, raw in enumerate(args.share_dir or [])]
+    if len({s["tag"] for s in shares}) != len(shares):
+        raise RuntimeError("duplicate --share-dir tag")
+    gpu = "virtio-vga" if "virtio-vga" in qemu_device_names() else "std"
+    if gpu == "std":
+        print("locachy-winmaint: virtio-vga is not in this QEMU (qemu-hw-display-virtio-vga); "
+              "using QEMU's default VGA", file=sys.stderr)
+    netdev = choose_netdev()
 
     with WinmaintLock():
         for pdev in (esp_dev, msr_dev, c_dev):
@@ -1203,6 +2297,9 @@ def cmd_vm(args):
                 raise RuntimeError(f"{pdev} is mounted; unmount it before launching VM")
 
         head_bytes, tail_bytes, layout = build_virtual_gpt_blobs(state["disk_guid"], triplet)
+        qmp_path = args.qmp_sock or os.environ.get("LOCACHY_VM_QMP_SOCK") or ""
+        qmp_sock = Path(qmp_path) if qmp_path else None
+        share_socks = [(s["tag"], str(RUN_DIR / f"virtiofs-{i}.sock")) for i, s in enumerate(shares)]
         if args.dry_run:
             table = dm_linear_table("/dev/loopX", esp_dev, msr_dev, c_dev, "/dev/loopY", layout)
             argv = build_qemu_argv(
@@ -1211,17 +2308,31 @@ def cmd_vm(args):
                 str(OVMF_VARS_STATE),
                 memory_mib=args.memory,
                 cpus=args.cpus,
-                iso_path=args.iso,
-                seed_path=str(RUN_DIR / "seed.img") if (args.iso or args.seed) else None,
+                iso_path=iso,
+                seed_path=str(RUN_DIR / "seed.img") if (iso or args.seed or virtio_iso) else None,
                 tpm_sock=None if args.no_tpm else str(RUN_DIR / "swtpm.sock"),
                 display_spec=args.display,
                 vnc_addr=args.vnc,
+                qmp_sock=str(qmp_sock) if qmp_sock else None,
+                disk_bus=args.disk_bus,
+                nic=args.nic,
+                netdev=netdev,
+                gpu=gpu,
+                virtio_iso=virtio_iso if (virtio_iso and Path(virtio_iso).is_file()) else None,
+                share_sockets=share_socks,
             )
-            print(json.dumps({"dm_table": table.splitlines(), "qemu_argv": argv}, indent=2))
+            vfs_argv = []
+            if shares:
+                vfs_bin = find_virtiofsd()
+                vfs_argv = [virtiofsd_argv(vfs_bin, s["host"], sock) for s, (_tag, sock) in zip(shares, share_socks)]
+            print(json.dumps({"dm_table": table.splitlines(), "qemu_argv": argv, "virtiofsd": vfs_argv}, indent=2))
             return 0
 
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         RUN_DIR.mkdir(parents=True, exist_ok=True)
+        if qmp_sock is not None:
+            qmp_sock.parent.mkdir(parents=True, exist_ok=True)
+            qmp_sock.unlink(missing_ok=True)
         if not OVMF_VARS_STATE.is_file():
             shutil.copyfile(ovmf_vars_tpl, OVMF_VARS_STATE)
             os.chmod(OVMF_VARS_STATE, 0o600)
@@ -1234,20 +2345,46 @@ def cmd_vm(args):
         head_path.write_bytes(head_bytes)
         tail_path.write_bytes(tail_bytes)
         use_seed = None
-        if args.iso or args.seed:
-            build_seed_image(seed_path)
+        if iso or args.seed or virtio_iso:
+            build_seed_image(seed_path, virtio_iso=virtio_iso, virtio_os=args.virtio_os)
             use_seed = str(seed_path)
 
+        vm_state = {}
+        previous_term = signal.signal(signal.SIGTERM, _vm_sigterm(vm_state))
         loop_head = None
         loop_tail = None
         dm_created = False
         swtpm_proc = None
+        vfs_procs = []
+        vfs_socks = []
         try:
             loop_head = run_cmd(["losetup", "--find", "--show", str(head_path)]).stdout.strip()
             loop_tail = run_cmd(["losetup", "--find", "--show", str(tail_path)]).stdout.strip()
             table = dm_linear_table(loop_head, esp_dev, msr_dev, c_dev, loop_tail, layout)
             run_cmd(["dmsetup", "create", DM_NAME], input_text=table)
             dm_created = True
+
+            if shares:
+                vfs_bin = find_virtiofsd()
+                for idx, share in enumerate(shares):
+                    sock_path = Path(share_socks[idx][1])
+                    sock_path.unlink(missing_ok=True)
+                    log_path = RUN_DIR / f"virtiofsd-{idx}.log"
+                    with open(log_path, "wb") as log_fh:
+                        proc = subprocess.Popen(
+                            virtiofsd_argv(vfs_bin, share["host"], sock_path),
+                            stdin=subprocess.DEVNULL, stdout=log_fh, stderr=subprocess.STDOUT,
+                        )
+                    vfs_procs.append(proc)
+                    vfs_socks.append(sock_path)
+                    deadline = time.monotonic() + 5.0
+                    while not sock_path.exists() and time.monotonic() < deadline:
+                        if proc.poll() is not None:
+                            err = log_path.read_text(encoding="utf-8", errors="replace").strip()
+                            raise RuntimeError(f"virtiofsd for {share['tag']!r} exited ({proc.returncode}): {err}")
+                        time.sleep(0.05)
+                    if not sock_path.exists():
+                        raise RuntimeError(f"virtiofsd socket did not appear for {share['tag']!r}")
 
             use_tpm = None
             if not args.no_tpm:
@@ -1276,15 +2413,34 @@ def cmd_vm(args):
                 str(OVMF_VARS_STATE),
                 memory_mib=args.memory,
                 cpus=args.cpus,
-                iso_path=args.iso,
+                iso_path=iso,
                 seed_path=use_seed,
                 tpm_sock=use_tpm,
                 display_spec=args.display,
                 vnc_addr=args.vnc,
+                qmp_sock=str(qmp_sock) if qmp_sock else None,
+                disk_bus=args.disk_bus,
+                nic=args.nic,
+                netdev=netdev,
+                gpu=gpu,
+                virtio_iso=virtio_iso if (virtio_iso and Path(virtio_iso).is_file()) else None,
+                share_sockets=share_socks,
             )
-            res = subprocess.run(argv)
-            return res.returncode
+            qemu = subprocess.Popen(argv)
+            vm_state["qemu"] = qemu
+            rc = qemu.wait()
+            return rc if rc >= 0 else 128 - rc
         finally:
+            vm_state["cleaning"] = True
+            qemu = vm_state.get("qemu")
+            if qemu is not None and qemu.poll() is None:
+                qemu.send_signal(signal.SIGTERM)
+                try:
+                    qemu.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    qemu.kill()
+                    qemu.wait()
+            stop_virtiofsd(vfs_procs, vfs_socks)
             if swtpm_proc is not None and swtpm_proc.poll() is None:
                 swtpm_proc.terminate()
                 try:
@@ -1293,6 +2449,8 @@ def cmd_vm(args):
                     swtpm_proc.kill()
                     swtpm_proc.wait(timeout=5)
             tpm_sock.unlink(missing_ok=True)
+            if qmp_sock is not None:
+                qmp_sock.unlink(missing_ok=True)
             if dm_created:
                 run_cmd(["dmsetup", "remove", DM_NAME], check=False)
             if loop_head:
@@ -1308,6 +2466,7 @@ def cmd_vm(args):
                     print(f"locachy-winmaint: stripped fallback from {esp_dev}: {', '.join(info['removed'])}")
             except Exception as e:
                 print(f"locachy-winmaint: warning: post-VM ESP sanitize failed: {e}", file=sys.stderr)
+            signal.signal(signal.SIGTERM, previous_term)
 
 
 # ---------------------------------------------------------------------------
@@ -1319,21 +2478,41 @@ def cmd_status(args):
     plan_armed = SHRINK_PLAN_FILE.is_file()
     locked = is_lock_held()
     last_status = parse_kv_file(SHRINK_STATUS_VAR) if SHRINK_STATUS_VAR.is_file() else {}
+    root_disk = None
+    try:
+        root_disk = detect_root_layout(allow_lsblk_fallback=True)["disk"]
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError):
+        pass  # not a booted LOCachy root: no disk is marked as this system's
     info = {
         "configured": state is not None,
         "shrink_plan_armed": plan_armed,
         "lock_held": locked,
         "last_shrink": last_status,
         "state": state,
+        "resolved_disk": None,
+        "on_root_disk": bool(state and state.get("on_root_disk")),
     }
+    # boot-default: set in this boot (Windows comes at the next restart) or in an earlier one
+    # (LOCachy is running although Windows starts first: picked in the firmware boot menu).
+    mode = boot_default_of(state)
+    set_boot = (state or {}).get("boot_default_boot_id") or ""
+    info["boot_default"] = mode
+    info["boot_default_pending_reboot"] = mode == "windows" and bool(set_boot) and set_boot == current_boot_id()
+    info["boot_default_overridden"] = mode == "windows" and not info["boot_default_pending_reboot"]
+    try:
+        info["candidate_disks"] = candidate_disks(root_disk)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+        info["candidate_disks"] = []
+        info["candidate_error"] = str(e)
     if state:
         try:
-            gpt = parse_gpt_disk(state["disk"])
+            disk, gpt = resolve_state_disk(state, allow_lsblk_fallback=True)
             triplet = verify_state_against_gpt(state, gpt)
             info["gpt_verified"] = True
-            info["esp_dev"] = partition_child(state["disk"], triplet["esp"]["partn"])
-            info["msr_dev"] = partition_child(state["disk"], triplet["msr"]["partn"])
-            info["c_dev"] = partition_child(state["disk"], triplet["c"]["partn"])
+            info["resolved_disk"] = disk
+            info["esp_dev"] = partition_child(disk, triplet["esp"]["partn"])
+            info["msr_dev"] = partition_child(disk, triplet["msr"]["partn"])
+            info["c_dev"] = partition_child(disk, triplet["c"]["partn"])
             info["win_c_gib"] = round((triplet["c"]["sectors"] * SECTOR_SIZE) / (1024 ** 3), 2)
         except Exception as e:
             info["gpt_verified"] = False
@@ -1342,11 +2521,21 @@ def cmd_status(args):
         print(json.dumps(info, indent=2, sort_keys=True))
     else:
         if state:
-            print(f"Maintenance Windows: configured on {state['disk']} (disk GUID {state['disk_guid']})")
+            shown = info["resolved_disk"] or state["disk"]
+            where = f"configured on {shown} (disk GUID {state['disk_guid']})"
+            if shown != state["disk"]:
+                where += f", recorded as {state['disk']}"
+            print(f"Maintenance Windows: {where}")
             print(f"  ESP: part {state['partitions']['esp']['partn']} ({state['partitions']['esp']['part_guid']})")
             print(f"  MSR: part {state['partitions']['msr']['partn']} ({state['partitions']['msr']['part_guid']})")
             print(f"  C:   part {state['partitions']['c']['partn']} ({state['partitions']['c']['part_guid']})")
             print(f"  VM/op lock active: {'yes' if locked else 'no'}")
+            if mode == "windows":
+                when = ("from the next restart" if info["boot_default_pending_reboot"] else
+                        "(LOCachy was picked in the firmware boot menu)")
+                print(f"  Starts first: Windows until switched back {when}")
+            else:
+                print("  Starts first: LOCachy")
         elif plan_armed:
             print("Maintenance Windows: one-shot offline shrink plan armed (reboot to create partitions)")
         else:
@@ -1362,9 +2551,12 @@ def cmd_create(args):
     if not is_image and os.geteuid() != 0:
         raise RuntimeError("locachy-winmaint create must run as root")
 
+    root_arg = Path(args.root or "/")
+    live = os.path.realpath(root_arg) == "/"
+    state_path = state_path_for_root(root_arg)
     lock_ctx = contextlib.nullcontext() if is_image else WinmaintLock()
     with lock_ctx:
-        if not is_image and STATE_FILE.is_file():
+        if not is_image and state_path.is_file():
             raise RuntimeError("Maintenance Windows is already configured (reclaim it first)")
 
         if is_image:
@@ -1377,9 +2569,25 @@ def cmd_create(args):
             print(json.dumps(state, indent=2, sort_keys=True))
             return 0
 
-        root = detect_root_layout()
-        target_disk = args.disk or root["disk"]
-        on_root = os.path.realpath(target_disk) == os.path.realpath(root["disk"])
+        if live:
+            root = detect_root_layout()
+            target_disk = args.disk or root["disk"]
+        else:
+            if not args.disk:
+                raise RuntimeError("--disk is required with --root: the target system's disk")
+            target_disk = args.disk
+            # The system being installed: when --disk holds its root partition, record
+            # on_root_disk and root_part_uuid as for this system, so reclaim grows that root.
+            try:
+                root = detect_root_layout(mountpoint=root_arg)
+            except (OSError, RuntimeError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as e:
+                print(f"locachy-winmaint: {root_arg}: root partition not resolved ({e}); "
+                      f"{target_disk} is recorded as another disk", file=sys.stderr)
+                root = None
+        medium = {os.path.realpath(d) for d in live_medium_disks()}
+        if os.path.realpath(target_disk) in medium:
+            raise RuntimeError(f"{target_disk} is the live medium; Maintenance Windows cannot go there")
+        on_root = root is not None and os.path.realpath(target_disk) == os.path.realpath(root["disk"])
         gpt = root["gpt"] if on_root else parse_gpt_disk(target_disk)
 
         need_sectors = (WIN_ESP_MIB + WIN_MSR_MIB + size_gib * 1024) * 2048
@@ -1391,11 +2599,12 @@ def cmd_create(args):
             format_winmaint_esp_and_msr(target_disk, triplet, is_image=False)
             state = state_from_gpt(new_gpt, target_disk, on_root_disk=on_root,
                                    root_part_uuid=root["part_uuid"] if on_root else "")
-            save_state(state)
+            save_state(state, state_path)
+            write_container_conf(root_arg)
             print(f"locachy-winmaint: created tail triplet online on {target_disk} (no reboot required)")
             return 0
 
-        if not on_root:
+        if not on_root or not live:  # --root never shrinks a root partition
             raise RuntimeError(
                 f"{target_disk}: only {avail_sectors // 2048} MiB unallocated tail space, "
                 f"need {need_sectors // 2048} MiB"
@@ -1441,6 +2650,7 @@ def cmd_finalize_create(args):
             state = state_from_gpt(gpt, disk, on_root_disk=(os.path.realpath(disk) == os.path.realpath(root["disk"])),
                                    root_part_uuid=root["part_uuid"])
             save_state(state)
+            write_container_conf("/")
             sanitize_esp_blockdev(partition_child(disk, triplet["esp"]["partn"]))
             print(f"locachy-winmaint: finalized tail triplet on {disk}")
         else:
@@ -1479,7 +2689,7 @@ def cmd_reclaim(args):
         if not state:
             raise RuntimeError("Maintenance Windows is not configured")
 
-        if not args.force_no_efi and Path("/sys/firmware/efi").is_dir():
+        if not args.force_no_efi and EFI_DIR.is_dir():
             run_cmd([
                 str(efi_helper_path()),
                 "--remove-entry",
@@ -1488,11 +2698,13 @@ def cmd_reclaim(args):
             ], check=False)
 
         root = detect_root_layout()
-        res = reclaim_tail_triplet(state["disk"], state, is_image=False, grow_root=True, root_info=root)
+        disk, _gpt = resolve_state_disk(state)
+        res = reclaim_tail_triplet(disk, state, is_image=False, grow_root=True, root_info=root)
         STATE_FILE.unlink(missing_ok=True)
         OVMF_VARS_STATE.unlink(missing_ok=True)
         SHRINK_PLAN_FILE.unlink(missing_ok=True)
-        if Path("/sys/firmware/efi").is_dir() and Path("/efi/EFI/locachy/locachy.efi").is_file():
+        remove_container_conf("/")
+        if EFI_DIR.is_dir() and Path("/efi/EFI/locachy/locachy.efi").is_file():
             run_cmd([str(efi_helper_path()), "--ensure-first", "--esp", "/efi"], check=False)
         print(f"locachy-winmaint: reclaimed partitions {res['deleted']} online (grew_root={res['grew_root']})")
         return 0
@@ -1519,23 +2731,50 @@ def cmd_sanitize_esp(args):
         state = load_state()
         if not state:
             return 0
-        gpt = parse_gpt_disk(state["disk"])
+        disk, gpt = resolve_state_disk(state)
         triplet = verify_state_against_gpt(state, gpt)
-        part = partition_child(state["disk"], triplet["esp"]["partn"])
+        part = partition_child(disk, triplet["esp"]["partn"])
     info = sanitize_esp_blockdev(part)
     if info["removed"]:
         print(f"locachy-winmaint: removed {', '.join(info['removed'])} from {part}")
     return 0
 
 
+def ensure_first_argv(esp, state, part_guid=None):
+    """locachy-efi --ensure-first for this state: with --keep-windows-first while the
+    Windows-first mode is recorded, so no heal undoes it."""
+    cmd = [str(efi_helper_path()), "--ensure-first", "--esp", esp]
+    guid = part_guid or (state["partitions"]["esp"]["part_guid"] if state else None)
+    if guid:
+        cmd += ["--winmaint-guid", guid]
+    if boot_default_of(state) == "windows":
+        cmd.append("--keep-windows-first")
+    return cmd
+
+
+def windows_first_released(res, state, state_path=None):
+    """After ensure_first_argv: exit 3 means the Windows-first entry no longer preceded LOCachy
+    (Return to LOCachy in Windows, or the firmware dropped it) and LOCachy is first again, so
+    the mode ends here too: its entry is deleted and state.json says LOCachy."""
+    if res.returncode != EFI_RELEASED or boot_default_of(state) != "windows":
+        return False
+    run_cmd([str(efi_helper_path()), "--remove-entry", "--label", WIN_FIRST_LABEL], check=False)
+    clear_boot_default(state)
+    save_state(state, state_path)
+    print("locachy-winmaint: LOCachy starts first again (Windows-first mode ended outside LOCachy)")
+    return True
+
+
 def cmd_heal_boot(args):
     if os.geteuid() != 0:
         raise RuntimeError("locachy-winmaint heal-boot must run as root")
     state = load_state()
-    cmd = [str(efi_helper_path()), "--ensure-first", "--esp", args.esp]
-    if state:
-        cmd += ["--winmaint-guid", state["partitions"]["esp"]["part_guid"]]
-    run_cmd(cmd)
+    res = run_cmd(ensure_first_argv(args.esp, state), check=False)
+    if res.returncode not in (0, EFI_RELEASED):
+        raise RuntimeError(res.stderr.strip() or res.stdout.strip() or f"locachy-efi exit {res.returncode}")
+    if not windows_first_released(res, state) and boot_default_of(state) == "windows":
+        print("locachy-winmaint: Windows stays first (boot-default windows), LOCachy second; "
+              "boot-default locachy switches back")
     return 0
 
 
@@ -1546,18 +2785,16 @@ def cmd_boot_guard(args):
     if not state:
         return 0
     with WinmaintLock():
-        gpt = parse_gpt_disk(state["disk"])
+        disk, gpt = resolve_state_disk(state)
         triplet = verify_state_against_gpt(state, gpt)
-        esp_dev = partition_child(state["disk"], triplet["esp"]["partn"])
+        esp_dev = partition_child(disk, triplet["esp"]["partn"])
         try:
             sanitize_esp_blockdev(esp_dev)
         except Exception as e:
             print(f"locachy-winmaint: boot-guard sanitize warning: {e}", file=sys.stderr)
-        if Path("/sys/firmware/efi").is_dir() and Path(args.esp, "EFI/locachy/locachy.efi").is_file():
-            run_cmd([
-                str(efi_helper_path()), "--ensure-first", "--esp", args.esp,
-                "--winmaint-guid", triplet["esp"]["part_guid"],
-            ], check=False)
+        if EFI_DIR.is_dir() and Path(args.esp, "EFI/locachy/locachy.efi").is_file():
+            res = run_cmd(ensure_first_argv(args.esp, state, triplet["esp"]["part_guid"]), check=False)
+            windows_first_released(res, state)
     return 0
 
 
@@ -1568,10 +2805,16 @@ def cmd_boot_once(args):
         state = load_state(args.state_file)
         if not state:
             raise RuntimeError("Maintenance Windows is not configured")
-        gpt = parse_gpt_disk(state["disk"])
+        if boot_default_of(state) == "windows":
+            # Arming BootNext would heal BootOrder to LOCachy first and so end the mode.
+            print("locachy-winmaint: Windows already starts first (boot-default windows); nothing to arm")
+            if args.reboot:
+                request_reboot()
+            return 0
+        disk, gpt = resolve_state_disk(state)
         triplet = verify_state_against_gpt(state, gpt)
         esp_part = triplet["esp"]
-        esp_dev = partition_child(state["disk"], esp_part["partn"])
+        esp_dev = partition_child(disk, esp_part["partn"])
 
         # Layer-1 check + verify Windows Boot Manager exists before arming BootNext.
         if not args.skip_esp_check:
@@ -1586,7 +2829,7 @@ def cmd_boot_once(args):
         run_cmd([
             str(efi_helper_path()),
             "--bootnext-entry",
-            "--disk", state["disk"],
+            "--disk", disk,
             "--part", str(esp_part["partn"]),
             "--partuuid", esp_part["part_guid"],
             "--label", WIN_EFI_LABEL,
@@ -1595,17 +2838,64 @@ def cmd_boot_once(args):
         ])
         print("locachy-winmaint: one-shot BootNext armed for Maintenance Windows; BootOrder keeps LOCachy first")
         if args.reboot:
-            reboot_bin = Path("/usr/local/bin/reboot")
-            if reboot_bin.is_file():
-                run_cmd([str(reboot_bin)])
-            else:
-                os.kill(1, signal.SIGTERM)
+            request_reboot()
+    return 0
+
+
+def cmd_boot_default(args):
+    """windows: the Windows-first entry first in BootOrder, LOCachy second (never removed), the
+    mode in state.json; the Windows-side guard stands down while it precedes LOCachy.
+    locachy: LOCachy first again, the entry deleted, the mode cleared (the guard re-arms)."""
+    if os.geteuid() != 0 and not args.allow_unprivileged_test:
+        raise RuntimeError("locachy-winmaint boot-default must run as root")
+    with WinmaintLock():
+        state = load_state(args.state_file)
+        if not state:
+            raise RuntimeError("Maintenance Windows is not configured")
+        disk, gpt = resolve_state_disk(state)
+        triplet = verify_state_against_gpt(state, gpt)
+        esp_part = triplet["esp"]
+        efi = str(efi_helper_path())
+        if args.mode == "windows":
+            if not args.skip_esp_check:
+                esp_dev = partition_child(disk, esp_part["partn"])
+                info = sanitize_esp_blockdev(esp_dev)
+                if not info["bootmgfw_present"]:
+                    raise RuntimeError(
+                        f"{esp_dev}: \\EFI\\Microsoft\\Boot\\bootmgfw.efi not found; install Windows in VM first"
+                    )
+            run_cmd([efi, "--windows-first", "--disk", disk, "--part", str(esp_part["partn"]),
+                     "--partuuid", esp_part["part_guid"], "--loader", WIN_EFI_LOADER, "--esp", args.esp])
+            state["boot_default"] = "windows"
+            state["boot_default_boot_id"] = current_boot_id()
+            save_state(state, args.state_file)
+            print("locachy-winmaint: Windows starts first until switched back (boot-default locachy here, "
+                  "or Return to LOCachy on the Windows desktop); LOCachy stays second in BootOrder")
+        else:
+            run_cmd([efi, "--ensure-first", "--esp", args.esp, "--winmaint-guid", esp_part["part_guid"]])
+            res = run_cmd([efi, "--remove-entry", "--label", WIN_FIRST_LABEL], check=False)
+            if res.returncode:
+                print(f"locachy-winmaint: warning: {WIN_FIRST_LABEL} entry not deleted (it is out of BootOrder): "
+                      f"{res.stderr.strip()}", file=sys.stderr)
+            clear_boot_default(state)
+            save_state(state, args.state_file)
+            print("locachy-winmaint: LOCachy starts first again")
+        if args.reboot:
+            request_reboot()
     return 0
 
 
 def cmd_build_seed(args):
-    out = build_seed_image(args.output)
+    virtio_iso = find_virtio_iso(args.virtio_iso) if args.virtio_iso else None
+    out = build_seed_image(args.output, virtio_iso=virtio_iso, virtio_os=args.virtio_os)
     print(f"locachy-winmaint: wrote seed image {out}")
+    return 0
+
+
+def cmd_driver_seed(args):
+    """Prints only the image's absolute path (the contract locachy-app reads)."""
+    out = build_driver_seed(args.out, find_virtio_iso(args.virtio_iso), virtio_os=args.virtio_os)
+    print(out)
     return 0
 
 
@@ -1635,6 +2925,8 @@ def main(argv=None):
     p.add_argument("--disk", default=None, help="target disk (defaults to root disk)")
     p.add_argument("--image", default=None, help="raw disk image for offline/test creation")
     p.add_argument("--state-file", default=None)
+    p.add_argument("--root", default="/",
+                   help="root of the system to record (default: this system); with --root --disk is required")
     p.add_argument("--no-boot-rebuild", action="store_true")
     p.set_defaults(func=cmd_create)
 
@@ -1650,14 +2942,34 @@ def main(argv=None):
 
     p = sub.add_parser("vm", help="launch Windows inside QEMU/KVM over dm-linear NVMe wrapper")
     p.add_argument("--iso", default=None, help="Windows installation ISO")
+    p.add_argument("--virtio-iso", default=None,
+                   help="virtio-win.iso (a regular file) for $WinPEDriver$ on the seed and a second CD")
+    p.add_argument("--virtio-os", choices=VIRTIO_OS_CHOICES, default="w11",
+                   help="Windows tree inside virtio-win (default: w11)")
     p.add_argument("--seed", action="store_true", help="attach autounattend/hardening seed image")
     p.add_argument("--memory", type=int, default=4096)
     p.add_argument("--cpus", type=int, default=4)
+    p.add_argument("--disk-bus", choices=VM_DISK_BUSES, default="nvme",
+                   help="disk controller: nvme (default, matches bare metal) or virtio (virtio-blk + iothread)")
+    p.add_argument("--nic", choices=VM_NICS, default="e1000e",
+                   help="network device: e1000e (default, Windows inbox) or virtio (NetKVM)")
+    p.add_argument("--share-dir", action="append", default=[], metavar="PATH[:TAG]",
+                   help="share host directory into Windows via virtiofs (repeatable)")
     p.add_argument("--display", default=None)
     p.add_argument("--vnc", default=None)
+    p.add_argument("--qmp-sock", default=None,
+                   help="QMP unix control socket (also LOCACHY_VM_QMP_SOCK)")
     p.add_argument("--no-tpm", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_vm)
+
+    p = sub.add_parser("vm-stop", help="ask a running Maintenance Windows VM to shut down via QMP")
+    p.add_argument("--qmp-sock", default=None)
+    p.add_argument("--wait", type=float, default=15.0)
+    p.add_argument("--timeout", type=float, default=5.0)
+    p.add_argument("--quit-after", action="store_true", help="send QMP quit if the VM is still up after --wait")
+    p.add_argument("--powerdown-only", action="store_true", help="send system_powerdown and return immediately")
+    p.set_defaults(func=cmd_vm_stop)
 
     p = sub.add_parser("boot-once", help="arm one-shot UEFI BootNext for bare-metal Maintenance Windows")
     p.add_argument("--reboot", action="store_true")
@@ -1666,6 +2978,15 @@ def main(argv=None):
     p.add_argument("--skip-esp-check", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--allow-unprivileged-test", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_boot_once)
+
+    p = sub.add_parser("boot-default", help="start Windows first until switched back, or LOCachy first again")
+    p.add_argument("mode", choices=BOOT_DEFAULTS)
+    p.add_argument("--reboot", action="store_true")
+    p.add_argument("--esp", default="/efi")
+    p.add_argument("--state-file", default=None)
+    p.add_argument("--skip-esp-check", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--allow-unprivileged-test", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_boot_default)
 
     p = sub.add_parser("sanitize-esp", help="strip \\EFI\\BOOT\\BOOTX64.EFI from Maintenance Windows ESP")
     p.add_argument("--part", default=None)
@@ -1683,7 +3004,15 @@ def main(argv=None):
 
     p = sub.add_parser("build-seed", help="build the FAT seed image with autounattend.xml and scripts")
     p.add_argument("--output", required=True)
+    p.add_argument("--virtio-iso", default=None, help="virtio-win ISO (a regular file) to stage $WinPEDriver$ from")
+    p.add_argument("--virtio-os", choices=VIRTIO_OS_CHOICES, default="w11")
     p.set_defaults(func=cmd_build_seed)
+
+    p = sub.add_parser("driver-seed", help="build a FAT image with $WinPEDriver$ viostor and NetKVM; print its path")
+    p.add_argument("--virtio-iso", required=True, help="virtio-win ISO (a regular file)")
+    p.add_argument("--out", required=True, help="image to write (replaced)")
+    p.add_argument("--virtio-os", choices=VIRTIO_OS_CHOICES, default="w11")
+    p.set_defaults(func=cmd_driver_seed)
 
     p = sub.add_parser("build-virtual-gpt", help="build virtual dm-linear GPT head/tail blobs for a disk")
     p.add_argument("--disk", required=True)

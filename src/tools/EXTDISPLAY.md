@@ -51,7 +51,7 @@ While the link is active:
 - When the sender accepts `"touch"` and `"tablet"`, direct touchscreen multi-touch frames (1-finger tap/drag/long-press right-click, 2-finger pan/scroll, 2-finger pinch zoom) and active stylus pen events (proximity in/out, pen/eraser switching, sub-pixel position, pressure, X/Y tilt, hover distance, rotation, barrel buttons, with stylus-proximity palm rejection) map strictly onto the extended display's bounds while relative mice/touchpads continue roaming across all displays.
 - `Super+Esc` (Home) and three-finger home/switch swipes do not switch away from the live extended display; `Super+L` (Lock) still locks locally while keeping the link alive (`base_session_hold`).
 - Idle auto-lock is deferred while the live extended display is shown, and takes effect immediately once the cable is unplugged or the session closes.
-- When the cable is unplugged, the session ends and the next key closes `extdisplay`.
+- When the cable is unplugged or the sender restarts, the session ends and `extdisplay` returns to the waiting state, reconnecting automatically when a cable link returns without rebooting or relaunching. While waiting, `Esc` cancels pairing, `Super+Esc` goes home, and `Ctrl+Q` quits.
 
 ## Tests
 

@@ -40,6 +40,7 @@
 #   /usr/local/share/locachy/keymap.table      rc.conf keymap's: what each key types
 #   /usr/local/share/locachy/terminus/         Terminus 12..32: the text at each scale, and the bar's
 #   /etc/fonts/conf.d/64-locachy-cjk-prefer.conf  Han text's Noto CJK variant (tools/FONTS.md)
+#   /etc/ssh/ssh_config.d/50-locachy-foot-term.conf  foot's TERM over ssh (tools/FOOT-SSH.md)
 #   /etc/locachy/rc.conf                       the startup file (when missing)
 #   /etc/os-release                            the system's name: LOCachy
 #   /etc/sudoers.d/10-locachy-user             sudo for the user (uid 1000), with its password
@@ -847,6 +848,7 @@ install -D -m 644 "$src/link/locachy-audio.sysusers" /usr/local/lib/sysusers.d/l
 install -D -m 644 "$src/link/50-locachy-sysctl.conf" /usr/local/lib/sysctl.d/50-locachy.conf
 install -D -m 644 "$src/link/50-locachy-pm.conf" /usr/local/lib/modprobe.d/50-locachy-pm.conf
 install -m 755 "$src/link/tailscale-client" "$lib/tailscale-client"
+install -m 755 "$src/link/tailnet-ssh-client" "$lib/tailnet-ssh-client"
 install -m 755 "$src/link/clash-client" "$lib/clash-client"
 install -m 755 "$src/link/tor-client" "$lib/tor-client"
 install -m 755 "$src/link/tor-enforce" "$lib/tor-enforce"
@@ -877,6 +879,10 @@ install -D -m 644 "$src/link/NetworkManager.conf" /etc/NetworkManager/conf.d/30-
 # Which variant of the Noto CJK families Han text without a language gets:
 # Simplified Chinese first (tools/FONTS.md); the user's fonts.conf comes first.
 install -D -m 644 "$src/link/64-locachy-cjk-prefer.conf" /etc/fonts/conf.d/64-locachy-cjk-prefer.conf
+# foot sends TERM=foot, which most remote hosts do not know: ssh sends
+# xterm-256color for it instead (tools/FOOT-SSH.md). Arch's ssh_config includes
+# this directory at its top level, so the file applies to every ssh client.
+install -D -m 644 "$src/link/50-locachy-foot-term.conf" /etc/ssh/ssh_config.d/50-locachy-foot-term.conf
 sh "$src/link/install-pkg-tools" "$src"
 # The mirrors ranked again every repos_rank_days days (settings: Software
 # Sources, "Rank mirrors automatically"; 0: only by hand): the value written
@@ -927,10 +933,13 @@ install -m 755 "$src/link/locachy-setup" /usr/local/bin/locachy-setup
 install -m 755 "$src/link/locachy-boot" /usr/local/bin/locachy-boot
 install -m 755 "$src/link/locachy-efi" /usr/local/bin/locachy-efi
 install -m 644 "$src/link/locachy_peers.py" "$lib/locachy_peers.py"
+install -m 644 "$src/link/locachy_storage.py" "$lib/locachy_storage.py"
+install -m 755 "$src/link/locachy-storage" /usr/local/bin/locachy-storage
 install -m 755 "$src/link/locachy-pair" /usr/local/bin/locachy-pair
 install -m 755 "$src/link/locachy-compute" /usr/local/bin/locachy-compute
 install -m 755 "$src/link/compute-client" "$lib/compute-client"
 install -m 755 "$src/link/locachy-winmaint" /usr/local/bin/locachy-winmaint
+install -m 755 "$src/link/locachy-winiso" /usr/local/bin/locachy-winiso
 install -m 755 "$src/link/locachy-gpu-unlock" /usr/local/bin/locachy-gpu-unlock
 install -m 755 "$src/link/locachy-gpu-power" /usr/local/bin/locachy-gpu-power
 install -D -m 644 "$src/link/gpu-unlock-upstream.json" /usr/local/share/locachy/gpu-unlock/upstream.json

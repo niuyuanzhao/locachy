@@ -249,22 +249,26 @@
     "default_wizard": false
   },
   "winmaint": {
-    "description": "Maintenance Windows tail partition and in-OS QEMU/KVM runner (qemu-desktop, edk2-ovmf, swtpm, mtools, dosfstools)",
+    "description": "Maintenance Windows tail partition and in-OS QEMU/KVM runner (qemu-desktop, edk2-ovmf, swtpm, virtiofsd, passt, mtools, dosfstools), virtio-win drivers for Windows guests (virtio-win)",
     "packages": [
       "qemu-desktop",
       "edk2-ovmf",
       "swtpm",
+      "virtiofsd",
+      "passt",
       "mtools",
-      "dosfstools"
+      "dosfstools",
+      "virtio-win"
     ],
     "rc": {},
     "default_standalone": false,
     "default_wizard": false
   },
   "compute": {
-    "description": "Headless compute node micro-VM support (qemu-base)",
+    "description": "Headless compute node micro-VM support (qemu-base, virtiofsd)",
     "packages": [
-      "qemu-base"
+      "qemu-base",
+      "virtiofsd"
     ],
     "rc": {},
     "default_standalone": false,

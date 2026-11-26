@@ -1,5 +1,7 @@
 # System jobs (locachy-jobs)
 
+[中文](JOBS.zh.md)
+
 Long root operations — package transactions, kernel and repository changes,
 the boot image, container builds, firmware — run as **system jobs**: one
 service owns a single queue and runs them **one at a time, in the order they
@@ -45,7 +47,7 @@ checks every argument; anything else is refused.
 | `repos-rank` | `locachy-repos rank` | none |
 | `repos-rank-due` | `locachy-repos rank --due` | none (the periodic ranking, `service_repos_rank`: tools/UPDATES.md) |
 | `repos-set` | `locachy-repos apply --set` | `core`, `extra` or `multilib`, `=on` or `=off` |
-| `boot` | `locachy-boot` | none, `--luks`, or `--register-only` |
+| `boot` | `locachy-boot` | none, `--luks`, `--register-only`, or `--winmaint-shrink` |
 | `locachy-rebuild` | `locachy-pkg rebuild` | none or `--force` |
 | `locachy-source` | `locachy-pkg source-update` | none |
 | `tpm-pending` | `locachy-tpm enroll --pending` | none |
@@ -66,24 +68,27 @@ checks every argument; anything else is refused.
 | `spi-write` | `locachy-firmware spi-write` | as `spi-verify`, and `--expected-size BYTES` |
 | `bios-set` | `locachy-firmware bios-set` | an attribute (a letter or digit, then letters, digits, `_ . : -`; 96 bytes at most) and a value (0–256 bytes, no control character; a leading `-` is text) |
 | `security-policy` | `locachy-security` | `set login-skip`/`auto-lock`/`duress`/`fingerprint`/`face` `on`/`off`, `set lock-mode low`/`high`, `remove-duress`, or `refresh` |
+| `tb-sync` | `/usr/local/lib/locachy/network-client --sync-tb-filter` | none |
+| `winmaint-create` | `locachy-winmaint create` | `--size-gib N` (`40`–`4096`, no leading zero), optionally `--disk /dev/NAME` (`NAME` 1–32 chars of `[A-Za-z0-9_-]`, not starting with `-`) |
+| `winmaint-reclaim` | `locachy-winmaint reclaim` | none |
+| `winmaint-boot-once` | `locachy-winmaint boot-once` | none |
+| `winmaint-boot-default` | `locachy-winmaint boot-default` | `windows`, `locachy`, or `windows --reboot` |
+| `winiso-fetch` | `locachy-winiso fetch windows` | none, or `--lang TAG` (`en-US`, `zh-CN`, `es-419`: 2–3 lowercase letters, `-`, then 2 uppercase letters or 3 digits) (not in the package domain) |
+| `winmaint-heal-boot` | `locachy-winmaint heal-boot` | none |
+| `gpu-unlock-install` | `locachy-gpu-unlock install --target` | `all`, or a PCI BDF list of `[0-9a-fA-F:.,]` starting with a hex digit (1–95 bytes) |
+| `gpu-unlock-set` | `locachy-gpu-unlock set` | `all`, `off`, or a PCI BDF list of `[0-9a-fA-F:.,]` starting with a hex digit (1–95 bytes) |
+| `gpu-unlock-remove` | `locachy-gpu-unlock remove` | none |
+| `gpu-power-apply` | `locachy-gpu-power apply` | none, or one of `auto`, `full`, `ctgp`, `stock`, `eco` |
+| `gpu-powerd` | `locachy-gpu-power nvidia-powerd` | `on` or `off` |
+| `storage-mount`, `storage-umount`, `storage-remove` | `locachy-storage mount` / `umount` / `remove` | a volume name (`^[a-z0-9][a-z0-9._-]{0,31}$`) |
+| `storage-set-role` | `locachy-storage set-role` | a volume name and a role (`data`, `shared`, or `compute`) |
+| `storage-set-auto` | `locachy-storage set-auto` | a volume name and `on` or `off` |
+| `storage-set-compute` | `locachy-storage set-compute-storage` | `none` or a volume name |
+| `storage-attach` | `locachy-storage create --mode attach` | `--name NAME --dev /dev/DEV --role data\|shared\|compute` (exact flag order; `DEV` 1–64 chars `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`) |
+| `storage-format` | `locachy-storage create --mode format` | `--name NAME --dev /dev/DEV --fs ext4\|btrfs --role data\|shared\|compute --encrypt none\|luks` (exact flag order) |
+| `storage-array` | `locachy-storage create --mode array` | `--name NAME --devs /dev/D1,/dev/D2,... --raid single\|raid0\|raid1\|raid10 --role data\|shared\|compute --encrypt none\|luks` (exact flag order; 2–16 comma-separated `/dev/DEV` paths) |
 
-**The package domain.** The package, kernel and repository kinds, `locachy-source`, and every
-kind that builds the boot image (`boot`, `locachy-rebuild`, `tpm-*`,
-`secure-boot`, `security-policy`), hold `/run/locachy/pkg.lock` as
-`locachy-pkg` does: the job's runner takes it (`flock`, waiting: an outside
-pacman, whose guard holds it, finishes first) inside the job's cgroup before
-the first step, and every step inherits that descriptor, so the tools find the
-domain held and never open it again. Their own locks come inside it (domain,
-then security, then configuration); the tools never take `pkg.lock`
-themselves. The firmware kinds do not hold it (`locachy-firmware` holds
-`firmware.lock`), nor do the container kinds (`app-build`: an app whose build
-installs nothing on the host). `app-host-build` holds it: an app with
-`host="1"` installs its packages on the host, a host package transaction. The
-kind is the app's own host setting, read and checked by the service at
-acceptance (a mismatch is refused: "the app's host setting changed; open it
-again"); no client argument decides it. The path is fixed: no runtime
-setting changes it, and the runner removes `LOCACHY_PKG_LOCK` from every
-step's environment (a test build moves it at compile time only).
+**The package domain.** The package (`pkg-*`), kernel (`kernel-*`) and repository (`repos-*`) kinds, `locachy-source`, and every kind that changes the host's packages, kernel modules or boot image (`boot`, `locachy-rebuild`, `tpm-*`, `secure-boot`, `security-policy`, `winmaint-create`, `winmaint-reclaim`, `gpu-unlock-install`, `gpu-unlock-set`, `gpu-unlock-remove`, `gpu-power-apply`, and `app-host-build`), hold `/run/locachy/pkg.lock` as `locachy-pkg` does: the job's runner takes it (`flock`, waiting: an outside pacman, whose guard holds it, finishes first) inside the job's cgroup before the first step, and every step inherits that descriptor, so the tools find the domain held and never open it again. Their own locks come inside it (domain, then security, then configuration); the tools never take `pkg.lock` themselves. The firmware kinds do not hold it (`locachy-firmware` holds `firmware.lock`), nor do `tb-sync`, `winmaint-boot-once`, `winmaint-boot-default`, `winmaint-heal-boot`, `winiso-fetch`, `gpu-powerd`, the `storage-*` kinds, or the non-host container kinds (`app-build`, `app-rollback`, `app-remove`: an `app-build` installs nothing on the host). `app-host-build` holds it because an app with `host="1"` installs its packages on the host, a host package transaction. The kind is the app's own host setting, read and checked by the service at acceptance (a mismatch is refused: "the app's host setting changed; open it again"); no client argument decides it. The path is fixed: no runtime setting changes it, and the runner removes `LOCACHY_PKG_LOCK` from every step's environment (a test build moves it at compile time only).
 
 **Images.** A kind whose argument is an image file (`fw-local-install`,
 `spi-verify`, `spi-write`) has that file copied when the job is accepted, not

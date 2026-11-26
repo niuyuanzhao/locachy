@@ -398,7 +398,12 @@ static void lease_release(void)
         L.sess_ns = -1;
         returned = 1;
     } else if (L.moved && L.nl_sess >= 0) {
-        if (!same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
+        struct link_info sess_info;
+        if (nl_link_get(L.nl_sess, L.sess_ifindex, &sess_info) < 0 && errno == ENODEV) {
+            /* The interface was torn down (e.g. cable unplugged) while leased. */
+            broker_log("%s vanished during the lease", L.name);
+            returned = 1;
+        } else if (!same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
             /* Never move a device that is not the one leased. */
             broker_log("not returning %s: it is not the leased device any more", L.name);
         } else {
@@ -1195,7 +1200,10 @@ int main(int argc, char **argv)
         }
         if (p[4].revents & (POLLIN | POLLERR)) {
             (void)nl_link_event(home_monitor);
-            if (L.state == IDLE) candidate_changed();
+            if (L.state == IDLE) {
+                stale_check();
+                candidate_changed();
+            }
         }
         if (L.status >= 0 && p[2].fd == L.status && (p[2].revents & (POLLIN | POLLHUP | POLLERR))) handle_status();
         if (L.nl_mon >= 0 && p[3].fd == L.nl_mon && (p[3].revents & (POLLIN | POLLERR))) {
@@ -1219,7 +1227,19 @@ int main(int argc, char **argv)
                 }
                 if (lost) end_attempt("carrier-lost");
             } else {
-                (void)nl_carrier_event(L.nl_mon, L.sess_ifindex);
+                int lost = nl_carrier_event(L.nl_mon, L.sess_ifindex);
+                struct link_info info;
+                if (lost < 0) {
+                    lost = nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !(info.flags & IFF_UP) ||
+                           !(info.flags & IFF_LOWER_UP);
+                }
+                if (lost && L.moved && L.nl_sess >= 0) {
+                    lease_release();
+                    if (watching && !candidates_notified) {
+                        send_line("changed");
+                        candidates_notified = 1;
+                    }
+                }
             }
         }
         if (L.discovery.status >= 0 && p[5].fd == L.discovery.status &&

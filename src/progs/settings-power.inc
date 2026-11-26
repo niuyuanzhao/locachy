@@ -9,6 +9,8 @@
  * manages EC charge start/stop thresholds.
  */
 
+#include <sys/inotify.h>
+
 #include "battery-history.h"
 
 #define POWER_CARD_BG   0x162230u
@@ -33,6 +35,8 @@ static int power_loaded;
 static double power_loaded_at = -100.0;
 static int power_handoff_loaded;
 static char power_last_handoff[128];
+static struct bat_charge_status power_charge;
+static int power_charge_known, power_full_pending;
 int rc_bat_start = -1, rc_bat_end = -1;
 
 static void power_format_handoff(const struct bat_handoff_event *ev, char *out, size_t size);
@@ -48,15 +52,74 @@ static int power_thresh_bat_index(void)
     return -1;
 }
 
+static void power_refresh_charge_status(void)
+{
+    power_charge_known = bat_read_charge_status(&power_charge) == 0;
+    if ((power_charge_known && power_charge.full_until == rc_bat_full_until) ||
+        power_ac.system != BAT_AC_ONLINE || rc_bat_full_until <= bat_now_ts()) power_full_pending = 0;
+}
+
+static int power_charge_slot_for(const struct bat_device *b)
+{
+    if (!power_charge_known) return -1;
+    for (int i = 0; i < power_charge.nslots; i++) {
+        if (!strcmp(power_charge.slots[i].slot, b->name) &&
+            !strcmp(power_charge.slots[i].pack_id, b->pack_id)) return i;
+    }
+    return -1;
+}
+
+static const char *power_charge_state_label(const char *state)
+{
+    if (!strcmp(state, "manual")) return _("Manual charging");
+    if (!strcmp(state, "on-battery")) return _("Running on battery");
+    if (!strcmp(state, "learning")) return _("Learning usage");
+    if (!strcmp(state, "mains")) return _("Mostly plugged in");
+    if (!strcmp(state, "mobility")) return _("Ready for portable use");
+    if (!strcmp(state, "hold")) return _("Holding charge");
+    if (!strcmp(state, "top-up")) return _("Topping up before unplugging");
+    if (!strcmp(state, "full")) return _("Full charge override active");
+    if (!strcmp(state, "unsupported")) return _("Charging control unsupported");
+    if (!strcmp(state, "error")) return _("Could not apply charging limits");
+    return _("Charging status unavailable");
+}
+
 static void power_refresh_devices(void)
 {
     npower_devs = bat_scan(power_devs, BAT_MAX_DEVICES, &power_ac);
+    power_refresh_charge_status();
     power_loaded = 1;
     power_loaded_at = settings_mono_sec();
     power_handoff_loaded = 0;
     power_last_handoff[0] = '\0';
     entries_dirty = 1;
     full_redraw = 1;
+}
+
+static int power_charge_watch_open(void)
+{
+    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (fd >= 0 && inotify_add_watch(fd, bat_history_dir(), IN_MOVED_TO | IN_DELETE) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int power_charge_watch_changed(int fd)
+{
+    union { struct inotify_event aligned; char buf[4096]; } events;
+    int changed = 0;
+    ssize_t n;
+    while ((n = read(fd, events.buf, sizeof events.buf)) > 0) {
+        for (size_t i = 0; i < (size_t)n;) {
+            const struct inotify_event *ev = (const void *)(events.buf + i);
+            if ((ev->len && !strcmp(ev->name, "charge-status")) || (ev->mask & (IN_Q_OVERFLOW | IN_IGNORED)))
+                changed = 1;
+            i += sizeof *ev + ev->len;
+        }
+    }
+    return changed;
 }
 
 static void power_refresh_devices_if_stale(void)
@@ -91,16 +154,94 @@ static int power_thresh_count(void)
            (power_devs[bi].has_end_thresh ? 1 : 0);
 }
 
-static void apply_saved_battery_thresholds(void)
+static int power_can_manage_charge(void)
 {
-    if (rc_bat_start < 0 && rc_bat_end < 0) return;
-    power_refresh_devices();
+    const struct bat_device *pack = NULL;
     for (int i = 0; i < npower_devs; i++) {
-        if (!power_devs[i].is_peripheral && !power_devs[i].is_offline_pack &&
-            (power_devs[i].has_start_thresh || power_devs[i].has_end_thresh)) {
-            (void)bat_apply_thresholds_to(&power_devs[i], rc_bat_start, rc_bat_end);
-        }
+        const struct bat_device *b = &power_devs[i];
+        if (b->is_peripheral || b->is_offline_pack) continue;
+        if (pack) return 0;
+        pack = b;
     }
+    return pack && pack->has_end_thresh && !strcmp(pack->end_attr, "charge_control_end_threshold") &&
+           (!pack->has_start_thresh || !strcmp(pack->start_attr, "charge_control_start_threshold")) &&
+           pack->serial[0] && strcmp(pack->serial, "0") && strcasecmp(pack->serial, "unknown");
+}
+
+
+static const char *power_full_unavailable(void)
+{
+    if (!power_can_manage_charge()) return _("Charging control unsupported");
+    if (power_ac.system != BAT_AC_ONLINE) return _("Plug in AC power first");
+    return NULL;
+}
+
+static int power_full_active(void)
+{
+    if (!power_charge_known || power_charge.full_until <= bat_now_ts()) return 0;
+    for (int i = 0; i < npower_devs; i++) {
+        const struct bat_device *b = &power_devs[i];
+        if (b->is_peripheral || b->is_offline_pack) continue;
+        int si = power_charge_slot_for(b);
+        if (si >= 0 && !strcmp(power_charge.slots[si].state, "full")) return 1;
+    }
+    return 0;
+}
+
+static void power_charge_release_note(const struct bat_charge_slot_status *s)
+{
+    if (!rc_bat_adaptive || !power_charge.adaptive || power_full_pending ||
+        power_ac.system != BAT_AC_ONLINE || strcmp(s->state, "hold") ||
+        !power_can_manage_charge()) return;
+
+    int64_t now = bat_now_ts();
+    /* The policy projects at most one day ahead. A past release is not a forecast. */
+    if (now <= 0 || s->release_ts <= now || s->release_ts - now > 24 * 60 * 60) return;
+    time_t ts = (time_t)s->release_ts;
+    struct tm tmv;
+    char when[24], line[128];
+    if ((int64_t)ts != s->release_ts || !localtime_r(&ts, &tmv) ||
+        !strftime(when, sizeof when, "%m-%d %H:%M", &tmv)) return;
+    snprintf(line, sizeof line, _("Expected to resume charging to full at %s"), when);
+    add_entry(E_NOTE, line);
+}
+
+static void power_charge_notes(void)
+{
+    if (!power_charge_known) {
+        if (power_can_manage_charge()) add_entry(E_NOTE, _("Charging status unavailable"));
+        return;
+    }
+    int nslots = 0;
+    for (int i = 0; i < npower_devs; i++) {
+        const struct bat_device *b = &power_devs[i];
+        if (b->is_peripheral || b->is_offline_pack) continue;
+        int si = power_charge_slot_for(b);
+        if (si < 0) continue;
+        nslots++;
+        const struct bat_charge_slot_status *s = &power_charge.slots[si];
+        const char *state = power_charge_state_label(s->state);
+        char line[128];
+        if (s->actual_end > 0 && s->requested_end > 0 && s->actual_end != s->requested_end) {
+            snprintf(line, sizeof line, _("%s: %s (limit %d%%, requested %d%%)"), b->name, state,
+                     s->actual_end, s->requested_end);
+        } else if (s->actual_end > 0) {
+            snprintf(line, sizeof line, _("%s: %s (limit %d%%)"), b->name, state, s->actual_end);
+        } else {
+            snprintf(line, sizeof line, "%s: %s", b->name, state);
+        }
+        add_entry(E_NOTE, line);
+        power_charge_release_note(s);
+    }
+    if (!nslots && power_can_manage_charge()) add_entry(E_NOTE, _("Charging status unavailable"));
+}
+
+static int power_charge_managed(void)
+{
+    int64_t now = bat_now_ts();
+    return rc_bat_adaptive || (power_charge_known && (power_charge.adaptive || power_charge.full_until > 0)) ||
+           (rc_bat_full_until > now && rc_bat_full_until - now <= BAT_CHARGE_FULL_SECONDS &&
+            (!power_charge_known || power_full_pending));
 }
 
 static const char *power_state_label(const char *status)
@@ -232,61 +373,90 @@ static void add_power_category_notes(void)
     }
 }
 
+static int power_charge_reload(void)
+{
+    if (kill(1, SIGHUP) == 0) return 0;
+    snprintf(notice, sizeof notice, "%s", _("Saved, but could not notify the battery service."));
+    return -1;
+}
+
+static void adjust_adaptive_charging(void)
+{
+    power_refresh_devices();
+    if (!rc_bat_adaptive && !power_can_manage_charge()) {
+        snprintf(notice, sizeof notice, "%s", _("Charging control unsupported"));
+        return;
+    }
+    int next = !rc_bat_adaptive;
+    if (rc_set("battery_charge_adaptive", next ? "1" : "0") < 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        return;
+    }
+    rc_bat_adaptive = next;
+    if (power_charge_reload() == 0) {
+        snprintf(notice, sizeof notice, "%s", _("Adaptive charging setting saved."));
+    }
+}
+
+static void charge_to_full_now(void)
+{
+    power_refresh_devices();
+    const char *why = power_full_unavailable();
+    if (why) {
+        snprintf(notice, sizeof notice, "%s", why);
+        return;
+    }
+    if (power_full_active()) {
+        snprintf(notice, sizeof notice, "%s", _("Full charge override active"));
+        return;
+    }
+    int64_t until = bat_now_ts() + BAT_CHARGE_FULL_SECONDS;
+    char val[32];
+    snprintf(val, sizeof val, "%lld", (long long)until);
+    if (rc_set("battery_charge_full_until", val) < 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        return;
+    }
+    rc_bat_full_until = until;
+    power_full_pending = 1;
+    if (power_charge_reload() == 0) {
+        snprintf(notice, sizeof notice, "%s", _("Full charge requested until unplugged or for up to 24 hours."));
+    }
+}
+
 static void adjust_power_threshold(int which, int dir)
 {
     if (!power_loaded) power_refresh_devices();
+    power_refresh_charge_status();
+    if (power_charge_managed()) {
+        snprintf(notice, sizeof notice, "%s", _("Manual thresholds are saved but not applied while charging is managed."));
+        return;
+    }
     int bi = power_thresh_bat_index();
     if (bi < 0) return;
-    struct bat_device *b = &power_devs[bi];
-    int is_end = (which == 1) || (!b->has_start_thresh && b->has_end_thresh);
-    int step = dir * 5;
-
-    if (!is_end) {
-        int limit = b->has_end_thresh ? b->end_thresh - 5 : 95;
-        int next = b->start_thresh + step;
-        if (next < 0) next = 0;
-        if (next > limit) next = limit;
-        if (next == b->start_thresh) return;
-        for (int i = 0; i < npower_devs; i++) {
-            if (!power_devs[i].is_peripheral && !power_devs[i].is_offline_pack && power_devs[i].has_start_thresh) {
-                if (bat_apply_thresholds_to(&power_devs[i], next, -1) != 0 && i == bi) {
-                    snprintf(notice, sizeof notice, _("Cannot write charge start threshold for %s."), b->name);
-                    return;
-                }
-            }
-        }
-        rc_bat_start = next;
-        char val[16];
-        snprintf(val, sizeof val, "%d", next);
-        if (rc_set("battery_charge_start", val) != 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        snprintf(notice, sizeof notice, _("Charge start threshold: %d%% (re-applied automatically on battery swap)."), next);
-    } else {
-        int low = b->has_start_thresh ? b->start_thresh + 5 : 20;
-        if (low < 20) low = 20;
-        int next = b->end_thresh + step;
-        if (next < low) next = low;
-        if (next > 100) next = 100;
-        if (next == b->end_thresh) return;
-        for (int i = 0; i < npower_devs; i++) {
-            if (!power_devs[i].is_peripheral && !power_devs[i].is_offline_pack && power_devs[i].has_end_thresh) {
-                if (bat_apply_thresholds_to(&power_devs[i], -1, next) != 0 && i == bi) {
-                    snprintf(notice, sizeof notice, _("Cannot write charge stop threshold for %s."), b->name);
-                    return;
-                }
-            }
-        }
-        rc_bat_end = next;
-        char val[16];
-        snprintf(val, sizeof val, "%d", next);
-        if (rc_set("battery_charge_end", val) != 0) {
-            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
-            return;
-        }
-        snprintf(notice, sizeof notice, _("Charge stop threshold: %d%% (re-applied automatically on battery swap)."), next);
+    const struct bat_device *b = &power_devs[bi];
+    int is_end = which == 1 || !b->has_start_thresh;
+    int start = rc_bat_start >= 0 ? rc_bat_start : b->start_thresh;
+    int end = rc_bat_end >= 0 ? rc_bat_end : b->end_thresh;
+    int current = is_end ? end : start;
+    int lo = is_end ? (b->has_start_thresh && start + 5 > 20 ? start + 5 : 20) : 0;
+    int hi = is_end ? 100 : (b->has_end_thresh ? end - 5 : 95);
+    if (lo > hi) return;
+    int next = current + dir * 5;
+    if (next < lo) next = lo;
+    if (next > hi) next = hi;
+    if (next == current) return;
+    const char *key = is_end ? "battery_charge_end" : "battery_charge_start";
+    char val[16];
+    snprintf(val, sizeof val, "%d", next);
+    if (rc_set(key, val) != 0) {
+        snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+        return;
     }
+    if (is_end) rc_bat_end = next;
+    else rc_bat_start = next;
+    if (power_charge_reload() == 0)
+        snprintf(notice, sizeof notice, "%s", _("Waiting for battery service"));
 }
 
 /* --- Interactive Energy & Battery Curves Subpage --- */

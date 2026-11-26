@@ -10,6 +10,9 @@
 #   6. KVM micro-VM config, qcow2 CoW overlay creation, reset, and QEMU argv verification
 #   7. mTLS HTTPS control plane: paired peer succeeds, unpaired peer rejected,
 #      extdisplay-only peer rejected, revoked peer immediately rejected, remote job run+log+reset
+#   8. compute-client service in locachy-net, listening only on the tailscale0 address
+#   9. Storage volume binding (--volume) and compute_storage routing
+#  10. Native detached job lifecycle after the submitting session is gone
 # Runs inside unprivileged user/net/mount/pid namespaces; nothing installed.
 set -eu
 src=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -45,6 +48,7 @@ if ! unshare --user --map-auto --map-root-user --net --mount true >/dev/null 2>&
 fi
 
 cat >"$out/driver.py" <<'PYEOF'
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -204,6 +208,112 @@ check("reset: upperdir wiped while base image and mounted dataset stay intact",
       r3.returncode == 0 and "immutable-base-v1" in r3.stdout and "from-job" in r3.stdout,
       f"rc={r3.returncode} out={r3.stdout!r} err={r3.stderr!r}")
 
+# Detached job commands are released only after the submitting shell has exited.
+# The mounted gate avoids timing assumptions about SSH/client startup or polling.
+def wait_job(jid):
+    deadline = time.monotonic() + 8
+    rec = {}
+    while time.monotonic() < deadline:
+        result = run_cli(COMPUTE, "job", "status", jid, "--json")
+        rec = json.loads(result.stdout) if result.returncode == 0 else {}
+        if rec.get("state") in ("succeeded", "failed", "stopped", "exited"):
+            break
+        time.sleep(0.05)
+    return rec
+
+
+def session_submit(jid, command):
+    return subprocess.run(
+        ["/bin/sh", "-c", '"$@"', "submit", "python3", COMPUTE, "run", "train0",
+         "--detach", "--job-id", jid, "--", "/bin/sh", "-c", command],
+        env=env, start_new_session=True, capture_output=True, text=True, timeout=15,
+    )
+
+
+def check_job_cleanup(rec):
+    jid = rec["job_id"]
+    cg = rec.get("cgroup")
+    if cg:
+        check(f"detached: {jid} removed its cgroup before recording terminal status",
+              not Path(cg).exists() and "cleanup_error" not in rec, repr(rec))
+    else:
+        print(f"SKIP: detached: {jid} cgroup cleanup needs writable cgroup v2 delegation", flush=True)
+
+
+for jid, code in (("detached-ok", 0), ("detached-fail", 37)):
+    gate = data_dir / jid
+    r = session_submit(jid, f"while [ ! -e /data/{jid} ]; do sleep 0.05; done; "
+                            f"echo {jid}-stdout; echo {jid}-stderr >&2; exit {code}")
+    issued = json.loads(r.stdout) if r.returncode == 0 else {}
+    gate.touch()
+    rec = wait_job(jid) if issued else {}
+    rlog = run_cli(COMPUTE, "job", "log", jid)
+    expected_state = "succeeded" if code == 0 else "failed"
+    check(f"detached: closed submitter preserves {expected_state}, exact exit {code}, stdout and stderr",
+          issued.get("state") == "running" and rec.get("state") == expected_state
+          and rec.get("exit_code") == code and bool(rec.get("ended_at"))
+          and rlog.stdout.splitlines() == [f"{jid}-stdout", f"{jid}-stderr"],
+          f"submit={r.stdout + r.stderr!r} status={rec!r} log={rlog.stdout!r}")
+    if rec.get("state") == expected_state:
+        check_job_cleanup(rec)
+
+r = session_submit("detached-stop", "trap 'echo stopped-by-term >&2; exit 43' TERM; "
+                                    "touch /data/stop-ready; while :; do sleep 0.05; done")
+for _ in range(100):
+    if (data_dir / "stop-ready").exists() or r.returncode != 0:
+        break
+    time.sleep(0.05)
+stopped = run_cli(COMPUTE, "job", "stop", "detached-stop")
+stop_rec = json.loads(stopped.stdout) if stopped.returncode == 0 else {}
+rlog = run_cli(COMPUTE, "job", "log", "detached-stop")
+check("detached: stop after submitter exit delivers TERM and records the trapped exit 43",
+      r.returncode == 0 and stop_rec.get("state") == "stopped" and stop_rec.get("exit_code") == 43
+      and "stopped-by-term" in rlog.stdout,
+      f"submit={r.stdout + r.stderr!r} stop={stopped.stdout + stopped.stderr!r} log={rlog.stdout!r}")
+if stop_rec.get("state") == "stopped":
+    check_job_cleanup(stop_rec)
+
+r = run_cli(COMPUTE, "run", "train0", "--detach", "--job-id", "missing-exec", "--", "/no/such/compute-command")
+missing = wait_job("missing-exec")
+check("detached: missing executable fails submission, with exact launcher exit 127 and its diagnostic",
+      r.returncode != 0 and not r.stdout and "/no/such/compute-command" in r.stderr
+      and missing.get("state") == "failed" and missing.get("exit_code") == 127,
+      f"submit={r.stdout + r.stderr!r} status={missing!r}")
+if missing.get("state") == "failed":
+    check_job_cleanup(missing)
+r = run_cli(COMPUTE, "run", "train0", "--job-id", "foreground-exit", "--", "/bin/sh", "-c",
+            "echo foreground-out; echo foreground-err >&2; exit 29")
+check("foreground: exact exit 29 and merged output are returned by the CLI",
+      r.returncode == 29 and r.stdout.splitlines() == ["foreground-out", "foreground-err"],
+      f"rc={r.returncode} stdout={r.stdout!r} stderr={r.stderr!r}")
+
+with ThreadPoolExecutor(max_workers=2) as pool:
+    calls = [pool.submit(session_submit, "one-id", f"echo winner-{i}; exit {10 + i}") for i in range(2)]
+    launchers = [call.result() for call in calls]
+winners = [i for i, launcher in enumerate(launchers) if launcher.returncode == 0]
+losers = [launcher for launcher in launchers if launcher.returncode != 0]
+rec = wait_job("one-id")
+rlog = run_cli(COMPUTE, "job", "log", "one-id")
+check("detached: concurrent same-ID submits reserve exactly one record and log",
+      len(winners) == len(losers) == 1 and "job already exists" in losers[0].stderr
+      and rec.get("exit_code") == 10 + winners[0] and rlog.stdout == f"winner-{winners[0]}\n",
+      f"submit={launchers!r} status={rec!r} log={rlog.stdout!r}")
+
+# A stale record points at a live unrelated child, but uses the old identity.
+# Check both the launcher PID and supervisor PID paths without recycling host PIDs.
+with subprocess.Popen(["sleep", "15"]) as sentinel:
+    try:
+        stale = dict(rec, state="running", pid=sentinel.pid)
+        stale["supervisor"] = dict(stale["supervisor"], pid=sentinel.pid)
+        stale["job_id"] = "stale"
+        (Path(env["LOCACHY_COMPUTE_BASE"]) / "jobs/stale.json").write_text(json.dumps(stale))
+        r = run_cli(COMPUTE, "job", "stop", "stale")
+        check("detached: stale supervisor identity refuses stop without signaling the unrelated PID",
+              r.returncode != 0 and "no verifiable supervisor" in r.stderr and sentinel.poll() is None,
+              f"stop={r.stdout + r.stderr!r} sentinel={sentinel.poll()}")
+    finally:
+        sentinel.terminate()
+
 # 5. GPU probe + wildcard bind rejection
 r = run_cli(COMPUTE, "gpu-probe", "--json")
 gpu_info = json.loads(r.stdout) if r.returncode == 0 else {}
@@ -227,7 +337,7 @@ else:
 r_wc = run_cli(COMPUTE, "serve", "--bind", "0.0.0.0", "--port", "27189")
 check("serve: wildcard bind 0.0.0.0 is refused", r_wc.returncode != 0 and "wildcard" in r_wc.stderr, r_wc.stderr)
 
-# 6. KVM micro-VM overlay + QEMU argv generation
+# 6. KVM micro-VM overlay + QEMU argv generation (virtiofs is the only share transport)
 if shutil.which("qemu-img"):
     base_qcow = OUT / "base.qcow2"
     subprocess.run(["qemu-img", "create", "-f", "qcow2", str(base_qcow), "64M"], check=True, capture_output=True)
@@ -236,11 +346,41 @@ if shutil.which("qemu-img"):
     check("vm: create qcow2 CoW overlay succeeds", r.returncode == 0, r.stderr)
     r_cmd = run_cli(COMPUTE, "vm", "cmd", "expvm", "--json")
     argv = json.loads(r_cmd.stdout) if r_cmd.returncode == 0 else []
-    check("vm: QEMU argv includes q35, virtio disk, serial sock, 9p share, no display",
-          "-display" in argv and "none" in argv and any("virtio-9p-pci" in a for a in argv) and any("datasets" in a for a in argv),
+    argv_s = " ".join(argv)
+    check("vm: default share backend uses virtiofs (memfd share=on + vhost-user-fs-pci) with q35, virtio disk, no display",
+          "-display" in argv and "none" in argv
+          and "memory-backend-memfd,id=mem,size=1024M,share=on" in argv_s
+          and "memory-backend=mem" in argv_s
+          and "vhost-user-fs-pci,queue-size=1024,chardev=vfs0,tag=datasets" in argv_s,
           str(argv))
+    r_9p = run_cli(COMPUTE, "vm", "create", "expvm9p", "--disk", str(base_qcow), "--memory-mb", "512", "--cpus", "1",
+                   "--share", f"{data_dir}:datasets:ro", "--share-backend", "9p", "--net", "none")
+    check("vm: one share mechanism only: --share-backend (9p) is not accepted",
+          r_9p.returncode != 0 and "--share-backend" in r_9p.stderr and not (OUT / "compute-base" / "vms" / "expvm9p").exists(),
+          r_9p.stdout + r_9p.stderr)
     r_rst = run_cli(COMPUTE, "vm", "reset", "expvm")
     check("vm: reset recreates clean qcow2 overlay", r_rst.returncode == 0, r_rst.stderr)
+    # vm start creates the VM's run directory 0700 whatever the umask; a stub QEMU that
+    # exits at once leaves the directory behind to inspect. The cgroup root is the test's.
+    r_sv = run_cli(COMPUTE, "vm", "create", "startvm", "--disk", str(base_qcow), "--memory-mb", "256", "--cpus", "1",
+                   "--net", "none")
+    stub_dir = OUT / "qemu-exit-stub"
+    stub_dir.mkdir(exist_ok=True)
+    (stub_dir / "qemu-system-x86_64").write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    os.chmod(stub_dir / "qemu-system-x86_64", 0o755)
+    old_umask = os.umask(0)
+    try:
+        r_st = subprocess.run(["python3", COMPUTE, "vm", "start", "startvm"], capture_output=True, text=True,
+                              timeout=60, env=dict(env, PATH=f"{stub_dir}:{env.get('PATH', '')}",
+                                                   LOCACHY_COMPUTE_CGROUP=str(OUT / "vm-cgroup")))
+    finally:
+        os.umask(old_umask)
+    start_rdir = OUT / "compute-run" / "vm-startvm"
+    start_mode = start_rdir.stat().st_mode & 0o777 if start_rdir.is_dir() else None
+    check("vm: vm start creates the VM's run directory 0700",
+          r_sv.returncode == 0 and r_st.returncode != 0 and "exited immediately" in r_st.stderr
+          and start_mode == 0o700,
+          f"create={r_sv.returncode} start={r_st.returncode} mode={start_mode} err={r_sv.stderr + r_st.stderr}")
 else:
     print("SKIP: qemu-img not installed; skipping VM overlay test", flush=True)
 
@@ -371,6 +511,9 @@ try:
     check("compute-client: wildcard is never bound (only the tailscale0 address answers)",
           run_cli(COMPUTE, "remote", "--creds-dir", str(OUT / "cluster-creds"), "--host", "127.0.0.1",
                   "--port", "27184", "health").returncode != 0)
+    cc_run_mode = (OUT / "cc-run").stat().st_mode & 0o777 if (OUT / "cc-run").is_dir() else None
+    check("compute-client: the run directory is 0711 (a VM app's uid reaches its own vm-NAME)",
+          cc_run_mode == 0o711, f"mode={oct(cc_run_mode) if cc_run_mode is not None else 'missing'}")
 finally:
     cc.terminate()
     try:
@@ -378,6 +521,482 @@ finally:
     except subprocess.TimeoutExpired:
         cc.kill()
 
+# 9. Storage volume binding (--volume) and compute_storage routing (fail-closed)
+storage_root = OUT / "srv-storage"
+volumes_file = OUT / "volumes.json"
+rc_storage = OUT / "storage-rc.conf"
+for vname in ("vol-shared", "vol-compute", "vol-data"):
+    mp = storage_root / vname
+    mp.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["mount", "-t", "tmpfs", "tmpfs", str(mp)], check=True)
+    (mp / "marker.txt").write_text(f"from-{vname}\n", encoding="utf-8")
+
+volumes_file.write_text(
+    json.dumps(
+        {
+            "schema": 1,
+            "volumes": [
+                {
+                    "name": "vol-shared",
+                    "topology": "single",
+                    "fs": "ext4",
+                    "raid": "",
+                    "role": "shared",
+                    "encrypt": "none",
+                    "auto_mount": True,
+                    "fs_uuid": "11111111-1111-1111-1111-111111111111",
+                    "members": [{"part_uuid": "aaaa1111-1111-1111-1111-111111111111", "luks_uuid": "", "mapper": "", "keyfile": ""}],
+                    "mount_options": "",
+                    "created_at": "2026-11-24T00:00:00Z",
+                },
+                {
+                    "name": "vol-compute",
+                    "topology": "single",
+                    "fs": "btrfs",
+                    "raid": "",
+                    "role": "compute",
+                    "encrypt": "none",
+                    "auto_mount": True,
+                    "fs_uuid": "22222222-2222-2222-2222-222222222222",
+                    "members": [{"part_uuid": "aaaa2222-2222-2222-2222-222222222222", "luks_uuid": "", "mapper": "", "keyfile": ""}],
+                    "mount_options": "",
+                    "created_at": "2026-11-24T00:00:00Z",
+                },
+                {
+                    "name": "vol-data",
+                    "topology": "single",
+                    "fs": "ext4",
+                    "raid": "",
+                    "role": "data",
+                    "encrypt": "none",
+                    "auto_mount": True,
+                    "fs_uuid": "33333333-3333-3333-3333-333333333333",
+                    "members": [{"part_uuid": "aaaa3333-3333-3333-3333-333333333333", "luks_uuid": "", "mapper": "", "keyfile": ""}],
+                    "mount_options": "",
+                    "created_at": "2026-11-24T00:00:00Z",
+                },
+            ],
+        },
+        indent=2,
+    ),
+    encoding="utf-8",
+)
+
+vol_env = dict(env)
+vol_env["LOCACHY_VOLUMES_FILE"] = str(volumes_file)
+vol_env["LOCACHY_STORAGE_ROOT"] = str(storage_root)
+
+def run_vol_cli(*args, extra_env=None):
+    e = dict(vol_env)
+    if extra_env:
+        e.update(extra_env)
+    return subprocess.run(["python3", COMPUTE, *args], env=e, capture_output=True, text=True, timeout=60)
+
+# --volume rejects data-only volume at env create AND at run time AND via raw --mount
+r_data_env = run_vol_cli("env", "create", "bad-data-vol", "--image", "mini-ubuntu", "--net", "none", "--volume", "vol-data")
+check("storage: --volume refuses data-only volume at env create",
+      r_data_env.returncode != 0 and "data" in r_data_env.stderr, r_data_env.stdout + r_data_env.stderr)
+
+r_data_run = run_vol_cli("run", "train0", "--volume", "vol-data:/v:ro", "--", "/bin/sh", "-c", "true")
+check("storage: --volume refuses data-only volume at run time",
+      r_data_run.returncode != 0 and "data" in r_data_run.stderr, r_data_run.stdout + r_data_run.stderr)
+
+r_data_mnt = run_vol_cli("env", "create", "bad-data-mnt", "--image", "mini-ubuntu", "--net", "none",
+                         "--mount", f"{storage_root / 'vol-data'}:/stolen:ro")
+check("storage: raw --mount into data-only /srv/storage volume is refused",
+      r_data_mnt.returncode != 0 and "data-only" in r_data_mnt.stderr, r_data_mnt.stdout + r_data_mnt.stderr)
+
+# --volume succeeds for shared (default target /volumes/<name>) and compute (custom target + ro)
+r_sv = run_vol_cli("env", "create", "volenv", "--image", "mini-ubuntu", "--net", "none",
+                   "--volume", "vol-shared", "--volume", "vol-compute:/scratch:ro")
+check("storage: env create with shared + compute --volume succeeds", r_sv.returncode == 0, r_sv.stderr)
+
+r_sv_run = run_vol_cli(
+    "run", "volenv", "--", "/bin/sh", "-ec",
+    "cat /volumes/vol-shared/marker.txt; cat /scratch/marker.txt; echo wrote-shared > /volumes/vol-shared/out.txt; "
+    "if echo nope > /scratch/ro-test 2>/dev/null; then echo RO_BROKEN; else echo RO_ENFORCED; fi"
+)
+check("storage: shared & compute volumes bind cleanly and ro mode is enforced",
+      r_sv_run.returncode == 0
+      and "from-vol-shared" in r_sv_run.stdout
+      and "from-vol-compute" in r_sv_run.stdout
+      and "RO_ENFORCED" in r_sv_run.stdout
+      and (storage_root / "vol-shared" / "out.txt").read_text(encoding="utf-8").strip() == "wrote-shared",
+      f"rc={r_sv_run.returncode} out={r_sv_run.stdout!r} err={r_sv_run.stderr!r}")
+
+# compute_storage routes compute_base() onto the mounted volume and FAILS CLOSED when unmounted
+rc_storage.write_text('compute_storage="vol-compute"\n', encoding="utf-8")
+cs_env = dict(vol_env)
+cs_env.pop("LOCACHY_COMPUTE_BASE", None)
+cs_env["LOCACHY_COMPUTE_RC"] = str(rc_storage)
+
+r_cs_info = subprocess.run(["python3", COMPUTE, "storage", "--json"], env=cs_env, capture_output=True, text=True, timeout=30)
+cs_data = json.loads(r_cs_info.stdout) if r_cs_info.returncode == 0 else {}
+expected_cs_base = str(storage_root / "vol-compute" / "locachy-compute")
+check("storage: compute_storage routes compute_base() to mounted compute volume",
+      r_cs_info.returncode == 0
+      and cs_data.get("storage_volume") == "vol-compute"
+      and cs_data.get("compute_base") == expected_cs_base
+      and (storage_root / "vol-compute" / "locachy-compute" / "images").is_dir(),
+      r_cs_info.stdout + r_cs_info.stderr)
+
+r_cs_img = subprocess.run(["python3", COMPUTE, "image", "import", "vol-img", str(tar_path)],
+                          env=cs_env, capture_output=True, text=True, timeout=60)
+check("storage: image import writes into compute_storage volume base",
+      r_cs_img.returncode == 0 and (storage_root / "vol-compute" / "locachy-compute" / "images" / "vol-img" / "rootfs").is_dir(),
+      r_cs_img.stdout + r_cs_img.stderr)
+
+# Unmount vol-compute -> compute_base() MUST FAIL CLOSED (never fall back to root!)
+subprocess.run(["umount", str(storage_root / "vol-compute")], check=True)
+r_cs_unmounted = subprocess.run(["python3", COMPUTE, "image", "list", "--json"],
+                                env=cs_env, capture_output=True, text=True, timeout=30)
+check("storage: compute_storage fails closed when configured volume is unmounted",
+      r_cs_unmounted.returncode != 0 and "not mounted" in r_cs_unmounted.stderr,
+      r_cs_unmounted.stdout + r_cs_unmounted.stderr)
+
+# Also verify health endpoint exposes storage_volume & compute_base
+r_sv_clean = run_vol_cli("env", "remove", "volenv")
+check("storage: env with volume bindings removes cleanly", r_sv_clean.returncode == 0, r_sv_clean.stderr)
+
+# 10. VM display/QMP argv, virtiofs --volume shares, export-app, foreground vm run
+import importlib.machinery as _ilm
+import importlib.util as _ilu
+_mloader = _ilm.SourceFileLoader("locachy_compute_mod", COMPUTE)
+_mspec = _ilu.spec_from_file_location("locachy_compute_mod", COMPUTE, loader=_mloader)
+lc = _ilu.module_from_spec(_mspec)
+_mspec.loader.exec_module(lc)
+
+
+def after_flag(argv, flag):
+    return argv[argv.index(flag) + 1]
+
+
+gfx_meta = {"name": "gfx", "memory_mb": 512, "cpus": 1, "overlay_disk": str(OUT / "gfx.qcow2"),
+            "shares": [], "volumes": [], "cloud_init": "", "net": "none"}
+gfx = lc.vm_build_argv(gfx_meta, kvm=False, display="gtk", qmp_sock="/tmp/locachy-qmp.sock")
+check("vm-argv: display gtk adds virtio-vga, qemu-xhci, usb-tablet and the gtk backend with window-close=off",
+      after_flag(gfx, "-display") == "gtk,window-close=off" and "virtio-vga" in gfx and "qemu-xhci" in gfx
+      and "usb-tablet" in gfx,
+      str(gfx))
+sdl = lc.vm_build_argv(gfx_meta, kvm=False, display="sdl")
+check("vm-argv: display sdl is the sdl backend with window-close=off",
+      after_flag(sdl, "-display") == "sdl,window-close=off" and "virtio-vga" in sdl, str(sdl))
+check("vm-argv: -name is the window tag locachy-compute[NAME]",
+      after_flag(gfx, "-name") == "locachy-compute[gfx]" and after_flag(sdl, "-name") == "locachy-compute[gfx]",
+      str(gfx))
+check("vm-argv: --qmp-sock becomes unix:PATH,server=on,wait=off",
+      after_flag(gfx, "-qmp") == "unix:/tmp/locachy-qmp.sock,server=on,wait=off", str(gfx))
+headless = lc.vm_build_argv(gfx_meta, kvm=False)
+check("vm-argv: headless keeps -display none, no GPU device, no memfd when no shares, default qmp.sock",
+      after_flag(headless, "-display") == "none" and "virtio-vga" not in headless
+      and "memory-backend-memfd" not in " ".join(headless)
+      and after_flag(headless, "-qmp") == "unix:" + str(lc.compute_run() / "vm-gfx" / "qmp.sock") + ",server=on,wait=off",
+      str(headless))
+for bad in ("vnc", "gtk,gl=on"):
+    try:
+        lc.vm_build_argv(gfx_meta, kvm=False, display=bad)
+        check(f"vm-argv: refuses display {bad!r}", False, "accepted")
+    except lc.ComputeError:
+        check(f"vm-argv: refuses display {bad!r}", True)
+disk_argv = lc.vm_build_argv(gfx_meta, kvm=False, display="none")
+check("vm-disk: base overlay on virtio-blk-pci with an iothread, aio=io_uring, cache=none, discard=unmap; no NVMe",
+      "-object" in disk_argv and "iothread,id=iothread0" in disk_argv
+      and f"file={gfx_meta['overlay_disk']},format=qcow2,if=none,id=hd0,cache=none,aio=io_uring,discard=unmap" in disk_argv
+      and "virtio-blk-pci,drive=hd0,iothread=iothread0" in disk_argv
+      and not any("nvme" in a.lower() for a in disk_argv),
+      str(disk_argv))
+try:
+    lc.vm_build_argv(gfx_meta, kvm=False, qmp_sock="/tmp/a,b.sock")
+    check("vm-argv: refuses a QMP socket path containing a comma", False, "accepted")
+except lc.ComputeError:
+    check("vm-argv: refuses a QMP socket path containing a comma", True)
+
+# virtiofsd argv: rw vs ro (--readonly), --sandbox=namespace, --cache=auto
+vfs_rw = lc.virtiofsd_build_argv({"host": str(data_dir), "tag": "ds", "mode": "rw"}, Path("/tmp/v0.sock"), binary="/usr/lib/virtiofsd")
+vfs_ro = lc.virtiofsd_build_argv({"host": str(data_dir), "tag": "ds", "mode": "ro"}, Path("/tmp/v1.sock"), binary="/usr/lib/virtiofsd")
+check("vm-virtiofs: virtiofsd_build_argv sets socket-path, shared-dir, sandbox=namespace, cache=auto, readonly only on ro",
+      "--socket-path=/tmp/v0.sock" in vfs_rw
+      and f"--shared-dir={data_dir}" in vfs_rw
+      and "--sandbox=namespace" in vfs_rw
+      and "--cache=auto" in vfs_rw
+      and "--readonly" not in vfs_rw
+      and "--readonly" in vfs_ro,
+      f"rw={vfs_rw} ro={vfs_ro}")
+
+# Storage volumes: remount vol-compute (section 9 unmounted it), then vm create with --volume
+subprocess.run(["mount", "-t", "tmpfs", "tmpfs", str(storage_root / "vol-compute")], check=True)
+(storage_root / "vol-compute" / "marker.txt").write_text("from-vol-compute\n", encoding="utf-8")
+
+if shutil.which("qemu-img"):
+    vmbase = OUT / "vmbase.qcow2"
+    subprocess.run(["qemu-img", "create", "-f", "qcow2", str(vmbase), "64M"], check=True, capture_output=True)
+    r_vv_data = run_vol_cli("vm", "create", "volvm-bad", "--disk", str(vmbase), "--net", "none", "--volume", "vol-data")
+    check("vm-volume: vm create refuses a data-only volume",
+          r_vv_data.returncode != 0 and "data" in r_vv_data.stderr, r_vv_data.stdout + r_vv_data.stderr)
+    r_vv = run_vol_cli("vm", "create", "volvm", "--disk", str(vmbase), "--memory-mb", "512", "--cpus", "1",
+                       "--net", "none", "--volume", "vol-shared", "--volume", "vol-compute:cstore:ro")
+    check("vm-volume: vm create accepts shared and compute volumes as virtiofs shares",
+          r_vv.returncode == 0, r_vv.stdout + r_vv.stderr)
+    r_vc = run_vol_cli("vm", "cmd", "volvm", "--display", "gtk", "--qmp-sock", str(OUT / "volvm-qmp.sock"), "--json")
+    vargv = json.loads(r_vc.stdout) if r_vc.returncode == 0 else []
+    vargv_s = " ".join(vargv)
+    check("vm-volume: vm cmd binds vol-shared and vol-compute (tag cstore) over virtiofs with memfd share=on",
+          "memory-backend-memfd,id=mem,size=512M,share=on" in vargv_s
+          and "memory-backend=mem" in vargv_s
+          and "vhost-user-fs-pci,queue-size=1024,chardev=vfs0,tag=vol-shared" in vargv_s
+          and "vhost-user-fs-pci,queue-size=1024,chardev=vfs1,tag=cstore" in vargv_s
+          and "virtio-vga" in vargv
+          and after_flag(vargv, "-display") == "gtk,window-close=off",
+          r_vc.stdout + r_vc.stderr)
+
+    # Missing virtiofsd fails clearly before launching QEMU
+    r_novfs = run_vol_cli("vm", "run", "volvm", "--display", "none",
+                          extra_env={"LOCACHY_VIRTIOFSD": "/nonexistent/virtiofsd", "LOCACHY_COMPUTE_KVM": "0"})
+    check("vm-virtiofs: missing virtiofsd fails cleanly before launching QEMU",
+          r_novfs.returncode != 0 and "LOCACHY_VIRTIOFSD" in r_novfs.stderr, r_novfs.stdout + r_novfs.stderr)
+
+    r_ex = run_vol_cli("vm", "export-app", "volvm", "--app-name", "volvm-app", "--display", "gtk",
+                       "--freeze", "qmp", "--network", "1",
+                       extra_env={"LOCACHY_CONTAINERS_DIR": str(OUT / "containers")})
+    conf_path = OUT / "containers" / "volvm-app.conf"
+    conf_text = conf_path.read_text(encoding="utf-8") if conf_path.is_file() else ""
+    check("vm-app: export-app writes APP.conf (0644) with vm, vm_kind, vm_name, vm_display, vm_freeze, network",
+          r_ex.returncode == 0
+          and all(s in conf_text for s in ['vm="1"', 'vm_kind="compute"', 'vm_name="volvm"',
+                                           'vm_display="gtk"', 'vm_freeze="qmp"', 'network="1"'])
+          and (conf_path.stat().st_mode & 0o777) == 0o644,
+          r_ex.stdout + r_ex.stderr + conf_text)
+    r_ex_none = run_vol_cli("vm", "export-app", "volvm", "--display", "none",
+                            extra_env={"LOCACHY_CONTAINERS_DIR": str(OUT / "containers")})
+    check("vm-app: export-app refuses a windowless display (an app needs a window)",
+          r_ex_none.returncode != 0, r_ex_none.stdout + r_ex_none.stderr)
+    r_ex_bad = run_vol_cli("vm", "export-app", "no-such-vm", "--app-name", "ghost",
+                           extra_env={"LOCACHY_CONTAINERS_DIR": str(OUT / "containers")})
+    check("vm-app: export-app refuses an unknown VM", r_ex_bad.returncode != 0, r_ex_bad.stdout + r_ex_bad.stderr)
+
+    # Real QEMU run through vm run (a VM without shares needs no virtiofsd): QMP handshake + query-status + quit,
+    # then SIGTERM forwarding
+    r_qvm = run_vol_cli("vm", "create", "qmpvm", "--disk", str(vmbase), "--memory-mb", "256", "--cpus", "1", "--net", "none")
+    check("vm-run: create VM for live QEMU QMP test succeeds", r_qvm.returncode == 0, r_qvm.stderr)
+    if shutil.which("qemu-system-x86_64"):
+        qmp_sock = OUT / "real-qmp.sock"
+        p = subprocess.Popen(
+            ["python3", COMPUTE, "vm", "run", "qmpvm", "--display", "none", "--qmp-sock", str(qmp_sock)],
+            env=dict(vol_env, LOCACHY_COMPUTE_KVM="0"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            for _ in range(100):
+                if qmp_sock.exists() or p.poll() is not None:
+                    break
+                time.sleep(0.05)
+            qmp_ok = False
+            if qmp_sock.exists():
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as qs:
+                    qs.settimeout(5.0)
+                    qs.connect(str(qmp_sock))
+                    f = qs.makefile("rwb", buffering=0)
+                    greet = json.loads(f.readline().decode("utf-8"))
+                    f.write(b'{"execute":"qmp_capabilities"}\n')
+                    cap = json.loads(f.readline().decode("utf-8"))
+                    f.write(b'{"execute":"query-status"}\n')
+                    st = json.loads(f.readline().decode("utf-8"))
+                    f.write(b'{"execute":"quit"}\n')
+                    qmp_ok = "QMP" in greet and "return" in cap and "return" in st
+            rc = p.wait(timeout=10)
+            check("vm-run: foreground QEMU answers QMP and exits cleanly on quit",
+                  qmp_ok and rc == 0, f"qmp_ok={qmp_ok} rc={rc} err={p.stderr.read()}")
+        finally:
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+        # SIGTERM to vm run forwards to QEMU
+        qmp_sock2 = OUT / "real-qmp2.sock"
+        p2 = subprocess.Popen(
+            ["python3", COMPUTE, "vm", "run", "qmpvm", "--display", "none", "--qmp-sock", str(qmp_sock2)],
+            env=dict(vol_env, LOCACHY_COMPUTE_KVM="0"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            # Wait until QEMU's main loop answers QMP (not just socket bind), so its
+            # SIGTERM handler is installed before we signal vm run.
+            for _ in range(200):
+                if p2.poll() is not None:
+                    break
+                if qmp_sock2.exists():
+                    try:
+                        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        s.settimeout(2.0)
+                        s.connect(str(qmp_sock2))
+                        f = s.makefile("rwb", buffering=0)
+                        f.readline()
+                        f.write(b'{"execute":"qmp_capabilities"}\r\n')
+                        f.readline()
+                        f.write(b'{"execute":"query-status"}\r\n')
+                        f.readline()
+                        s.close()
+                        break
+                    except OSError:
+                        pass
+                time.sleep(0.05)
+            p2.terminate()
+            rc2 = p2.wait(timeout=10)
+            check("vm-run: SIGTERM forwards to QEMU and exits cleanly", rc2 == 0, f"rc={rc2} err={p2.stderr.read()}")
+        finally:
+            if p2.poll() is None:
+                p2.kill()
+                p2.wait()
+    else:
+        print("SKIP: qemu-system-x86_64 not installed; skipping real QEMU vm run test", flush=True)
+
+    # 10b. virtiofs lifecycle: stub $LOCACHY_VIRTIOFSD + QEMU shim. The sockets must exist before QEMU
+    # starts, --readonly only for ro shares, and SIGTERM to vm run stops QEMU and then virtiofsd.
+    vfs_dir = OUT / "vfs-life"
+    shim_dir = vfs_dir / "shim"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    stub_vfsd = vfs_dir / "stub-virtiofsd.py"
+    stub_vfsd.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, signal, socket, sys, time\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "here = Path(os.path.dirname(os.path.abspath(__file__)))\n"
+        "sock_path = next(a.split('=', 1)[1] for a in args if a.startswith('--socket-path='))\n"
+        "with open(here / 'vfsd-args.log', 'a', encoding='utf-8') as fh:\n"
+        "    fh.write(' '.join(args) + '\\n')\n"
+        "with open(here / f'vfsd-{os.getpid()}.pid', 'w', encoding='utf-8') as fh:\n"
+        "    fh.write(str(os.getpid()) + '\\n')\n"
+        "srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        "srv.bind(sock_path)\n"
+        "srv.listen(4)\n"
+        "def _term(signum, frame):\n"
+        "    with open(here / 'vfsd-term.txt', 'a', encoding='utf-8') as fh:\n"
+        "        fh.write('term\\n')\n"
+        "    try:\n"
+        "        os.unlink(sock_path)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    os._exit(0)\n"
+        "signal.signal(signal.SIGTERM, _term)\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    os.chmod(stub_vfsd, 0o755)
+    qemu_shim = shim_dir / "qemu-system-x86_64"
+    qemu_shim.write_text(
+        "#!/bin/sh\n"
+        "d=$(dirname \"$0\")\n"
+        "printf '%s\\n' \"$@\" >\"$d/argv.txt\"\n"
+        "present=yes\n"
+        "for p in $(sed -n 's/^socket,id=[^,]*,path=//p' \"$d/argv.txt\"); do\n"
+        "    [ -S \"$p\" ] || present=no\n"
+        "done\n"
+        "printf '%s' \"$present\" >\"$d/vfs-present.txt\"\n"
+        "trap 'printf term >\"$d/term.txt\"; exit 0' TERM INT\n"
+        ": >\"$d/ready\"\n"
+        "while :; do sleep 0.05; done\n",
+        encoding="utf-8",
+    )
+    os.chmod(qemu_shim, 0o755)
+    r_vfs_vm = run_vol_cli("vm", "create", "vfsvm", "--disk", str(vmbase), "--memory-mb", "256", "--cpus", "1",
+                           "--net", "none", "--share", f"{data_dir}:datasets:ro", "--volume", "vol-shared")
+    check("vm-virtiofs: create VM with a ro directory share and a rw volume share (virtiofs default)",
+          r_vfs_vm.returncode == 0, r_vfs_vm.stdout + r_vfs_vm.stderr)
+    life_env = dict(vol_env, LOCACHY_COMPUTE_KVM="0", LOCACHY_VIRTIOFSD=str(stub_vfsd),
+                    PATH=f"{shim_dir}:{os.environ.get('PATH', '')}")
+    for stale in shim_dir.glob("*"):
+        if stale.is_file() and stale.name != "qemu-system-x86_64":
+            stale.unlink()
+    p3 = subprocess.Popen(["python3", COMPUTE, "vm", "run", "vfsvm", "--display", "none"],
+                          env=life_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        for _ in range(200):
+            if (shim_dir / "ready").exists() or p3.poll() is not None:
+                break
+            time.sleep(0.05)
+        ready3 = (shim_dir / "ready").exists()
+        p3.terminate()
+        rc3 = p3.wait(timeout=20)
+    finally:
+        if p3.poll() is None:
+            p3.kill()
+            p3.wait()
+    err3 = p3.stderr.read()
+    vfsd_log = (vfs_dir / "vfsd-args.log").read_text(encoding="utf-8") if (vfs_dir / "vfsd-args.log").is_file() else ""
+    vfs_present = (shim_dir / "vfs-present.txt").read_text(encoding="utf-8") if (shim_dir / "vfs-present.txt").is_file() else ""
+    term_count = (vfs_dir / "vfsd-term.txt").read_text(encoding="utf-8").count("term") if (vfs_dir / "vfsd-term.txt").is_file() else 0
+    stub_pids = [int(p.read_text().strip()) for p in vfs_dir.glob("vfsd-*.pid")]
+    dead = True
+    for pid in stub_pids:
+        try:
+            os.kill(pid, 0)
+            dead = False
+        except OSError:
+            pass
+    left_socks = [s.name for s in (OUT / "compute-run" / "vm-vfsvm").glob("vfs-*.sock")]
+    check("vm-virtiofs: one virtiofsd per share starts before QEMU, sockets exist when QEMU starts",
+          ready3 and vfs_present == "yes" and len(stub_pids) == 2,
+          f"ready={ready3} present={vfs_present!r} pids={stub_pids} err={err3}")
+    check("vm-virtiofs: virtiofsd argv has --socket-path, --shared-dir, --sandbox=namespace, --cache=auto, and --readonly only for ro",
+          vfsd_log.count("--sandbox=namespace") == 2 and vfsd_log.count("--cache=auto") == 2
+          and any(f"--shared-dir={data_dir}" in ln and "--readonly" in ln for ln in vfsd_log.splitlines())
+          and any(f"--shared-dir={os.path.realpath(str(storage_root / 'vol-shared'))}" in ln and "--readonly" not in ln
+                  for ln in vfsd_log.splitlines()),
+          vfsd_log)
+    check("vm-virtiofs: SIGTERM to vm run stops QEMU, then every virtiofsd; no sockets or pids left behind",
+          rc3 == 0 and term_count == 2 and dead and left_socks == [],
+          f"rc={rc3} terms={term_count} dead={dead} socks={left_socks} err={err3}")
+
+    # Real QEMU parse check: memfd + vhost-user-fs-pci with -S -display none, stub listeners at the chardev paths
+    if shutil.which("qemu-system-x86_64"):
+        import threading
+        (OUT / "compute-run" / "vm-vfsvm").mkdir(parents=True, exist_ok=True)
+        cmd_res = run_vol_cli("vm", "cmd", "vfsvm", "--json", extra_env={"LOCACHY_COMPUTE_KVM": "0"})
+        real_argv = json.loads(cmd_res.stdout) if cmd_res.returncode == 0 else []
+        paths = [a.split(",path=", 1)[1] for a in real_argv if a.startswith("socket,id=vfs")]
+        listeners = []
+        held = []
+        for sp_path in paths:
+            Path(sp_path).unlink(missing_ok=True)
+            ls = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            ls.bind(sp_path)
+            ls.listen(4)
+            listeners.append(ls)
+
+            def _accept_forever(sock=ls):
+                while True:
+                    try:
+                        conn, _ = sock.accept()
+                        held.append(conn)
+                    except OSError:
+                        return
+
+            threading.Thread(target=_accept_forever, daemon=True).start()
+        qparse = subprocess.Popen([real_argv[0], "-S", *real_argv[1:]],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(2.0)
+        alive = qparse.poll() is None
+        if alive:
+            qparse.kill()
+        qout, qerr = qparse.communicate(timeout=10)
+        for conn in held:
+            try:
+                conn.close()
+            except OSError:
+                pass
+        for ls in listeners:
+            ls.close()
+        for sp_path in paths:
+            Path(sp_path).unlink(missing_ok=True)
+        parse_bad = any(w in qerr.lower() for w in ("invalid option", "unknown option", "is unexpected",
+                                                      "unknown property", "invalid parameter", "requires a value",
+                                                      "io_uring", "iothread", "aio"))
+        check("vm-virtiofs: real qemu parses -S -display none, the memfd object and vhost-user-fs-pci with stub sockets",
+              not parse_bad and (alive or "vhost" in qerr.lower() or "socket" in qerr.lower() or qerr == ""),
+              f"alive_at_2s={alive} stderr={qerr.strip()[:600]!r}")
+else:
+    print("SKIP: qemu-img not installed; skipping vm --volume and export-app tests", flush=True)
+
+print("DRIVER-DONE", flush=True)
 sys.exit(0 if fails == 0 else 1)
 PYEOF
 
@@ -399,8 +1018,150 @@ unshare --user --map-auto --map-root-user --net --mount --propagation private \
 grep -E '^(PASS|FAIL|SKIP): ' "$out/run.log" || cat "$out/run.log"
 sub_fails=$(grep -c '^FAIL: ' "$out/run.log" || :)
 fails=$((fails + sub_fails))
-if ! grep -q '^PASS: compute-client: wildcard is never bound' "$out/run.log"; then
+if ! grep -q '^DRIVER-DONE' "$out/run.log"; then
     note FAIL "compute: test driver did not finish cleanly: $(tail -n 12 "$out/run.log" | tr '\n' ' ')"
+fi
+
+# Foreground vm run as a non-root uid (the uid locachy-app runs a compute VM as):
+# no root on its run path. Only this shell's own uid is used, never a privileged one.
+uid=$(id -u)
+echo "vm-run uid: $uid"
+if [ "$uid" != 0 ]; then
+    nr="$out/vmnr"
+    mkdir -p "$nr/compute-base/vms/nrvm" "$nr/compute-run" "$nr/shim" "$nr/locked"
+    cat >"$nr/shim/qemu-system-x86_64" <<'SHIM'
+#!/bin/sh
+d=$(dirname "$0")
+printf '%s\n' "$@" >"$d/argv.txt"
+trap 'printf term >"$d/term.txt"; exit 0' TERM INT
+: >"$d/ready"
+while :; do sleep 0.05; done
+SHIM
+    chmod 755 "$nr/shim/qemu-system-x86_64"
+    python3 - "$nr" <<'PYEOF'
+import json, os, sys
+nr = sys.argv[1]
+vdir = os.path.join(nr, "compute-base", "vms", "nrvm")
+vm = {"version": 1, "name": "nrvm", "base_disk": os.path.join(nr, "base.qcow2"),
+      "overlay_disk": os.path.join(vdir, "overlay.qcow2"), "memory_mb": 512, "cpus": 1,
+      "shares": [], "volumes": [], "cloud_init": "", "net": "none",
+      "created_at": "2026-11-24T00:00:00Z", "reset_at": "2026-11-24T00:00:00Z"}
+with open(os.path.join(vdir, "vm.json"), "w", encoding="utf-8") as fh:
+    json.dump(vm, fh)
+os.chmod(os.path.join(vdir, "vm.json"), 0o600)
+open(os.path.join(vdir, "overlay.qcow2"), "wb").close()
+PYEOF
+    # Refused with a clear error when this uid cannot create the run directory
+    chmod 0500 "$nr/locked"
+    rc_locked=0
+    env LOCACHY_COMPUTE_BASE="$nr/compute-base" LOCACHY_COMPUTE_RUN="$nr/locked" LOCACHY_COMPUTE_KVM=0 \
+        PATH="$nr/shim:$PATH" python3 "$src/link/locachy-compute" vm run nrvm >"$nr/locked.out" 2>&1 || rc_locked=$?
+    chmod 0700 "$nr/locked"
+    if [ "$rc_locked" -ne 0 ] && grep -q "cannot be created by uid $uid" "$nr/locked.out"; then
+        note PASS "vm-run: uid $uid refuses an unwritable run directory with a clear error"
+    else
+        note FAIL "vm-run: unwritable run dir: rc=$rc_locked $(cat "$nr/locked.out")"
+    fi
+    # Foreground run: QEMU (the shim) gets -display gtk and -qmp, SIGTERM is forwarded, the status comes back
+    env LOCACHY_COMPUTE_BASE="$nr/compute-base" LOCACHY_COMPUTE_RUN="$nr/compute-run" LOCACHY_COMPUTE_KVM=0 \
+        PATH="$nr/shim:$PATH" python3 "$src/link/locachy-compute" vm run nrvm --display gtk \
+        --qmp-sock "$nr/nr-qmp.sock" >"$nr/run.out" 2>&1 &
+    run_pid=$!
+    i=0
+    while [ ! -e "$nr/shim/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -TERM "$run_pid" 2>/dev/null || true
+    rc_run=0
+    wait "$run_pid" || rc_run=$?
+    if [ "$rc_run" -eq 0 ] && [ -f "$nr/shim/term.txt" ] \
+        && grep -qx -- '-display' "$nr/shim/argv.txt" && grep -qx -- 'gtk,window-close=off' "$nr/shim/argv.txt" \
+        && grep -qxF -- 'locachy-compute[nrvm]' "$nr/shim/argv.txt" \
+        && grep -q -- '^unix:.*nr-qmp.sock' "$nr/shim/argv.txt" \
+        && [ ! -e "$nr/compute-run/vm-nrvm/qemu.pid" ]; then
+        note PASS "vm-run: uid $uid runs the VM in the foreground, forwards SIGTERM, returns its status, removes its pid file"
+    else
+        note FAIL "vm-run: foreground run: rc=$rc_run term=$(cat "$nr/shim/term.txt" 2>/dev/null) out=$(cat "$nr/run.out" 2>/dev/null)"
+    fi
+    # virtiofs as this uid: the stub virtiofsd logs the uid it runs as, the sockets exist before QEMU starts,
+    # and SIGTERM to vm run stops QEMU and then virtiofsd, leaving no sockets or pids
+    mkdir -p "$nr/compute-base/vms/nrvfs" "$nr/data"
+    cat >"$nr/stub-virtiofsd.py" <<'VFSD'
+#!/usr/bin/env python3
+import os, signal, socket, sys, time
+from pathlib import Path
+args = sys.argv[1:]
+here = Path(os.path.dirname(os.path.abspath(__file__)))
+sock_path = next(a.split("=", 1)[1] for a in args if a.startswith("--socket-path="))
+with open(here / "vfsd-args.log", "a", encoding="utf-8") as fh:
+    fh.write(f"uid={os.getuid()} " + " ".join(args) + "\n")
+with open(here / f"vfsd-{os.getpid()}.pid", "w", encoding="utf-8") as fh:
+    fh.write(str(os.getpid()) + "\n")
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(sock_path)
+srv.listen(4)
+def _term(signum, frame):
+    with open(here / "vfsd-term.txt", "a", encoding="utf-8") as fh:
+        fh.write("term\n")
+    try:
+        os.unlink(sock_path)
+    except OSError:
+        pass
+    os._exit(0)
+signal.signal(signal.SIGTERM, _term)
+while True:
+    time.sleep(0.05)
+VFSD
+    chmod 755 "$nr/stub-virtiofsd.py"
+    python3 - "$nr" "$nr/data" <<'PYEOF'
+import json, os, sys
+nr, data = sys.argv[1], sys.argv[2]
+vdir = os.path.join(nr, "compute-base", "vms", "nrvfs")
+vm = {"version": 1, "name": "nrvfs", "base_disk": os.path.join(nr, "base.qcow2"),
+      "overlay_disk": os.path.join(vdir, "overlay.qcow2"), "memory_mb": 256, "cpus": 1,
+      "shares": [{"host": data, "tag": "ds", "mode": "ro"}], "volumes": [],
+      "cloud_init": "", "net": "none", "created_at": "2026-11-24T00:00:00Z", "reset_at": "2026-11-24T00:00:00Z"}
+with open(os.path.join(vdir, "vm.json"), "w", encoding="utf-8") as fh:
+    json.dump(vm, fh)
+os.chmod(os.path.join(vdir, "vm.json"), 0o600)
+open(os.path.join(vdir, "overlay.qcow2"), "wb").close()
+PYEOF
+    rm -f "$nr/shim/ready" "$nr/shim/term.txt" "$nr/shim/vfs-present.txt"
+    cat >"$nr/shim/qemu-system-x86_64" <<'SHIM'
+#!/bin/sh
+d=$(dirname "$0")
+printf '%s\n' "$@" >"$d/argv.txt"
+present=yes
+for p in $(sed -n 's/^socket,id=[^,]*,path=//p' "$d/argv.txt"); do
+    [ -S "$p" ] || present=no
+done
+printf '%s' "$present" >"$d/vfs-present.txt"
+trap 'printf term >"$d/term.txt"; exit 0' TERM INT
+: >"$d/ready"
+while :; do sleep 0.05; done
+SHIM
+    chmod 755 "$nr/shim/qemu-system-x86_64"
+    env LOCACHY_COMPUTE_BASE="$nr/compute-base" LOCACHY_COMPUTE_RUN="$nr/compute-run" LOCACHY_COMPUTE_KVM=0 \
+        LOCACHY_VIRTIOFSD="$nr/stub-virtiofsd.py" PATH="$nr/shim:$PATH" \
+        python3 "$src/link/locachy-compute" vm run nrvfs --display none >"$nr/vfs-run.out" 2>&1 &
+    vfs_pid=$!
+    i=0
+    while [ ! -e "$nr/shim/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    vfs_ready=no
+    [ -e "$nr/shim/ready" ] && vfs_ready=yes
+    kill -TERM "$vfs_pid" 2>/dev/null || true
+    rc_vfs=0
+    wait "$vfs_pid" || rc_vfs=$?
+    present=$(cat "$nr/shim/vfs-present.txt" 2>/dev/null || true)
+    if [ "$vfs_ready" = yes ] && [ "$rc_vfs" -eq 0 ] && [ "$present" = yes ] \
+        && grep -q "^uid=$uid " "$nr/vfsd-args.log" && grep -q -- '--readonly' "$nr/vfsd-args.log" \
+        && [ "$(cat "$nr/vfsd-term.txt" 2>/dev/null | wc -l)" -eq 1 ] \
+        && [ -z "$(ls "$nr/compute-run/vm-nrvfs"/vfs-*.sock 2>/dev/null || true)" ]; then
+        note PASS "vm-virtiofs: uid $uid runs virtiofsd with the sockets ready before QEMU; SIGTERM stops QEMU then virtiofsd; no sockets left"
+    else
+        note FAIL "vm-virtiofs: non-root lifecycle: ready=$vfs_ready rc=$rc_vfs present=$present log=$(cat "$nr/vfsd-args.log" 2>/dev/null) out=$(cat "$nr/vfs-run.out" 2>/dev/null)"
+    fi
+    chmod -R u+rwX "$nr" 2>/dev/null || true
+else
+    note SKIP "vm-run: non-root check skipped (this run is uid 0)"
 fi
 
 echo "compute tests: $fails failed"

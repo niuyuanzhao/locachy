@@ -1625,10 +1625,11 @@ def conf_packages(conf):
 
 
 def containers():
-    """The containers, not the host programs (host="1"): their packages are the host's."""
+    """The containers, not host programs (host="1") or VM apps (vm="1"): neither has a container build."""
     names = []
     for path in glob.glob(os.path.join(CONF_DIR, "*.conf")):
-        if read_conf(path).get("host") != "1":
+        conf = read_conf(path)
+        if conf.get("host") != "1" and conf.get("vm") != "1":
             names.append(os.path.basename(path)[:-5])
     return sorted(names)
 
@@ -2361,8 +2362,10 @@ def targets_of(rows):
     order = []
     # Package changes in a followed store recipe can also rebuild an app
     # with real-system access. Its ordinary package updates belong to host,
-    # but its recipe still has its own build target.
-    configured = sorted(os.path.basename(p)[:-5] for p in glob.glob(os.path.join(CONF_DIR, "*.conf")))
+    # but its recipe still has its own build target. VM apps (vm="1") never have
+    # container package builds.
+    configured = sorted(os.path.basename(p)[:-5] for p in glob.glob(os.path.join(CONF_DIR, "*.conf"))
+                        if read_conf(p).get("vm") != "1")
     for t in dict.fromkeys(["apps", "host", "locachy"] + containers() + configured):
         if any(r[0] == t and r[1] not in ("state", "note") for r in rows):
             order.append(t)

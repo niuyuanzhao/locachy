@@ -145,7 +145,7 @@ static int apps_on, apps_missing;
 struct container {
     char name[64], package[128], extras[VALUE_MAX + 1], command[256], arguments[256], network[8], camera[8];
     char directories[VALUE_MAX + 1], state[16], built[40];
-    int prev, host;
+    int prev, host, vm;
     int pkg_first, pkg_count, pkg_listed; /* its packages: cpkgs[pkg_first], pkg_listed of pkg_count */
     long long pkg_bytes;
 };
@@ -429,6 +429,8 @@ static void container_value(const char *name, const char *value, void *arg)
         snprintf(c->directories, sizeof c->directories, "%s", value);
     } else if (strcmp(name, "host") == 0) {
         c->host = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "vm") == 0) {
+        c->vm = strcmp(value, "1") == 0;
     }
 }
 
@@ -527,13 +529,17 @@ static void load_containers(void)
         if (len <= 5 || len - 5 >= sizeof conts[0].name || strcmp(e->d_name + len - 5, ".conf") != 0) {
             continue;
         }
-        struct container *c = &conts[nconts++];
+        struct container *c = &conts[nconts];
         char path[512];
         struct stat st;
         memset(c, 0, sizeof *c);
         snprintf(c->name, sizeof c->name, "%.*s", (int)(len - 5), e->d_name);
         snprintf(path, sizeof path, "%s/%s", CONF_DIR, e->d_name);
         conf_read(path, container_value, c);
+        if (c->vm) {
+            continue; /* a VM app (vm="1") has no package build: it is not listed here */
+        }
+        nconts++;
         snprintf(path, sizeof path, "%s/%s/built", STATE, c->name);
         conf_read(path, built_value, c);
         snprintf(path, sizeof path, "%s/%s/upper.prev", STATE, c->name);

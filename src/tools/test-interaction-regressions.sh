@@ -27,6 +27,12 @@ link=("$src/base/key-action.c" "$src/base/help.c" -Wl,--gc-sections)
 "$out/settings-optional"
 "${cc[@]}" "$src/tools/test-settings-features.c" "${link[@]}" -o "$out/settings-features"
 "$out/settings-features"
+"${cc[@]}" "$src/tools/test-settings-storage.c" "${link[@]}" -o "$out/settings-storage"
+"$out/settings-storage"
+# open.c: a managed VM's windows by QEMU's title, plain containers' by app id (fixture configuration, rootless).
+"${cc[@]}" $(pkg-config --cflags gio-2.0) -DFIXTURE_CONF="\"$out/open-vm-containers\"" "$src/tools/test-open-vm.c" \
+    "$src/base/rc.c" "$src/base/say.c" "$src/base/control.c" $(pkg-config --libs gio-2.0) "${link[@]}" -o "$out/open-vm"
+"$out/open-vm"
 "${cc[@]}" "$src/tools/test-term-close.c" "${link[@]}" -o "$out/term-close"
 timeout 30 "$out/term-close" "$out/term-close-fixtures"
 "${cc[@]}" "$src/tools/test-monitor-layout.c" "${link[@]}" -o "$out/monitor-layout"
@@ -80,6 +86,8 @@ for test in rtc-alarm suspend-hibernate init-lid init-shutdown init-services sta
     "${cc[@]}" "$src/tools/test-$test.c" "${link[@]}" -o "$out/$test"
     "$out/$test" "$out/$test-fixtures"
 done
+"${cc[@]}" "$src/tools/test-battery-adaptive.c" -o "$out/battery-adaptive"
+"$out/battery-adaptive"
 "${cc[@]}" -fsanitize=address,undefined "$src/tools/test-battery-handoff.c" -o "$out/battery-handoff-san"
 "$out/battery-handoff-san" "$out/battery-handoff-san-fixtures"
 "${cc[@]}" "$src/tools/test-init-screen.c" "${link[@]}" -o "$out/init-screen"

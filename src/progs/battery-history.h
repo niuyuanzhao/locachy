@@ -16,6 +16,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,9 +68,12 @@ struct bat_device {
     char start_attr[40], end_attr[40];
 };
 
+enum bat_system_ac { BAT_AC_UNKNOWN, BAT_AC_OFFLINE, BAT_AC_ONLINE };
+
 struct bat_ac_info {
     int any_adapter;
     int online;
+    enum bat_system_ac system; /* Verified input, not inferred from pack status. */
     char name[48];
     double voltage_v;
     double current_a;
@@ -82,7 +86,8 @@ struct bat_sample {
     int energy_mwh;   /* >= 0 */
     int voltage_mv;   /* >= 0 */
     char state;       /* 'C' chg, 'D' dis, 'F' full, 'N' idle, 'R' removed, 'I' inserted, 'U' unk */
-    int ac;           /* 0 or 1 */
+    int ac;           /* 0 or 1; may be inferred for display. */
+    int ac_verified;  /* Measured at a system power input. */
 };
 
 /* Handoff event kinds in /var/lib/locachy/battery/events.tsv:
@@ -110,6 +115,47 @@ static inline const char *bat_supply_root(void)
 {
     const char *env = getenv("LOCACHY_POWER_SUPPLY_DIR");
     return env && env[0] ? env : POWER_SUPPLY_ROOT;
+}
+
+#define BAT_CHARGE_FULL_SECONDS 86400
+
+struct bat_charge_slot_status {
+    char slot[48];
+    char pack_id[96];
+    char state[16];
+    int requested_end, actual_end; /* -1 when unknown or no target. */
+    int64_t release_ts;
+};
+
+struct bat_charge_status {
+    int adaptive;
+    int64_t full_until; /* Active, not just requested. */
+    int nslots;
+    struct bat_charge_slot_status slots[BAT_MAX_DEVICES];
+};
+
+static inline int bat_read_charge_status(struct bat_charge_status *status)
+{
+    memset(status, 0, sizeof *status);
+    char path[560];
+    int n = snprintf(path, sizeof path, "%s/charge-status", bat_history_dir());
+    if (n <= 0 || (size_t)n >= sizeof path) return -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    long long full;
+    int ok = fscanf(f, "%d %lld %d", &status->adaptive, &full, &status->nslots) == 3 &&
+             status->nslots >= 0 && status->nslots <= BAT_MAX_DEVICES;
+    if (ok) status->full_until = full;
+    for (int i = 0; ok && i < status->nslots; i++) {
+        struct bat_charge_slot_status *s = &status->slots[i];
+        long long release;
+        ok = fscanf(f, "%47s %95s %15s %d %d %lld", s->slot, s->pack_id, s->state,
+                    &s->requested_end, &s->actual_end, &release) == 6;
+        if (ok) s->release_ts = release;
+    }
+    fclose(f);
+    if (!ok) memset(status, 0, sizeof *status);
+    return ok ? 0 : -1;
 }
 
 static inline int64_t bat_now_ts(void)
@@ -211,40 +257,52 @@ static inline long long bat_read_ll(const char *dir, const char *sub, const char
     return v;
 }
 
-static inline int bat_write_sysfs_int(const char *dir, const char *sub, const char *attr, int val)
+static inline int bat_read_threshold(const struct bat_device *b, const char *attr, int min, int *out)
 {
-    char path[512];
-    int n = snprintf(path, sizeof path, "%s/%s/%s", dir, sub, attr);
-    if (n <= 0 || (size_t)n >= sizeof path) return -1;
-    FILE *f = fopen(path, "w");
-    if (!f) return -1;
-    int ok = fprintf(f, "%d\n", val) > 0;
-    if (fclose(f) != 0) ok = 0;
-    return ok ? 0 : -1;
+    int ok;
+    long long val = bat_read_ll(bat_supply_root(), b->name, attr, &ok);
+    *out = ok && val >= min && val <= 100 ? (int)val : -1;
+    return *out < 0 ? -1 : 0;
 }
 
-/* Write start/end thresholds in EC-safe order so start never exceeds end. */
+static inline int bat_write_threshold(const struct bat_device *b, const char *attr, int val)
+{
+    char path[512], buf[8];
+    int n = snprintf(path, sizeof path, "%s/%s/%s", bat_supply_root(), b->name, attr);
+    if (n <= 0 || (size_t)n >= sizeof path) return -1;
+    int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;  /* Never create a missing attribute. */
+    n = snprintf(buf, sizeof buf, "%d\n", val);
+    ssize_t written = write(fd, buf, (size_t)n);
+    int closed = close(fd), actual;
+    return written == n && closed == 0 &&
+           bat_read_threshold(b, attr, 0, &actual) == 0 && actual == val ? 0 : -1;
+}
+
+/* Write only changed values in EC-safe order, then report the actual readback.
+ * The manual path still allows batteries exposing just one threshold. */
 static inline int bat_apply_thresholds_to(struct bat_device *b, int new_start, int new_end)
 {
-    if (b->is_offline_pack || b->is_peripheral) return -1;
-    const char *root = bat_supply_root();
-    int s = new_start >= 0 ? new_start : b->start_thresh;
-    int e = new_end > 0 ? new_end : b->end_thresh;
+    if (!b->present || b->is_offline_pack || b->is_peripheral ||
+        new_start > 100 || new_end > 100) return -1;
+    int ret = 0;
+    if (b->has_start_thresh && bat_read_threshold(b, b->start_attr, 0, &b->start_thresh) != 0) return -1;
+    if (b->has_end_thresh && bat_read_threshold(b, b->end_attr, 1, &b->end_thresh) != 0) return -1;
+    int s = new_start >= 0 && b->has_start_thresh ? new_start : b->start_thresh;
+    int e = new_end > 0 && b->has_end_thresh ? new_end : b->end_thresh;
     if (b->has_start_thresh && b->has_end_thresh && s >= e) return -1;
 
-    if (b->has_end_thresh && new_end > 0 && (!b->has_start_thresh || e >= b->end_thresh)) {
-        if (bat_write_sysfs_int(root, b->name, b->end_attr, e) != 0) return -1;
-        b->end_thresh = e;
-    }
-    if (b->has_start_thresh && new_start >= 0) {
-        if (bat_write_sysfs_int(root, b->name, b->start_attr, s) != 0) return -1;
-        b->start_thresh = s;
-    }
-    if (b->has_end_thresh && new_end > 0 && b->end_thresh != e) {
-        if (bat_write_sysfs_int(root, b->name, b->end_attr, e) != 0) return -1;
-        b->end_thresh = e;
-    }
-    return 0;
+    if (b->has_end_thresh && e > b->end_thresh && bat_write_threshold(b, b->end_attr, e) != 0)
+        ret = -1;
+    if (!ret && b->has_start_thresh && s != b->start_thresh && bat_write_threshold(b, b->start_attr, s) != 0)
+        ret = -1;
+    if (!ret && b->has_end_thresh && e < b->end_thresh && bat_write_threshold(b, b->end_attr, e) != 0)
+        ret = -1;
+    if (b->has_start_thresh && (bat_read_threshold(b, b->start_attr, 0, &b->start_thresh) != 0 || b->start_thresh != s))
+        ret = -1;
+    if (b->has_end_thresh && (bat_read_threshold(b, b->end_attr, 1, &b->end_thresh) != 0 || b->end_thresh != e))
+        ret = -1;
+    return ret;
 }
 
 static inline char bat_state_code(const char *status)
@@ -340,9 +398,30 @@ static inline int bat_refresh_dynamic(struct bat_device *b, int64_t now_ts)
     return 0;
 }
 
-/* The AC state only, for a routine tick: reads "type" and "online" of each
- * non-Battery supply and nothing of the batteries. Fills any_adapter, online
- * and name (as bat_scan_live does); voltage and current stay unknown. */
+/* Distinguish system power inputs from peripheral supplies. On USB-PD,
+ * online may be 2 for programmable power; any positive value is online. */
+static inline int bat_observe_adapter(struct bat_ac_info *ac, const char *root,
+                                      const char *name, const char *type, int *incomplete)
+{
+    int ok;
+    long long on = bat_read_ll(root, name, "online", &ok);
+    if (!strcmp(type, "Mains") || !strncmp(type, "USB", 3) || !strcmp(type, "Wireless")) {
+        char scope[32] = "";
+        (void)bat_read_line(root, name, "scope", scope, sizeof scope);
+        if (strcmp(scope, "Device")) {
+            if (!ok || on < 0) *incomplete = 1;
+            else if (on > 0) ac->system = BAT_AC_ONLINE;
+            else if (ac->system == BAT_AC_UNKNOWN) ac->system = BAT_AC_OFFLINE;
+        }
+    }
+    if (!ok || on < 0) return 0;
+    ac->any_adapter = 1;
+    if (!ac->name[0]) snprintf(ac->name, sizeof ac->name, "%.47s", name);
+    if (on > 0) ac->online = 1;
+    return on > 0;
+}
+
+/* Routine tick: leave battery attributes and adapter telemetry alone. */
 static inline int bat_scan_ac_only(struct bat_ac_info *ac)
 {
     const char *root = bat_supply_root();
@@ -351,26 +430,17 @@ static inline int bat_scan_ac_only(struct bat_ac_info *ac)
     ac->current_a = -1.0;
     DIR *d = opendir(root);
     if (!d) return -1;
+    int incomplete = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         const char *name = e->d_name;
         char type[32] = "";
         if (!bat_safe_name(name)) continue;
         if (bat_read_line(root, name, "type", type, sizeof type) != 0) continue;
-        if (strcmp(type, "Battery") == 0) continue;
-        int ok = 0;
-        long long on = bat_read_ll(root, name, "online", &ok);
-        if (ok) {
-            ac->any_adapter = 1;
-            if (on > 0) {
-                ac->online = 1;
-                if (!ac->name[0]) snprintf(ac->name, sizeof ac->name, "%.47s", name);
-            } else if (!ac->name[0]) {
-                snprintf(ac->name, sizeof ac->name, "%.47s", name);
-            }
-        }
+        if (strcmp(type, "Battery") != 0) bat_observe_adapter(ac, root, name, type, &incomplete);
     }
     closedir(d);
+    if (incomplete && ac->system == BAT_AC_OFFLINE) ac->system = BAT_AC_UNKNOWN;
     return 0;
 }
 
@@ -386,7 +456,7 @@ static inline int bat_scan_live(struct bat_device *devs, int max, struct bat_ac_
     }
     DIR *d = opendir(root);
     if (!d) return 0;
-    int count = 0;
+    int count = 0, incomplete = 0;
     int64_t now_ts = bat_now_ts();
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
@@ -395,22 +465,13 @@ static inline int bat_scan_live(struct bat_device *devs, int max, struct bat_ac_
         if (!bat_safe_name(name)) continue;
         if (bat_read_line(root, name, "type", type, sizeof type) != 0) continue;
         if (strcmp(type, "Battery") != 0) {
-            int ok = 0;
-            long long on = bat_read_ll(root, name, "online", &ok);
-            if (ok && ac) {
-                ac->any_adapter = 1;
-                if (on > 0) {
-                    ac->online = 1;
-                    if (!ac->name[0]) snprintf(ac->name, sizeof ac->name, "%.47s", name);
-                    int vok = 0, iok = 0;
-                    long long uv = bat_read_ll(root, name, "voltage_now", &vok);
-                    long long ua = bat_read_ll(root, name, "current_now", &iok);
-                    if (!iok) ua = bat_read_ll(root, name, "current_max", &iok);
-                    if (vok && uv > 0) ac->voltage_v = (double)uv / 1e6;
-                    if (iok && ua > 0) ac->current_a = (double)ua / 1e6;
-                } else if (!ac->name[0]) {
-                    snprintf(ac->name, sizeof ac->name, "%.47s", name);
-                }
+            if (ac && bat_observe_adapter(ac, root, name, type, &incomplete)) {
+                int vok = 0, iok = 0;
+                long long uv = bat_read_ll(root, name, "voltage_now", &vok);
+                long long ua = bat_read_ll(root, name, "current_now", &iok);
+                if (!iok) ua = bat_read_ll(root, name, "current_max", &iok);
+                if (vok && uv > 0) ac->voltage_v = (double)uv / 1e6;
+                if (iok && ua > 0) ac->current_a = (double)ua / 1e6;
             }
             continue;
         }
@@ -541,6 +602,7 @@ static inline int bat_scan_live(struct bat_device *devs, int max, struct bat_ac_
     }
     closedir(d);
     if (count > 1) qsort(devs, (size_t)count, sizeof devs[0], bat_cmp_devices);
+    if (ac && incomplete && ac->system == BAT_AC_OFFLINE) ac->system = BAT_AC_UNKNOWN;
     if (ac && !ac->any_adapter && count > 0) {
         for (int i = 0; i < count; i++) {
             if (!devs[i].is_peripheral &&
@@ -682,10 +744,10 @@ static inline int bat_scan(struct bat_device *devs, int max, struct bat_ac_info 
 static inline int bat_parse_sample_line(const char *line, struct bat_sample *out)
 {
     long long ts = 0;
-    int dp = 0, pmw = 0, emwh = 0, vmv = 0, ac = 0;
+    int dp = 0, pmw = 0, emwh = 0, vmv = 0, ac = 0, off = 0;
     char st = 'U';
-    if (sscanf(line, "%lld\t%d\t%d\t%d\t%d\t%c\t%d",
-               &ts, &dp, &pmw, &emwh, &vmv, &st, &ac) != 7) {
+    if (sscanf(line, "%lld\t%d\t%d\t%d\t%d\t%c\t%d%n",
+               &ts, &dp, &pmw, &emwh, &vmv, &st, &ac, &off) != 7) {
         return -1;
     }
     if (ts < 946684800LL || dp < 0 || dp > 1000) return -1;
@@ -696,6 +758,10 @@ static inline int bat_parse_sample_line(const char *line, struct bat_sample *out
     out->voltage_mv = vmv < 0 ? 0 : vmv;
     out->state = st;
     out->ac = ac ? 1 : 0;
+    /* An eighth column is optional for old graph readers. Missing provenance
+     * in pre-adaptive logs does not establish an observed interval. */
+    out->ac_verified = (ac == 0 || ac == 1) && line[off] == '\t' && line[off + 1] == '1' &&
+                       (line[off + 2] == '\n' || line[off + 2] == '\r' || !line[off + 2]);
     return 0;
 }
 
@@ -740,9 +806,9 @@ static inline int bat_append_sample(const char *pack_id, const struct bat_sample
     if (n <= 0 || (size_t)n >= sizeof path) return -1;
     FILE *f = fopen(path, "a");
     if (!f) return -1;
-    int rc = fprintf(f, "%lld\t%d\t%d\t%d\t%d\t%c\t%d\n",
+    int rc = fprintf(f, "%lld\t%d\t%d\t%d\t%d\t%c\t%d\t%d\n",
                      (long long)s->ts, s->decipct, s->power_mw,
-                     s->energy_mwh, s->voltage_mv, s->state, s->ac);
+                     s->energy_mwh, s->voltage_mv, s->state, s->ac, !!s->ac_verified);
     long pos = ftell(f);
     if (fclose(f) != 0 || rc < 0) return -1;
     if (pos > BAT_COMPACT_BYTES) bat_compact_file(path, s->ts - BAT_KEEP_SECONDS);
@@ -767,9 +833,9 @@ static inline int bat_append_samples_batch(const char *pack_id, const struct bat
     for (int i = 0; i < count; i++) {
         const struct bat_sample *s = &samples[i];
         if (s->ts < 946684800LL) continue;
-        if (fprintf(f, "%lld\t%d\t%d\t%d\t%d\t%c\t%d\n",
+        if (fprintf(f, "%lld\t%d\t%d\t%d\t%d\t%c\t%d\t%d\n",
                     (long long)s->ts, s->decipct, s->power_mw,
-                    s->energy_mwh, s->voltage_mv, s->state, s->ac) < 0) {
+                    s->energy_mwh, s->voltage_mv, s->state, s->ac, !!s->ac_verified) < 0) {
             rc = -1;
             break;
         }
@@ -843,12 +909,14 @@ static inline void bat_sample_from_device(const struct bat_device *b, int ac_onl
     out->voltage_mv = b->voltage_v > 0 ? (int)(b->voltage_v * 1000.0 + 0.5) : 0;
     out->state = bat_state_code(b->status);
     out->ac = ac_online ? 1 : 0;
+    out->ac_verified = 0;
 }
 
-/* Load samples for pack_id (falling back to legacy slot_name.tsv if pack_id.tsv
- * does not exist yet) with ts >= since_ts. */
-static inline int bat_load_history(const char *pack_id, const char *slot_fallback,
-                                   int64_t since_ts, struct bat_sample *out, int max)
+/* Curves need chronological samples; charging needs the actual append order
+ * so clock reversals cannot disappear. */
+static inline int bat_load_samples(const char *pack_id, const char *slot_fallback,
+                                   int64_t since_ts, struct bat_sample *out, int max,
+                                   int append_order)
 {
     if (!bat_safe_name(pack_id) || max <= 0) return 0;
     char path[560], line[256];
@@ -865,6 +933,11 @@ static inline int bat_load_history(const char *pack_id, const char *slot_fallbac
     while (fgets(line, sizeof line, f)) {
         struct bat_sample s;
         if (bat_parse_sample_line(line, &s) != 0) continue;
+        if (append_order && s.ts < since_ts) {
+            /* A backdated observation invalidates any eligible earlier rows. */
+            count = 0;
+            continue;
+        }
         if (s.ts < since_ts) {
             prev = s;
             has_prev = 1;
@@ -874,7 +947,7 @@ static inline int bat_load_history(const char *pack_id, const char *slot_fallbac
             out[count++] = prev;
             has_prev = 0;
         }
-        if (count > 0 && s.ts < out[count - 1].ts) continue;
+        if (!append_order && count > 0 && s.ts < out[count - 1].ts) continue;
         if (count == max) {
             memmove(out, out + 1, (size_t)(max - 1) * sizeof out[0]);
             count = max - 1;
@@ -882,8 +955,15 @@ static inline int bat_load_history(const char *pack_id, const char *slot_fallbac
         out[count++] = s;
     }
     if (count == 0 && has_prev && prev.state == 'R') out[count++] = prev;
+    if (append_order && ferror(f)) count = 0;
     fclose(f);
     return count;
+}
+
+static inline int bat_load_history(const char *pack_id, const char *slot_fallback,
+                                   int64_t since_ts, struct bat_sample *out, int max)
+{
+    return bat_load_samples(pack_id, slot_fallback, since_ts, out, max, 0);
 }
 
 #endif

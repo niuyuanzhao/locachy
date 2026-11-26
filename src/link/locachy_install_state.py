@@ -30,6 +30,8 @@ DEPENDENTS = {
     "tpm": (),
     "secure-boot-keys": (),
     "secure-boot-enroll": (),
+    "extra-volumes": (),
+    "winmaint": (),
 }
 PACKAGE_INPUTS = ("packages", "link/modules.json", "link/declare-packages", "link/declared-packages-baseline.json",
                   "link/install-pkg-tools", "link/locachy-build", "link/locachy-pkg", "link/locachy-repos",
@@ -102,6 +104,10 @@ def build_input(source, root, stage, level, cpu):
 
 
 def write_json(path, value):
+    write_text(path, json.dumps(value, indent=1, sort_keys=True) + "\n")
+
+
+def write_text(path, text):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.is_symlink() or path.parent.is_symlink():
@@ -110,11 +116,15 @@ def write_json(path, value):
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(value, f, indent=1, sort_keys=True)
-            f.write("\n")
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(name, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if os.path.exists(name):
             os.unlink(name)

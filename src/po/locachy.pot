@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-23 23:36-0500\n"
+"POT-Creation-Date: 2026-11-24 10:40-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -3619,7 +3619,7 @@ msgid "The sender did not answer in time."
 msgstr ""
 
 #: progs/extdisplay-setup.c
-msgid "The cable link went down."
+msgid "The cable was unplugged. Waiting for the cable."
 msgstr ""
 
 #: progs/extdisplay-setup.c
@@ -3823,10 +3823,6 @@ msgstr ""
 
 #: progs/extdisplay.c
 msgid "The broker is busy: a pairing is still active."
-msgstr ""
-
-#: progs/extdisplay.c
-msgid "The cable was unplugged. Press any key to close."
 msgstr ""
 
 #: progs/extdisplay.c
@@ -6327,6 +6323,18 @@ msgid "The updated installer could not start. The choices are kept; try again."
 msgstr ""
 
 #: progs/installer.c
+msgid "LUKS2"
+msgstr ""
+
+#: progs/installer.c
+msgid "auto (follow system)"
+msgstr ""
+
+#: progs/installer.c progs/packages.c progs/settings.c
+msgid "none"
+msgstr ""
+
+#: progs/installer.c
 msgid "(no model name)"
 msgstr ""
 
@@ -6364,7 +6372,123 @@ msgid "Summary"
 msgstr ""
 
 #: progs/installer.c
+msgid "Btrfs array needs at least 2 disks."
+msgstr ""
+
+#: progs/installer.c
+msgid "The Btrfs array name must use lowercase letters, digits, ., _ or -."
+msgstr ""
+
+#: progs/installer.c
+msgid "Btrfs RAID10 requires at least 4 disks."
+msgstr ""
+
+#: progs/installer.c
+msgid "Default Compute storage needs role shared or compute."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s is no longer available as an additional disk."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s holds Maintenance Windows partitions and cannot be formatted."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Invalid volume name for %s."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s cannot be attached (choose a supported partition)."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Volume %s: default Compute storage needs role shared or compute."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Duplicate volume name: %s."
+msgstr ""
+
+#: progs/installer.c
+msgid "Only one volume may be the default Compute storage."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Maintenance Windows disk %s is not present."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Windows C: size must be between %d and %d GiB."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"%s uses %d-byte sectors; Maintenance Windows needs a disk with 512-byte "
+"sectors."
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Maintenance Windows on the system disk requires whole-disk installation."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s cannot host both Maintenance Windows and a Btrfs array."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s needs at least %s for the formatted volume and Maintenance Windows."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s already holds Maintenance Windows partitions."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"%s has a whole-disk filesystem (%s); Maintenance Windows would overwrite it."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s has a partition table of type %s; Maintenance Windows needs GPT."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "The unallocated space at the end of %s cannot be measured."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"%s needs at least %s unallocated after its last partition for Maintenance "
+"Windows (%s there)."
+msgstr ""
+
+#: progs/installer.c
 msgid "Choose the disk to install on."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"%s holds Maintenance Windows partitions; installing here would erase them."
 msgstr ""
 
 #: progs/installer.c
@@ -6378,6 +6502,11 @@ msgstr ""
 
 #: progs/installer.c
 msgid "The partitions must be different ones."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s is a Maintenance Windows partition; installing here would erase it."
 msgstr ""
 
 #: progs/installer.c
@@ -6465,6 +6594,44 @@ msgid "Saved networks for the system"
 msgstr ""
 
 #: progs/installer.c
+msgid "leave untouched"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "attach %s (%s) as %s [%s]%s"
+msgstr ""
+
+#: progs/installer.c
+msgid " *compute"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "format (%s, %s) as %s [%s]%s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "array (%s, %s) as %s [%s]%s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "on system disk (%s)"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "on %s (reserved tail)"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "on %s"
+msgstr ""
+
+#: progs/installer.c
 msgid "partitions chosen here"
 msgstr ""
 
@@ -6535,10 +6702,6 @@ msgstr ""
 msgid "Swap partition"
 msgstr ""
 
-#: progs/installer.c progs/packages.c progs/settings.c
-msgid "none"
-msgstr ""
-
 #: progs/installer.c
 msgid "Each of them is formatted: what is on it is lost."
 msgstr ""
@@ -6556,6 +6719,47 @@ msgstr ""
 
 #: progs/installer.c progs/settings.c
 msgid "Terminal"
+msgstr ""
+
+#: progs/installer.c
+msgid "Additional disks & arrays"
+msgstr ""
+
+#: progs/installer.c
+msgid "Btrfs array name"
+msgstr ""
+
+#: progs/installer.c
+msgid "Array RAID mode"
+msgstr ""
+
+#: progs/installer.c
+msgid "Array role"
+msgstr ""
+
+#: progs/installer.c
+msgid "Array encryption"
+msgstr ""
+
+#: progs/installer.c
+msgid "Array as Compute storage"
+msgstr ""
+
+#: progs/installer.c progs/settings.c
+msgid "Maintenance Windows"
+msgstr ""
+
+#: progs/installer.c
+msgid "Hosted on"
+msgstr ""
+
+#: progs/installer.c
+msgid "Windows C: size"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Formatting %s reserves the tail for Maintenance Windows."
 msgstr ""
 
 #: progs/installer.c
@@ -6718,6 +6922,26 @@ msgid "    formatted: %s"
 msgstr ""
 
 #: progs/installer.c
+#, c-format
+msgid "    attached (keep data, volume %s): %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "    erased (volume %s, Maintenance Windows tail): %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "    erased (volume %s): %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "      erased (volume %s): %s"
+msgstr ""
+
+#: progs/installer.c
 msgid "Nothing is missing. Install asks once more before it writes anything."
 msgstr ""
 
@@ -6739,6 +6963,28 @@ msgstr ""
 
 #: progs/installer.c
 msgid "the filesystems mounted at /mnt and /mnt/efi"
+msgstr ""
+
+#: progs/installer.c
+msgid "Storage volume"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s (%s, %s, %s) on %s%s"
+msgstr ""
+
+#: progs/installer.c
+msgid " [Compute storage]"
+msgstr ""
+
+#: progs/installer.c
+msgid "Btrfs array"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s, Windows C: %d GiB"
 msgstr ""
 
 #: progs/installer.c progs/settings.c
@@ -6859,6 +7105,10 @@ msgstr ""
 
 #: progs/installer.c
 msgid "No partitions were found: make them in the terminal, then look again."
+msgstr ""
+
+#: progs/installer.c
+msgid "Too many choices to pass to locachy-install; nothing was started."
 msgstr ""
 
 #: progs/installer.c
@@ -7152,6 +7402,101 @@ msgid "A nonempty password and disk passphrase are needed to continue."
 msgstr ""
 
 #: progs/installer.c
+msgid "Leave untouched"
+msgstr ""
+
+#: progs/installer.c
+msgid "Attach existing partition (keep data)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Format whole disk (ext4)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Format whole disk (btrfs)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Add to Btrfs array"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Additional disk %s"
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s left untouched."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "%s added to Btrfs array %s."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "No supported unmounted partitions on %s."
+msgstr ""
+
+#: progs/installer.c
+msgid "Partition to attach (existing data is kept)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Volume name:"
+msgstr ""
+
+#: progs/installer.c
+msgid ""
+"Volume name: lowercase letters, digits, ., _ or - (start with letter or "
+"digit)."
+msgstr ""
+
+#: progs/installer.c
+#, c-format
+msgid "Volume name %s is already used."
+msgstr ""
+
+#: progs/installer.c
+msgid "shared (System Drives + Compute)"
+msgstr ""
+
+#: progs/installer.c
+msgid "data (System Drives only)"
+msgstr ""
+
+#: progs/installer.c
+msgid "compute (Compute only)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Volume role"
+msgstr ""
+
+#: progs/installer.c
+msgid "Follow system disk (auto)"
+msgstr ""
+
+#: progs/installer.c
+msgid "None"
+msgstr ""
+
+#: progs/installer.c
+msgid "Volume encryption"
+msgstr ""
+
+#: progs/installer.c
+msgid "Use as default Compute storage?"
+msgstr ""
+
+#: progs/installer.c
+msgid "Windows C: size in GiB:"
+msgstr ""
+
+#: progs/installer.c
 msgid "Reboot now?"
 msgstr ""
 
@@ -7173,6 +7518,10 @@ msgstr ""
 
 #: progs/installer.c
 msgid "The swap partition (formatted)"
+msgstr ""
+
+#: progs/installer.c
+msgid "Btrfs array name:"
 msgstr ""
 
 #: progs/installer.c
@@ -9917,6 +10266,85 @@ msgid "No system battery is reported in /sys/class/power_supply."
 msgstr ""
 
 #: progs/settings-power.inc
+msgid "Manual charging"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Running on battery"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Learning usage"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Mostly plugged in"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Ready for portable use"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Holding charge"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Topping up before unplugging"
+msgstr ""
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Full charge override active"
+msgstr ""
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Charging control unsupported"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Could not apply charging limits"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Charging status unavailable"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Expected to resume charging to full at %s"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Plug in AC power first"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s: %s (limit %d%%, requested %d%%)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s: %s (limit %d%%)"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Saved, but could not notify the battery service."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Adaptive charging setting saved."
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Full charge requested until unplugged or for up to 24 hours."
+msgstr ""
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Manual thresholds are saved but not applied while charging is managed."
+msgstr ""
+
+#: progs/settings-power.inc
 #, c-format
 msgid "Cannot write charge start threshold for %s."
 msgstr ""
@@ -11100,7 +11528,12 @@ msgid "The next or previous setting found"
 msgstr ""
 
 #: progs/settings.c
-msgid "Secure Boot: enroll with Microsoft's keys too"
+msgid ""
+"Secure Boot: enroll with Microsoft's keys too; Storage: mount/unmount volume"
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage volume: toggle auto-mount at boot"
 msgstr ""
 
 #: progs/settings.c
@@ -11569,6 +12002,11 @@ msgid "Compute Node"
 msgstr ""
 
 #: progs/settings.c
+#, c-format
+msgid "Default compute storage: %.40s (change under System > Storage Volumes)."
+msgstr ""
+
+#: progs/settings.c
 msgid "Colors"
 msgstr ""
 
@@ -11663,11 +12101,15 @@ msgid "Optional Components"
 msgstr ""
 
 #: progs/settings.c
-msgid "Debug Cable"
+msgid "Storage Volumes"
 msgstr ""
 
 #: progs/settings.c
-msgid "Maintenance Windows"
+msgid "No extra storage volumes configured."
+msgstr ""
+
+#: progs/settings.c
+msgid "Debug Cable"
 msgstr ""
 
 #: progs/settings.c
@@ -11904,6 +12346,57 @@ msgid "Arming one-shot Windows boot..."
 msgstr ""
 
 #: progs/settings.c
+msgid ""
+"Enter again: Windows starts first on every restart until switched back "
+"(LOCachy stays second)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change which system starts first: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Setting LOCachy to start first again..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Setting Windows to start first..."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: LOCachy starts first again (Windows stays in the firmware boot menu)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter, twice: Windows starts first on every restart until switched back "
+"(LOCachy stays second)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter, twice: Windows starts first until switched back, and the computer "
+"restarts now."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter again: Windows starts first until switched back, and the computer "
+"restarts now."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not restart into Windows: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Restarting into Windows..."
+msgstr ""
+
+#: progs/settings.c
 #, c-format
 msgid "Could not heal UEFI boot order: %s"
 msgstr ""
@@ -11913,11 +12406,16 @@ msgid "Restoring LOCachy first in UEFI boot order..."
 msgstr ""
 
 #: progs/settings.c
-msgid "Windows virtual machine closed."
+msgid "Opening Maintenance Windows on the desktop (also available from Home)."
 msgstr ""
 
 #: progs/settings.c
-msgid "Windows virtual machine did not finish."
+#, c-format
+msgid "Cannot open Maintenance Windows on the desktop: %.100s"
+msgstr ""
+
+#: progs/settings.c
+msgid "desktop session unavailable"
 msgstr ""
 
 #: progs/settings.c
@@ -11933,8 +12431,26 @@ msgid "Maintenance Windows partition reclaimed."
 msgstr ""
 
 #: progs/settings.c
+msgid "Windows already starts first until switched back; nothing was armed."
+msgstr ""
+
+#: progs/settings.c
 msgid ""
 "One-shot Windows boot armed; LOCachy stays default on the following restart."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Windows starts first until switched back; LOCachy stays in the firmware boot "
+"menu."
+msgstr ""
+
+#: progs/settings.c
+msgid "LOCachy starts first again."
+msgstr ""
+
+#: progs/settings.c
+msgid "UEFI boot order healed; Windows stays first until switched back."
 msgstr ""
 
 #: progs/settings.c
@@ -12005,6 +12521,158 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Removing NVIDIA GPU unlock and rebuilding the boot image..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage volume mounted."
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage volume unmounted."
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage volume role updated."
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage volume auto-mount updated."
+msgstr ""
+
+#: progs/settings.c
+msgid "Default compute storage updated."
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage volume detached from LOCachy (disk data kept)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage operation finished."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Storage operation failed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "the system disk"
+msgstr ""
+
+#: progs/settings.c
+msgid "System disk (auto)"
+msgstr ""
+
+#: progs/settings.c
+msgid "The disk is fixed once Maintenance Windows exists."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"No other internal disk can host Maintenance Windows: the system disk is used."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Maintenance Windows goes on %s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait: a storage job is still running."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"No storage volume has role shared or compute; add one or change a volume "
+"role first."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change compute storage: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Clearing default compute storage..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Setting default compute storage to %.32s..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change volume role: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Setting role of %.32s to %s..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not %s %.32s: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "mount"
+msgstr ""
+
+#: progs/settings.c
+msgid "unmount"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Mounting %.32s..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Unmounting %.32s..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change auto-mount for %.32s: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Disabling auto-mount for %.32s..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Enabling auto-mount for %.32s..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"Delete again: detach volume %.32s from LOCachy (disk data is NOT wiped)."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not detach %.32s: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Detaching volume %.32s from LOCachy..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage manager closed."
+msgstr ""
+
+#: progs/settings.c
+msgid "Storage manager did not finish."
 msgstr ""
 
 #: progs/settings.c
@@ -12128,6 +12796,14 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Tailscale account"
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH over Tailscale"
+msgstr ""
+
+#: progs/settings.c
+msgid "  (Tailscale is off)"
 msgstr ""
 
 #: progs/settings.c
@@ -12340,11 +13016,11 @@ msgid "Paired devices"
 msgstr ""
 
 #: progs/settings.c
-msgid "Compute node service"
+msgid "Compute HTTPS API (optional)"
 msgstr ""
 
 #: progs/settings.c
-msgid "Bind compute on Thunderbolt"
+msgid "Compute API over Thunderbolt"
 msgstr ""
 
 #: progs/settings.c
@@ -12352,11 +13028,45 @@ msgid "Compute GPU passthrough"
 msgstr ""
 
 #: progs/settings.c
-msgid "Windows partition size"
+msgid "not created"
 msgstr ""
 
 #: progs/settings.c
-msgid "not created"
+msgid "[OFF] LOCachy starts first"
+msgstr ""
+
+#: progs/settings.c
+msgid "[ON] Windows from the next restart"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "[ON] LOCachy was picked in the firmware menu; Enter: switch back"
+msgstr ""
+
+#: progs/settings.c
+msgid "[ON] Windows starts first"
+msgstr ""
+
+#: progs/settings.c
+msgid "Start in Windows by default (until switched back)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Reboot into Windows now"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter, twice: restart into Windows"
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows target disk"
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows partition size"
 msgstr ""
 
 #: progs/settings.c
@@ -12389,7 +13099,7 @@ msgid "Windows virtual machine"
 msgstr ""
 
 #: progs/settings.c
-msgid "Enter: launch in terminal"
+msgid "Enter: open on the desktop"
 msgstr ""
 
 #: progs/settings.c
@@ -12488,6 +13198,41 @@ msgstr ""
 
 #: progs/settings.c
 msgid "NVIDIA Dynamic Boost (nvidia-powerd)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute default storage"
+msgstr ""
+
+#: progs/settings.c
+msgid "mounted"
+msgstr ""
+
+#: progs/settings.c
+msgid "plain"
+msgstr ""
+
+#: progs/settings.c
+msgid "manual"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "none  (Enter: manage via CLI)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "1 unmanaged disk: %.40s (%s)  (Enter: manage)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%d unmanaged disks: %.32s (%s), ...  (Enter: manage)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Unmanaged disks"
 msgstr ""
 
 #: progs/settings.c
@@ -12791,6 +13536,37 @@ msgid "Battery curves & health"
 msgstr ""
 
 #: progs/settings.c
+msgid "Adaptive Charging"
+msgstr ""
+
+#: progs/settings.c
+msgid "Waiting for battery service"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Charge to Full Now"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: request full charge"
+msgstr ""
+
+#: progs/settings.c
+msgid "not set for manual charging"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%d%% saved for manual charging"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: allow a full charge until unplugged or for up to 24 hours."
+msgstr ""
+
+#: progs/settings.c
 msgid "Charge start threshold"
 msgstr ""
 
@@ -12919,6 +13695,18 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Tailscale: %.140s."
+msgstr ""
+
+#: progs/settings.c
+msgid "Turn on Tailscale before enabling SSH over it."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH over Tailscale enabled; login requires an authorized public key."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH over Tailscale disabled."
 msgstr ""
 
 #: progs/settings.c
@@ -13089,11 +13877,11 @@ msgid ""
 msgstr ""
 
 #: progs/settings.c
-msgid "Compute node service off."
+msgid "Compute HTTPS API disabled."
 msgstr ""
 
 #: progs/settings.c
-msgid "Compute node service on."
+msgid "Compute HTTPS API enabled."
 msgstr ""
 
 #: progs/settings.c
@@ -13137,8 +13925,7 @@ msgstr ""
 
 #: progs/settings.c
 msgid ""
-"Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, "
-"or VNC)."
+"Enter: open Maintenance Windows on the desktop (also available from Home)."
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -13617,6 +14404,12 @@ msgid "Saving the NVIDIA Dynamic Boost setting..."
 msgstr ""
 
 #: progs/settings.c
+msgid ""
+"Enter: open storage manager in a terminal (attach, format, or create btrfs "
+"array)."
+msgstr ""
+
+#: progs/settings.c
 #, c-format
 msgid "Power profile: %s."
 msgstr ""
@@ -13782,6 +14575,12 @@ msgstr ""
 #. TRANSLATORS: Enter and Left/Right are key names; keep them.
 #: progs/settings.c
 msgid "Enter, then Left/Right: choose   Enter again: do it"
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter+Left/Right: role   m: mount/unmount   a: auto-mount   Delete, twice: "
+"detach"
 msgstr ""
 
 #. TRANSLATORS: Enter and Left/Right are key names; keep them.

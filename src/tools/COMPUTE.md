@@ -1,17 +1,161 @@
 # LOCachy Compute Node
 
-`service_compute` turns a LOCachy machine into a headless compute node: it runs
-Linux programs in native containers built from any distribution's root
-filesystem, optionally in KVM micro-VMs, with GPU and data-disk access, and is
-driven over an authenticated HTTPS control plane. It has no Wayland, compositor,
-X11, seat, or session-bus dependency, and the desktop never freezes or stops it.
+[中文](COMPUTE.zh.md)
+
+For NVIDIA experiments, use **regular OpenSSH over Tailscale**: `ssh` for the
+node's `locachy-compute` CLI, and `scp` or `sftp` for files. Use a native Linux
+container for NVIDIA access; a KVM micro-VM is an alternative when the workload
+needs its own kernel. Headless compute does not depend on a graphical session or
+follow the desktop's freeze/stop lifecycle. HTTPS with mutual TLS (mTLS) is an
+optional API. Thunderbolt/USB4 is a separate, optional host-to-host path; it is
+not required for NVIDIA experiments.
+
+## NVIDIA experiments over SSH
+
+### Access and trust
+
+1. Join the node and client to the intended tailnet. In its [network access
+   policy](https://tailscale.com/kb/1324/grants), grant only the intended
+   operators/devices `tcp:22` to the node and check that no broader existing rule
+   allows it. Keep Tailscale SSH disabled on the node: this is ordinary OpenSSH,
+   and a Tailscale `ssh` rule does not enroll an OpenSSH user key.
+2. In Settings, turn on **SSH over Tailscale** after Tailscale is enabled. The
+   opt-in `service_tailnet_ssh` runs OpenSSH inside `locachy-net`, where
+   `tailscale0` lives, and follows its current addresses. It only listens on
+   those addresses, and its nftables guard drops traffic arriving via other
+   interfaces (including LAN, Thunderbolt and loopback). It requires public-key
+   authentication, disallows root login and password/keyboard-interactive
+   login, disables forwarding, tunnels and user environment, and enables
+   internal SFTP (also used by current `scp`).
+3. On the node console, as an administrator, enroll the operator's **public**
+   key for the existing local account (replace `USER` and the source filename):
+
+   ```sh
+   sudo install -o root -g root -m 0644 /path/to/operator.pub \
+     /etc/locachy/tailnet-ssh/authorized_keys/USER
+   ```
+
+   This replaces the account's enrollment file; to allow several keys, install
+   a file containing all approved public keys, one per line. Only root may
+   write it; the unprivileged key lookup needs to read it. Remove the file or
+   the relevant line to deny future logins. The service never reads the user's
+   `~/.ssh/authorized_keys`. Keep the private key on the client.
+4. First start creates the node's persistent Ed25519 host key if absent. It
+   does not replace an existing key. On the node console, print the SHA-256
+   fingerprint and verify it on the client before accepting it in `known_hosts`:
+
+   ```sh
+   sudo ssh-keygen -y -f /etc/locachy/tailnet-ssh/ssh_host_ed25519_key | ssh-keygen -l -E sha256 -f -
+   ```
+
+   Tailnet access, an enrolled SSH user key, the node's SSH host key, mTLS
+   credentials, and the extended-display PSK are independent.
+5. Log in as the normal LOCachy user (uid 1000), not root. File transfers use
+   that account's ordinary permissions. Use its existing password-based `sudo`
+   for privileged compute operations; SSH key access does not grant passwordless
+   `sudo`. The examples use an interactive SSH shell (`ssh -t` if invoking
+   `sudo` as a remote command). Do not send the sudo password in a script or
+   CLI argument.
+
+The host key is generated on the running node, not in the source or the ISO.
+
+In the examples, `locachy-gpu` is a client SSH config alias for the normal user
+and the node's tailnet IP or MagicDNS name. `service_compute`, `locachy-pair`,
+and a Thunderbolt cable are not needed for this workflow.
+
+### Prepare storage, run, and retrieve
+
+Use a mounted `compute` or `shared` volume with room for the image, overlay,
+datasets, model weights, checkpoints, results, and logs. In this example the
+volume is named `experiments`. Confirm the mount before placing files there;
+`scp` and `sftp` do not themselves check whether a path is on the intended disk.
+Keep the SSH user's staging directories outside `locachy-compute/`, which holds
+managed state, and bind only the directories the workload needs.
+
+From an SSH shell on the node, run `findmnt --mountpoint /srv/storage/experiments`.
+Stop if it does not show the intended mounted volume. Then configure storage
+and prepare directories writable by the SSH user:
+
+```sh
+sudo locachy-storage set-compute-storage experiments
+sudo locachy-compute storage
+sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" \
+  /srv/storage/experiments/work \
+  /srv/storage/experiments/work/probe-001/in \
+  /srv/storage/experiments/work/probe-001/out
+```
+
+For this example, use a trusted Linux rootfs archive with Python and a
+CUDA-enabled PyTorch build compatible with the node's NVIDIA driver. Save
+this probe as `probe.py` on the client:
+
+```python
+from pathlib import Path
+
+import torch
+
+x = torch.arange(1, 5, dtype=torch.float32, device="cuda").reshape(2, 2)
+y = x @ x
+torch.cuda.synchronize()
+result = y.cpu().tolist()
+assert y.is_cuda and result == [[7.0, 10.0], [15.0, 22.0]]
+text = f"{torch.cuda.get_device_name(y.device)}: {result}\n"
+print(text, end="")
+output = Path("/output/probe.txt")
+output.write_text(text, encoding="utf-8")
+output.chmod(0o644)
+```
+
+```sh
+scp probe.py locachy-gpu:/srv/storage/experiments/work/probe-001/in/
+scp torch-rootfs.tar.zst locachy-gpu:/srv/storage/experiments/work/
+ssh locachy-gpu
+```
+
+On the node, import the rootfs and create the environment:
+
+```sh
+sudo locachy-compute image import torch-rootfs /srv/storage/experiments/work/torch-rootfs.tar.zst
+sudo locachy-compute env create torch-probe --image torch-rootfs --gpu --net none \
+  --mount /srv/storage/experiments/work/probe-001/in:/input:ro \
+  --mount /srv/storage/experiments/work/probe-001/out:/output:rw
+```
+
+`--net none` is sufficient because this example stages all inputs first. On the
+node, submit the job and save the returned `job_id`. Use a new job ID and
+output directory for each run so old logs or results cannot be mistaken for new
+ones. Disconnect after submission and reconnect to check it:
+
+```sh
+sudo locachy-compute run torch-probe --job-id probe-001 --detach -- python3 /input/probe.py
+sudo locachy-compute job list
+sudo locachy-compute job status probe-001
+sudo locachy-compute job log probe-001
+```
+
+To cancel a running job, use `sudo locachy-compute job stop JOB_ID`, then check
+its state. A detached job must belong to its own compute cgroup and survive
+logout, but not a node shutdown. The submission response is not the workload
+result: require a recorded terminal state with the workload exit code on normal
+completion or failure, captured stdout/stderr, and no remaining workload
+processes after cancellation. A bare `exited` record with no exit code is not a
+pass. Host file permissions must let the SSH user retrieve results without a
+privileged file transfer; the example writes a readable file in the user's
+private output directory.
+
+After a successful job, fetch the result from the client (or use `sftp`):
+
+```sh
+scp locachy-gpu:/srv/storage/experiments/work/probe-001/out/probe.txt .
+```
 
 ## Components
 
 | File | Role |
 |---|---|
 | `link/locachy-compute` | CLI and daemon: images, environments, native containers, jobs, KVM micro-VMs, `serve`, and `remote` (the client). |
-| `link/compute-client` | `service_compute` launcher. Runs `locachy-compute serve` with `nsenter --net` into `locachy-net`. |
+| `link/tailnet-ssh-client` | Opt-in OpenSSH listener on the current Tailscale addresses in `locachy-net`. |
+| `link/compute-client` | Optional `service_compute` launcher. Runs `locachy-compute serve` with `nsenter --net` into `locachy-net`. |
 | `link/locachy-pair` | Once-forever pairing: add, list, show, revoke, and token export for paired devices. |
 | `link/locachy_peers.py` | The shared peer store (`/etc/locachy/peers`), used by `locachy-pair`, `locachy-compute`, and `extdisplay-broker`. |
 | `link/network-client` | Inbound filter for `locachy-net`, including the Thunderbolt allow-lists (`tb_ifaces`, `tb_tcp_ports`, `tb_udp_ports`). |
@@ -33,8 +177,10 @@ Wayland, X11, DBus, and seat variables are cleared, and the sockets are never mo
 ## Reset and data
 
 - `locachy-compute env reset NAME` stops the environment's jobs and deletes `upper/` and `work/`. The base image and every mounted dataset stay intact, so the reset takes milliseconds.
-- Host data is mounted with `--mount HOST:CONTAINER[:ro|:rw]`, or set on the environment with `env create --mount`. Any absolute, existing path is allowed (for example `/mnt/nvme/...`, `/data/...`, or `/var/lib/locachy/compute/data/...`), except these roots: `/`, `/proc`, `/sys`, `/dev`, the peer store, `/var/lib/locachy/compute` (apart from its `data/` area), `/run/locachy/compute`, and the extended-display broker state.
-- Remote peers cannot choose mounts. A job submitted over the network can run only inside an environment the node operator configured.
+- Host data is mounted with `--mount HOST:CONTAINER[:ro|:rw]`, or set on the environment with `env create --mount`. Any absolute, existing path is allowed (for example `/mnt/nvme/...`, `/data/...`, `/srv/storage/<vol>` for `shared`/`compute` volumes, or `<compute base>/data/...`), except these roots: `/`, `/proc`, `/sys`, `/dev`, `/srv/storage` itself or any `data`-only volume under it, the peer store, the compute base (apart from its `data/` area), `/run/locachy/compute`, and the extended-display broker state.
+- Managed multi-disk storage volumes (`tools/STORAGE.md`) can be bound by name with `--volume NAME[:CONTAINER_PATH[:ro|rw]]` (default container path `/volumes/NAME`, default `rw`) on `env create` or `run`. Volume bindings resolve through `/etc/locachy/volumes.json`, require `role` to be `shared` or `compute` (`data`-only volumes are refused), and require the volume to be mounted at `/srv/storage/NAME`.
+- Setting `compute_storage="NAME"` in `/etc/locachy/rc.conf` (via `locachy-storage set-compute-storage NAME`) selects `/srv/storage/NAME/locachy-compute` instead of `/var/lib/locachy/compute` for `images/`, `envs/`, `jobs/`, `vms/`, and `data/`, unless `LOCACHY_COMPUTE_BASE` is set explicitly. The setting does not migrate existing files. If the configured volume is not mounted, `locachy-compute` fails closed rather than writing to the root disk. `locachy-compute storage [--json]` and the optional API's `GET /v1/health` (`storage_volume`, `compute_base`) report the active backing volume.
+- Peers using the optional API cannot choose mounts or volumes. An SSH operator invoking the privileged CLI uses the same mount controls as an operator at the node.
 
 ## GPU
 
@@ -42,7 +188,63 @@ When the environment is created with `--gpu` (and `compute_gpu` is not `"0"`), t
 
 ## KVM micro-VMs
 
-`locachy-compute vm create NAME --disk BASE.qcow2 [--share DIR:TAG] [--cloud-init SEED.img]` creates a copy-on-write overlay (`qemu-img create -b BASE -F qcow2`). `vm start` runs `qemu-system-x86_64` with `-enable-kvm` when `/dev/kvm` exists (TCG otherwise): a virtio disk, a serial console socket, a QEMU monitor socket, a virtio-9p share per `--share`, and optional cloud-init. `vm reset` throws the overlay away. Each VM runs in its own cgroup, `/sys/fs/cgroup/locachy-compute/vm-NAME`.
+`locachy-compute vm create NAME --disk BASE.qcow2 [--share DIR:TAG[:ro|rw]] [--volume NAME[:TAG[:ro|rw]]] [--cloud-init SEED.img]` creates a copy-on-write overlay (`qemu-img create -b BASE -F qcow2`). `vm start` runs `qemu-system-x86_64` with `-enable-kvm` when `/dev/kvm` exists (TCG otherwise): a `virtio-blk-pci` disk, a serial console socket, a monitor socket, a QMP socket, and optional cloud-init. `vm reset` throws the overlay away. Each VM runs in its own cgroup, `/sys/fs/cgroup/locachy-compute/vm-NAME`.
+
+The base image stays a read-only qcow2 with a copy-on-write overlay per VM, attached as `virtio-blk-pci` on its own iothread (emulated NVMe is not used):
+
+```
+-object iothread,id=iothread0
+-drive file=/var/lib/locachy/compute/vms/NAME/overlay.qcow2,format=qcow2,if=none,id=hd0,cache=none,aio=io_uring,discard=unmap
+-device virtio-blk-pci,drive=hd0,iothread=iothread0
+```
+
+`LOCACHY_COMPUTE_AIO=threads` replaces `aio=io_uring` on hosts where io_uring is disabled (for example by `kernel.io_uring_disabled`). The default is `io_uring`.
+
+Directory shares (`--share`) and storage volumes (`--volume`, see `tools/STORAGE.md`) use **virtiofs**. The VM has one `virtiofsd` per share, started by `locachy-compute` as the VM's own uid, and QEMU's guest RAM is a shared memfd. For a VM with one ro share and one volume, the QEMU arguments are:
+
+```
+-object memory-backend-memfd,id=mem,size=1024M,share=on
+-machine q35,accel=kvm,memory-backend=mem
+-chardev socket,id=vfs0,path=/run/locachy/compute/vm-NAME/vfs-0.sock
+-device vhost-user-fs-pci,queue-size=1024,chardev=vfs0,tag=datasets
+-chardev socket,id=vfs1,path=/run/locachy/compute/vm-NAME/vfs-1.sock
+-device vhost-user-fs-pci,queue-size=1024,chardev=vfs1,tag=vol-shared
+```
+
+Each share's daemon is started first, and its socket must exist before QEMU starts:
+
+```
+virtiofsd --socket-path=/run/locachy/compute/vm-NAME/vfs-0.sock --shared-dir=/data/dataset --sandbox=namespace --cache=auto --readonly
+virtiofsd --socket-path=/run/locachy/compute/vm-NAME/vfs-1.sock --shared-dir=/srv/storage/vol-shared --sandbox=namespace --cache=auto
+```
+
+`--readonly` is added only for `:ro` shares. virtiofs is the only share transport (9p is not used).
+
+- **Identity mapping.** `--sandbox=namespace` makes virtiofsd create its own user namespace that maps the caller's uid to itself (upstream `virtiofsd/src/sandbox.rs`, used when virtiofsd runs unprivileged). No `/etc/subuid` entry and no `--translate-uid` option is used. The guest sees files owned by the VM's uid (1000) as uid 1000, and files owned by other host uids as `nobody`. Writes by guest root are not remapped. Not yet run against a real virtiofsd on hardware.
+- **Lifecycle.** `vm run` and `vm start` start the daemons before QEMU and stop them after QEMU exits. A failed start stops whatever already started. `vm stop` stops QEMU, then the daemons listed in the run directory, so guest writes are flushed first.
+- **Environment seams.** `LOCACHY_VIRTIOFSD` overrides the binary (default: `virtiofsd` on `PATH`, then `/usr/lib/virtiofsd`, `/usr/libexec/virtiofsd`, `/usr/bin/virtiofsd`). `LOCACHY_VIRTIOFSD_SANDBOX` takes `namespace`, `chroot`, or `none`. `LOCACHY_COMPUTE_APP_UID` (default 1000) is the uid root hands a VM's files to. `LOCACHY_COMPUTE_KVM=0` forces TCG.
+
+Foreground run and app export:
+
+- `locachy-compute vm run NAME [--display none|gtk|sdl] [--qmp-sock PATH]` runs QEMU in the foreground. Its virtiofsd daemons are its own children. SIGTERM and SIGINT are forwarded to QEMU, which powers the guest off. The command creates no cgroup; `locachy-app` runs it inside its `app_NAME` cgroup, and the daemons inherit that cgroup. `--display gtk|sdl` adds `virtio-vga`, `qemu-xhci`, and `usb-tablet`, and sets `window-close=off` on the display, so closing the window (its button, the bar, the overview) never quits QEMU and never cuts the guest's power. QEMU's `-name` is `locachy-compute[NAME]`. The window title carries it, `QEMU (locachy-compute[NAME])` for GTK or `QEMU (locachy-compute[NAME]-N)` for SDL, and the desktop uses it to tell that VM app's window apart from other QEMU windows (`base/open.c`, `open_window_matches`).
+- `locachy-compute vm export-app NAME [--app-name APP] [--display gtk|sdl] [--freeze qmp|none] [--network 0|1]` writes `/etc/locachy/containers/APP.conf` (default `APP` is `vm-NAME`) with `vm="1"`, `vm_kind="compute"`, `vm_name`, `vm_display`, `vm_freeze`, and `network`. `locachy-app` reads these keys directly (`vm_command` / `vm_check_keys` in `link/locachy-app`). On real host root it prepares `/run/locachy/compute/vm-<vm_name>` owned by uid 1000 and runs `locachy-compute vm run <vm_name> --display <display> --qmp-sock <sock>` as uid 1000 inside `app_APP` (see [VM-APPS.md](VM-APPS.md)).
+
+Ownership for a VM run as uid 1000 (no root on the `vm run` path):
+
+| Path | What uid 1000 needs |
+|---|---|
+| `LOCACHY_COMPUTE_RUN` (`/run/locachy/compute`) | Traversable: `compute-client` sets it to `0711` on every start, so uid 1000 reaches its own `vm-NAME` without listing the others. Either it is also writable by uid 1000, or `vm-NAME` is created beforehand and owned by uid 1000 (`vm run` refuses a directory it does not own) |
+| Run directory `…/compute/vm-NAME/` | Owned by uid 1000, mode `0700` (`vm run` sets it). A directory that `vm start` creates as root is also `0700` |
+| VM directory `…/compute/vms/NAME/` | Owned by uid 1000 (`vm create` and `vm reset` do this as real root) |
+| `vm.json` | Owned by uid 1000, mode 0600 |
+| `overlay.qcow2` | Owned by uid 1000 (read and write) |
+| `--disk` base image | Readable by uid 1000 |
+| `--share` directories and volume trees | Readable and writable by uid 1000 |
+| `/dev/kvm` | Group `kvm` |
+| `qemu-system-x86_64`, `virtiofsd` | Executable by uid 1000 |
+| `/etc/locachy/containers/APP.conf` | Written by root (`export-app`), readable by `locachy-app` |
+
+Root is still needed for `vm create` (the overlay), `vm reset` (only to hand files to the app uid on a real host), `export-app`, cgroup creation (`locachy-app`), and image creation.
 
 ## Cgroups
 
@@ -72,7 +274,7 @@ locachy-pair revoke "Work Mac"
 
 ## Control plane
 
-`locachy-compute serve` (started by `service_compute`) listens on HTTPS, port 27184, with TLS 1.3 and mandatory client certificates:
+`locachy-compute serve` (started by `service_compute`) provides an **optional** HTTPS control API on port 27184, with TLS 1.3 and mandatory client certificates:
 
 - The server trusts only certificates of paired devices with scope `compute`. With none paired, every handshake fails.
 - It binds only to the addresses of `tailscale0`, and, when `compute_bind_tb="1"`, to the IPv6 link-local addresses of `thunderbolt-net` interfaces. It never binds `0.0.0.0` or `::`.
@@ -87,24 +289,57 @@ locachy-compute remote --creds-dir ./work-mac --host 100.x.y.z health
 locachy-compute remote --creds-dir ./work-mac --host 'fe80::1%tb0' run ENV -- python3 train.py
 ```
 
-## Network: Tailscale and Thunderbolt together
+## Network: Tailscale and optional Thunderbolt
 
-The compute node runs inside `locachy-net`. `compute-client` enters the namespace with `nsenter --net=/run/netns/locachy-net`, not `ip netns exec`. `ip netns exec` mounts a new `/sys` and hides `/sys/fs/cgroup`. `nsenter` changes only the network namespace, so the daemon keeps both the namespace's sockets and the host cgroup tree.
+The normal NVIDIA experiment path uses Tailscale and OpenSSH. The compute node
+runs inside `locachy-net`; `compute-client` enters the namespace with
+`nsenter --net=/run/netns/locachy-net`, not `ip netns exec`. `ip netns exec`
+mounts a new `/sys` and hides `/sys/fs/cgroup`; `nsenter` changes only the
+network namespace, so the daemon keeps both the namespace's sockets and the
+host cgroup tree.
 
-Thunderbolt/USB4 host-to-host links are shared, not handed over:
+Thunderbolt/USB4 is a **separate optional heterogeneous path**, not a
+prerequisite for SSH, NVIDIA access, or the mTLS API. It may provide a direct
+host-to-host link when the optional binding is enabled:
 
-- With `extdisplay_tb_shared="1"`, or with `service_compute` and `compute_bind_tb="1"`, the extended-display broker leaves the `thunderbolt-net` interface in `locachy-net`. Its TLS pump is still confined to the link-local address and `SO_BINDTOIFINDEX` of that interface, with Landlock and seccomp.
-- `network-client` keeps the inbound policy at drop. Link-local IPv6 traffic on a verified `thunderbolt-net` interface is accepted only for TCP 27183 (extended display), TCP 27184 (compute), and UDP 5353 (mDNS). Wi-Fi and Ethernet are never added to the allow-lists.
-- With `extdisplay_tb_shared="0"` (high-isolation cable mode), the broker keeps the old behaviour: the interface moves into a private session namespace. Compute loses that link while the extended display is open.
+- With `extdisplay_tb_shared="1"`, or with `service_compute` and
+  `compute_bind_tb="1"`, the extended-display broker leaves the
+  `thunderbolt-net` interface in `locachy-net`. Its TLS pump is still confined
+  to the link-local address and `SO_BINDTOIFINDEX` of that interface, with
+  Landlock and seccomp.
+- `network-client` keeps inbound policy at drop. Link-local IPv6 traffic on a
+  verified `thunderbolt-net` interface is accepted only for TCP 27183 (extended
+  display), TCP 27184 (optional compute API), and UDP 5353 (mDNS). Wi-Fi and
+  Ethernet are never added to the allow-lists.
+- With `extdisplay_tb_shared="0"` (high-isolation cable mode), the broker keeps
+  the old behaviour: the interface moves into a private session namespace, and
+  compute loses that link while the extended display is open.
+
+Use the backend's own IP transport; do not treat the LOCachy HTTPS API as its
+scheduler. The current Thunderbolt allow-list above does not open arbitrary
+backend ports. The Open MPI 5 TCP fixture below verifies that an existing
+backend can split a numerical workload across two isolated IP peers. It uses
+IPv4 on veth, not the link-local IPv6 path above, and does not verify GPU work.
+A real Thunderbolt deployment needs two addressed cable endpoints, a supported
+backend on both platforms, and narrow access for its actual transport.
+
+For hardware acceptance, verify the route uses the cable and that the intended
+remote accelerator produces the expected result. Unplug the cable, verify the
+workload does not silently fall back to another network or to CPU, then replug
+and verify that a new run succeeds without re-entering the peer address or
+restarting the node. A link, ping, or `iperf` is not this test. The complete
+LOCachy workflows over real Tailscale and Thunderbolt remain unverified.
 
 ## rc.conf keys
 
 | Key | Meaning |
 |---|---|
-| `service_compute="/usr/local/lib/locachy/compute-client"` | Runs the compute node. |
+| `service_tailnet_ssh="/usr/local/lib/locachy/tailnet-ssh-client"` | Enables ordinary OpenSSH over Tailscale; disabled by default. |
+| `service_compute="/usr/local/lib/locachy/compute-client"` | Enables the optional HTTPS API. |
 | `compute_port="27184"` | Control-plane port (default 27184). |
 | `compute_bind_tb="1"` | Also listen on Thunderbolt link-local addresses. |
 | `compute_gpu="0"` | Never pass GPUs to containers. |
+| `compute_storage="NAME"` | Store compute images/envs/jobs/VMs on `/srv/storage/NAME/locachy-compute` (requires `compute` or `shared` role; fails closed if unmounted). |
 | `extdisplay_tb_shared="1"` or `"0"` | Shared link (default when compute binds Thunderbolt) or private session namespace. |
 | `extdisplay_paired_only="1"` | Accept only paired devices; no cleartext code is advertised or accepted. |
 
@@ -112,11 +347,19 @@ Thunderbolt/USB4 host-to-host links are shared, not handed over:
 
 ```sh
 src/tools/test-peers.sh        # peer store, pairing permissions, broker PSK, shared Thunderbolt link, shipped filter
-src/tools/test-compute.sh      # native containers, reset, mounts, policy, micro-VM overlay, mTLS authentication
+src/tools/test-compute.sh      # image import, native containers with zero Wayland/compositor env leakage, host data bind-mounts and path-policy rejection, instant upperdir reset, GPU device/library probe and wildcard bind rejection, KVM micro-VM config, qcow2 CoW overlay creation, reset and QEMU argv verification, mTLS HTTPS control plane (paired, unpaired, extdisplay-only and revoked peers; remote job run, log and reset)
+src/tools/test-thunderbolt-backend.sh # isolated Open MPI TCP split-sum fixture; not physical Thunderbolt or GPU
 src/tools/test-extdisplay-broker.sh
 ```
 
-Both new tests run in unprivileged user, network, and mount namespaces, and install nothing. Test seams are environment variables with `LOCACHY_` prefixes (`LOCACHY_PEERS_DIR`, `LOCACHY_COMPUTE_BASE`, `LOCACHY_COMPUTE_RUN`, `LOCACHY_COMPUTE_CGROUP`, `LOCACHY_COMPUTE_APP_INIT`, `LOCACHY_COMPUTE_NETNS`, `LOCACHY_COMPUTE_ALLOW_NO_CGROUP`). The extended-display broker's test fixtures are compile-time macros.
+`src/tools/test-tailnet-ssh.py` must run as PID 1 in a disposable Linux guest
+with the kernel command-line flag `locachy.tailnet-ssh-test=1`. It uses real
+OpenSSH, SCP, SFTP and `sudo locachy-compute` on a mock Tailscale interface,
+not a real tailnet. It checks that detached jobs report their actual exit
+codes and logs after SSH rebind, and that their cgroups are removed.
+
+The compute shell test uses unprivileged Linux namespaces; its writable-cgroup
+checks require a delegated cgroup v2 subtree. Test overrides use `LOCACHY_` environment variables: `locachy-compute` reads `LOCACHY_PEERS_DIR` (via `locachy_peers.py`), `LOCACHY_COMPUTE_BASE`, `LOCACHY_COMPUTE_RUN`, `LOCACHY_COMPUTE_CGROUP`, `LOCACHY_COMPUTE_RC`, `LOCACHY_COMPUTE_APP_INIT`, `LOCACHY_COMPUTE_ALLOW_NO_CGROUP`, and `LOCACHY_CONTAINERS_DIR` (plus the VM seams listed above); `compute-client` also reads `LOCACHY_COMPUTE_NETNS`, `LOCACHY_COMPUTE_BIN`, and `LOCACHY_NETWORK_CLIENT`. The extended-display broker's test fixtures are compile-time macros.
 
 ## Limits
 

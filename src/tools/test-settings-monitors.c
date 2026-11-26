@@ -54,6 +54,29 @@ static struct passwd *fixture_getpwuid(uid_t);
 #include "../base/ui.c"
 #include "i18n-stub.h"
 #include "jobs-double.h"
+
+int screen_open(const char *font)
+{
+    (void)font;
+    return 0;
+}
+int keys_open(void)
+{
+    return 0;
+}
+int open_rules(char types[][OPEN_TYPE], char values[][OPEN_NAME], int max)
+{
+    (void)types; (void)values; (void)max;
+    return 0;
+}
+
+int base_app_action(const char *action, const char *name, char *why, size_t size)
+{
+    (void)action;
+    (void)name;
+    snprintf(why, size, "%s", "no desktop session in tests");
+    return -1;
+}
 #undef main
 #undef waitpid
 #undef fork
@@ -139,6 +162,7 @@ static int camera_commands;
 static int fake_fwupd, fwupd_asked;
 static const char *fake_tpm_status; /* locachy-tpm status --json, as it says it (NULL: not installed) */
 static const char *fake_duress_status; /* locachy-duress status, as it says it (NULL: not installed) */
+static const char *fake_storage_status; /* locachy-storage status --json (NULL: not installed) */
 static int duress_clears, duress_term_calls;
 
 static void command_output(char *const argv[], char *buf, size_t size)
@@ -166,6 +190,9 @@ static void command_output(char *const argv[], char *buf, size_t size)
         snprintf(buf, size, "level\tx86-64-v3\ncpu\tznver4\ncore\ton\nextra\ton\nmultilib\toff\n"
                  "stack\tcachyos-znver4 cachyos-core-znver4 core-x86-64-v3 extra-x86-64-v3 core extra\n"
                  "next\t2026-11-12 03:14\n");
+    } else if (strcmp(argv[0], LOCACHY_STORAGE) == 0 && argv[1] && !strcmp(argv[1], "status") &&
+               argv[2] && !strcmp(argv[2], "--json") && !argv[3]) {
+        snprintf(buf, size, "%s", fake_storage_status ? fake_storage_status : "");
     } else {
         pending_command = argv[0];
         pid_t pid = fixture_fork();
@@ -179,7 +206,12 @@ static void command_output(char *const argv[], char *buf, size_t size)
 
 static const char *map_path(const char *path, char *out, size_t size)
 {
-    if (strcmp(path, "/sys/class/drm") == 0)
+    size_t root_len = strlen(root);
+    if (root_len && strncmp(path, root, root_len) == 0 &&
+        (strcmp(path + root_len, "/sys/class/power_supply") == 0 ||
+         strncmp(path + root_len, "/sys/class/power_supply/", sizeof "/sys/class/power_supply/" - 1) == 0))
+        snprintf(out, size, "%s", path); /* open() also uses this fixture root */
+    else if (strcmp(path, "/sys/class/drm") == 0)
         snprintf(out, size, "%s/drm", root);
     else if (strncmp(path, "/sys/class/drm/", 15) == 0)
         snprintf(out, size, "%s/drm/%s", root, path + 15);
@@ -357,6 +389,7 @@ static int fixture_access(const char *path, int mode)
     if (!strcmp(path, HOWDY) || !strcmp(path, FACE_CAMERA_TOOL)) return fake_howdy ? 0 : -1;
     if (!strcmp(path, "/usr/local/bin/locachy-tpm")) return fake_tpm_status ? 0 : -1;
     if (!strcmp(path, LOCACHY_DURESS)) return fake_duress_status ? 0 : -1;
+    if (!strcmp(path, LOCACHY_STORAGE)) return fake_storage_status ? 0 : -1;
     if (!strcmp(path, FWUPDMGR)) return fake_fwupd ? 0 : -1;
     if (!strcmp(path, NVIDIA_DRIVER)) return fake_nvidia ? 0 : -1;
     if (!strcmp(path, "/etc/libinput")) return 0; /* its file is the fixture's */
@@ -706,7 +739,8 @@ static void test_circular(void)
     assert(circ_index() == tnet_index() + 1 && clicks_index() == circ_index() + 3 &&
            imek_index() == clicks_index() + 1 &&
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
-           bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
+           bat_page_index() == kb_index() + nkeyboards_seen && bat_adaptive_index() == bat_page_index() + 1 &&
+           bat_full_index() == bat_adaptive_index() + 1 && bat_thresh_index() == bat_full_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
            nmtui_index() == hwcopy_index() + 1 && extd_index() == nmtui_index() + 1 &&
            cpu_opt_index() == extd_index() + 1 && blank_index() == cpu_opt_index() + 1 &&
@@ -714,7 +748,11 @@ static void test_circular(void)
            search_key_index() == zram_index() + 1 && search_svc_index() == search_key_index() + 1 &&
            search_docs_index() == search_svc_index() + 1 &&
            gpu_unlock_index() == search_docs_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
-           nvidia_powerd_index() == gpu_power_index() + 1 && num_hw_items() == nvidia_powerd_index() + 1);
+           nvidia_powerd_index() == gpu_power_index() + 1 &&
+           storage_compute_index() == nvidia_powerd_index() + 1 &&
+           storage_vols_index() == storage_compute_index() + 1 &&
+           storage_disks_index() == storage_vols_index() + nstorage_vols &&
+           num_hw_items() == storage_disks_index() + 1);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -1331,17 +1369,30 @@ static void test_power_and_hwinfo(void)
     assert(first_setting() == hwinfo_index());
     search[0] = '\0';
 
-    /* Threshold adjustment & EC-safe persistence */
+    /* Settings saves manual limits and notifies the sole writer. */
+    const char *end_path = "sys/class/power_supply/BAT0/charge_control_end_threshold";
+    const char *start_path = "sys/class/power_supply/BAT0/charge_control_start_threshold";
+    int hup_before = hups;
     rc_log[0] = '\0';
     selected = bat_thresh_index() + 1; /* stop threshold: 80% -> 85% */
+    fail_rc = 1;
+    adjust(+1);
+    fail_rc = 0;
+    assert(rc_bat_end != 85 && hups == hup_before && !rc_log[0]);
     adjust(+1);
     char th_val[32];
-    read_fixture("sys/class/power_supply/BAT0/charge_control_end_threshold", th_val, sizeof th_val);
-    assert(atoi(th_val) == 85 && strstr(rc_log, "battery_charge_end=85;"));
+    read_fixture(end_path, th_val, sizeof th_val);
+    assert(atoi(th_val) == 80 && rc_bat_end == 85 && hups == hup_before + 1 &&
+           strstr(rc_log, "battery_charge_end=85;"));
     selected = bat_thresh_index(); /* start threshold: 75% -> 80% */
     adjust(+1);
-    read_fixture("sys/class/power_supply/BAT0/charge_control_start_threshold", th_val, sizeof th_val);
-    assert(atoi(th_val) == 80 && strstr(rc_log, "battery_charge_start=80;"));
+    read_fixture(start_path, th_val, sizeof th_val);
+    assert(atoi(th_val) == 75 && rc_bat_start == 80 && hups == hup_before + 2 &&
+           strstr(rc_log, "battery_charge_start=80;"));
+    /* Simulate the service acknowledging the saved values. */
+    file_text(end_path, "85\n");
+    file_text(start_path, "80\n");
+    power_refresh_devices();
 
     /* Interactive battery curves subpage: modes, spans, cursor, spare pack tab, copy */
     clip_buf[0] = '\0';
@@ -1613,6 +1664,140 @@ static void test_power_and_hwinfo(void)
     settings_page = page_before;
     puts("PASS Hardware Information browser: CPU ISA/caches, SMBIOS Type 16/17 DIMMs, NVMe SMART, EDID panel, "
          "hwmon live sensors, PCIe link speed and USB hwdata");
+}
+
+static void test_adaptive_charging(void)
+{
+    const char *end_path = "sys/class/power_supply/BAT0/charge_control_end_threshold";
+    char line[256];
+    int hup_before = hups, page_before = settings_page;
+    settings_page = 1;
+    on_rc("battery_charge_adaptive", "0", NULL);
+    on_rc("battery_charge_start", "80", NULL);
+    on_rc("battery_charge_end", "85", NULL);
+    show_category(CAT_POWER, 1);
+    power_refresh_devices();
+    selected = bat_adaptive_index();
+    rc_log[0] = '\0';
+    assert(page_key(K_RIGHT) && !rc_log[0] && hups == hup_before);
+    assert(page_key('\n') && editing && page_key(K_RIGHT));
+    assert(rc_bat_adaptive && !strcmp(rc_log, "battery_charge_adaptive=1;") && hups == hup_before + 1);
+    assert(page_key('\n') && !editing);
+    assert(rc_bat_start == 80 && rc_bat_end == 85);
+    read_fixture(end_path, line, sizeof line);
+    assert(atoi(line) == 85);
+
+    char history_dir[1400];
+    snprintf(history_dir, sizeof history_dir, "%s/battery", root);
+    assert(setenv("LOCACHY_BATTERY_HISTORY_DIR", history_dir, 1) == 0);
+    int watch = power_charge_watch_open();
+    assert(watch >= 0);
+    file_text(end_path, "60\n");
+    file_text("battery/charge-status.tmp", "1 0 1\nBAT0 LGC_45N1111_4102 mains 60 60 0\n");
+    assert(fixture_rename("/var/lib/locachy/battery/charge-status.tmp", "/var/lib/locachy/battery/charge-status") == 0);
+    assert(power_charge_watch_changed(watch) && !power_charge_watch_changed(watch));
+    close(watch);
+    assert(unsetenv("LOCACHY_BATTERY_HISTORY_DIR") == 0);
+    power_refresh_devices();
+    draw();
+    assert(canvas_has("Adaptive Charging") && canvas_has("Mostly plugged in (limit 60%)"));
+    item_text(bat_thresh_index() + 1, line, sizeof line);
+    assert(strstr(line, "85% saved for manual charging"));
+    rc_log[0] = '\0';
+    selected = bat_thresh_index() + 1;
+    assert(info_row(selected));
+    adjust(+1);
+    read_fixture(end_path, line, sizeof line);
+    assert(atoi(line) == 60 && !rc_log[0] && rc_bat_end == 85);
+
+    /* The service's release time is when the limit is lifted, not a full-charge ETA. */
+    const char *forecast = "Expected to resume charging to full at";
+    const char *hold = "1 0 1\nBAT0 LGC_45N1111_4102 hold 80 80 1800003600\n";
+    assert(setenv("LOCACHY_NOW_TS", "1800000000", 1) == 0);
+    file_text(end_path, "80\n");
+    file_text("battery/charge-status", hold);
+    power_refresh_devices();
+    draw();
+    time_t release = 1800003600;
+    char when[24];
+    assert(strftime(when, sizeof when, "%m-%d %H:%M", localtime(&release)) > 0);
+    snprintf(line, sizeof line, "%s %s", forecast, when);
+    assert(canvas_has("Holding charge (limit 80%)") && canvas_has(line));
+
+    /* An expired prediction disappears after the status is refreshed. */
+    assert(setenv("LOCACHY_NOW_TS", "1800003600", 1) == 0);
+    power_refresh_devices();
+    draw();
+    assert(canvas_has("Holding charge") && !canvas_has(forecast));
+    assert(setenv("LOCACHY_NOW_TS", "1800000000", 1) == 0);
+    const char *invalid[] = {
+        "1 0 1\nBAT0 LGC_45N1111_4102 hold 80 80 0\n",
+        "1 0 1\nBAT0 LGC_45N1111_4102 hold 80 80 9223372036854775807\n",
+        "1 0 1\nBAT0 LGC_45N1111_4102 top-up 100 100 1799999999\n",
+        "1 0 1\nBAT0 LGC_45N1111_4102 error 80 80 1800003600\n",
+        "1 0 1\nBAT0 LGC_45N1111_9999 hold 80 80 1800003600\n",
+    };
+    for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        file_text("battery/charge-status", invalid[i]);
+        power_refresh_devices();
+        draw();
+        assert(!canvas_has(forecast));
+    }
+    file_text("battery/charge-status", hold);
+    file_text("sys/class/power_supply/AC/online", "0\n");
+    power_refresh_devices();
+    draw();
+    assert(!canvas_has(forecast));
+    file_text("sys/class/power_supply/AC/online", "1\n");
+
+    selected = bat_adaptive_index();
+    adjust(-1);
+    assert(!rc_bat_adaptive && !strcmp(rc_log, "battery_charge_adaptive=0;") && hups == hup_before + 2);
+    draw();
+    assert(!canvas_has(forecast));
+    assert(unsetenv("LOCACHY_NOW_TS") == 0);
+    puts("PASS Adaptive Charging forecast: local release time, stale and invalid forecasts hidden");
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "< off >") && strstr(line, "Waiting for battery service"));
+    assert(info_row(bat_thresh_index() + 1));
+
+    file_text(end_path, "85\n");
+    file_text("battery/charge-status", "0 0 1\nBAT0 LGC_45N1111_4102 manual 85 85 0\n");
+    power_refresh_devices();
+    assert(!info_row(bat_thresh_index() + 1));
+    selected = bat_full_index();
+    rc_log[0] = '\0';
+    assert(page_key(K_RIGHT) && !rc_log[0] && !page_key('\n'));
+    assert(setenv("LOCACHY_NOW_TS", "1800000000", 1) == 0);
+    charge_to_full_now();
+    assert(!strcmp(rc_log, "battery_charge_full_until=1800086400;") && hups == hup_before + 3);
+    read_fixture(end_path, line, sizeof line);
+    assert(atoi(line) == 85 && rc_bat_start == 80 && rc_bat_end == 85);
+    file_text("battery/charge-status", "0 1800086400 1\nBAT0 LGC_45N1111_4102 full 100 100 0\n");
+    power_refresh_devices();
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "Full charge override active") && info_row(bat_thresh_index() + 1));
+    assert(unsetenv("LOCACHY_NOW_TS") == 0);
+
+    file_text("sys/class/power_supply/AC/online", "0\n");
+    rc_log[0] = '\0';
+    charge_to_full_now();
+    assert(strstr(notice, "Plug in AC power first") && !rc_log[0] && hups == hup_before + 3);
+    assert(fixture_unlink("/sys/class/power_supply/BAT0/charge_control_end_threshold") == 0);
+    power_refresh_devices();
+    item_text(bat_adaptive_index(), line, sizeof line);
+    assert(strstr(line, "unsupported"));
+    item_text(bat_full_index(), line, sizeof line);
+    assert(strstr(line, "unsupported"));
+    charge_to_full_now();
+    assert(strstr(notice, "unsupported") && !rc_log[0] && hups == hup_before + 3);
+    file_text("sys/class/power_supply/AC/online", "1\n");
+    file_text(end_path, "85\n");
+    assert(fixture_unlink("/var/lib/locachy/battery/charge-status") == 0);
+    rc_bat_full_until = 0;
+    power_refresh_devices();
+    settings_page = page_before;
+    puts("PASS Adaptive Charging: configured and applied states, manual limits preserved, full charge request and unsupported hardware");
 }
 
 static void test_system_keymap(void)
@@ -2857,6 +3042,9 @@ int main(int argc, char **argv)
     assert(generated || argc == 2);
     snprintf(root, sizeof root, "%s", argv[generated ? 2 : 1]);
     assert(root[0] == '/');
+    char battery_sysfs[1400];
+    snprintf(battery_sysfs, sizeof battery_sysfs, "%s/sys/class/power_supply", root);
+    assert(setenv("LOCACHY_POWER_SUPPLY_DIR", battery_sysfs, 1) == 0);
     prepare();
     jobs_double_hook = submit_hook;
     if (generated) {
@@ -3659,7 +3847,8 @@ int main(int argc, char **argv)
            circ_index() == tnet_index() + 1 && clicks_index() == circ_index() + 3 &&
            imek_index() == clicks_index() + 1 &&
            system_keymap_index() == imek_index() + NIME_KEYS && kb_index() == system_keymap_index() + 1 &&
-           bat_page_index() == kb_index() + nkeyboards_seen && bat_thresh_index() == bat_page_index() + 1 &&
+           bat_page_index() == kb_index() + nkeyboards_seen && bat_adaptive_index() == bat_page_index() + 1 &&
+           bat_full_index() == bat_adaptive_index() + 1 && bat_thresh_index() == bat_full_index() + 1 &&
            hwinfo_index() == bat_thresh_index() + power_thresh_count() && hwcopy_index() == hwinfo_index() + 1 &&
            nmtui_index() == hwcopy_index() + 1 && extd_index() == nmtui_index() + 1 &&
            cpu_opt_index() == extd_index() + 1 && blank_index() == cpu_opt_index() + 1 &&
@@ -3667,7 +3856,11 @@ int main(int argc, char **argv)
            search_key_index() == zram_index() + 1 && search_svc_index() == search_key_index() + 1 &&
            search_docs_index() == search_svc_index() + 1 &&
            gpu_unlock_index() == search_docs_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
-           nvidia_powerd_index() == gpu_power_index() + 1 && num_hw_items() == nvidia_powerd_index() + 1);
+           nvidia_powerd_index() == gpu_power_index() + 1 &&
+           storage_compute_index() == nvidia_powerd_index() + 1 &&
+           storage_vols_index() == storage_compute_index() + 1 &&
+           storage_disks_index() == storage_vols_index() + nstorage_vols &&
+           num_hw_items() == storage_disks_index() + 1);
     selected = extd_index();
     adjust(+1);
     assert(extd_decode == EXTD_HW);
@@ -3760,6 +3953,7 @@ int main(int argc, char **argv)
     test_keyboards();
     test_system_keymap();
     test_power_and_hwinfo();
+    test_adaptive_charging();
     test_power_profile_zram_search();
     test_colors();
     test_pages();

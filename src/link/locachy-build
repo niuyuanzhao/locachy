@@ -150,7 +150,13 @@ key_root() {
 # (each a link to a "PID\nHOST\n" file of GnuPG's dotlock); keyring_close
 # ends them, so that no lock is left.
 keyring_open() {
-    as_builder install -d -m 0700 "$home/.gnupg"
+    if [ -n "$key_uid" ]; then
+        # as_builder has already entered the home as root. An absolute path
+        # would make the unprivileged process traverse its ancestors again.
+        as_builder install -d -m 0700 .gnupg
+    else
+        as_builder install -d -m 0700 "$home/.gnupg"
+    fi
     as_builder gpgconf --kill all >/dev/null 2>&1 || true
     find "$home/.gnupg" -maxdepth 2 -type f \( -name '*.lock' -o -name '.#lk*' \) -delete
 }

@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """Maintain LOCachy's UEFI entry with efibootmgr, never raw variable writes.
 
-locachy-efi [--esp /efi] [--first] [--ensure-first]
+locachy-efi [--esp /efi] [--first] [--ensure-first [--keep-windows-first]]
 locachy-efi --bootnext-entry --disk DEV --part N --partuuid UUID
             --label NAME --loader PATH [--esp /efi]
+locachy-efi --windows-first --disk DEV --part N --partuuid UUID [--esp /efi]
 locachy-efi --remove-entry --label NAME [--partuuid UUID]
 
 --first is the installer's: put this entry first, preserving other entries.
 --ensure-first heals BootOrder so LOCachy is first and strips Maintenance
 Windows entries from BootOrder (Layer 4 protection).
+--windows-first puts a "LOCachy Maintenance Windows (default)" entry first and
+LOCachy second (locachy-winmaint boot-default windows). With
+--keep-windows-first, --ensure-first keeps that entry first while it still
+precedes LOCachy in BootOrder; when it no longer does (Windows' "Return to
+LOCachy" put LOCachy first, or the firmware dropped it) LOCachy is made first
+as usual and the exit status is 3.
 Normal boot-image updates keep the existing order (append if missing).
 """
 import argparse
@@ -30,6 +37,12 @@ PREV_LABEL = "LOCachy (Previous)"
 PREV_LOADER = r"\EFI\locachy\locachy-prev.efi"
 WINMAINT_LABEL = "LOCachy Maintenance Windows"
 WINMAINT_LOADER = r"\EFI\Microsoft\Boot\bootmgfw.efi"
+# The entry that starts Maintenance Windows first while locachy-winmaint's
+# "Windows first" mode is set; the Windows-side guard reads this description.
+WINFIRST_LABEL = "LOCachy Maintenance Windows (default)"
+# --ensure-first --keep-windows-first: the Windows-first entry no longer
+# preceded LOCachy, so LOCachy was made first.
+RELEASED = 3
 ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 
@@ -187,7 +200,11 @@ def register(esp, first=False):
         os.close(lock)
 
 
-def _register(esp, first=False, strip_winmaint=False, winmaint_guid=None):
+def _register(esp, first=False, strip_winmaint=False, winmaint_guid=None, keep_windows_first=False,
+              windows_first=None):
+    """LOCachy's entries registered and placed. windows_first: a Boot#### placed
+    before them (set_windows_first). keep_windows_first: keep the Windows-first
+    entry before them while it still precedes LOCachy, else return RELEASED."""
     esp_path = Path(os.path.abspath(esp))
     disk, partition, guid = esp_target(esp_path)
     prev_file = esp_path / "EFI/locachy/locachy-prev.efi"
@@ -225,15 +242,23 @@ def _register(esp, first=False, strip_winmaint=False, winmaint_guid=None):
         prev_number, all_entries = ensure_entry(PREV_LABEL, PREV_LOADER, order, all_entries)
 
     drop = set()
+    wf_number = windows_first
     if strip_winmaint:
         wguid = winmaint_guid.lower() if winmaint_guid else None
+        if wf_number is None and keep_windows_first:
+            # Windows first only while its entry precedes LOCachy in BootOrder.
+            ahead = [item["number"] for item in every_entry
+                     if item["label"] == WINFIRST_LABEL and (wguid is None or item["guid"] == wguid) and
+                     item["number"] in order and (number not in order or order.index(item["number"]) < order.index(number))]
+            if ahead:
+                wf_number = min(ahead, key=order.index)
         for item in every_entry:
-            if item["label"] == WINMAINT_LABEL or (wguid and item["guid"] == wguid):
-                if item["number"] not in (number, prev_number):
+            if item["label"] in (WINMAINT_LABEL, WINFIRST_LABEL) or (wguid and item["guid"] == wguid):
+                if item["number"] not in (number, prev_number, wf_number):
                     drop.add(item["number"])
 
     if first:
-        head = [number] + ([prev_number] if prev_number else [])
+        head = ([wf_number] if wf_number else []) + [number] + ([prev_number] if prev_number else [])
         wanted = head + [n for n in order if n not in head and n not in drop]
     else:
         wanted = [n for n in order if n not in drop]
@@ -250,17 +275,65 @@ def _register(esp, first=False, strip_winmaint=False, winmaint_guid=None):
                                      i["number"] == prev_number and i["active"] for i in actual)):
         raise RuntimeError("firmware did not retain the requested LOCachy entry/order")
     extra = f", Boot{prev_number} {PREV_LABEL} {PREV_LOADER}" if prev_number else ""
-    print(f"locachy-efi: Boot{number} {LABEL}, {disk} partition {partition} {LOADER}{extra}; "
-          + ("first in BootOrder" if first else "BootOrder preserved" if wanted == order else "added to BootOrder"))
+    if first and wf_number:
+        where = f"second in BootOrder, behind Boot{wf_number} {WINFIRST_LABEL}"
+    else:
+        where = "first in BootOrder" if first else "BootOrder preserved" if wanted == order else "added to BootOrder"
+    print(f"locachy-efi: Boot{number} {LABEL}, {disk} partition {partition} {LOADER}{extra}; {where}")
+    if keep_windows_first and windows_first is None and wf_number is None:
+        print(f"locachy-efi: {WINFIRST_LABEL} no longer preceded {LABEL}; {LABEL} is first again")
+        return RELEASED
     return 0
 
 
-def ensure_first(esp="/efi", winmaint_guid=None):
+def ensure_first(esp="/efi", winmaint_guid=None, keep_windows_first=False):
     """Layer-4 heal: keep LOCachy first in BootOrder and strip Maintenance
-    Windows entries (and any Windows entry on winmaint_guid) from BootOrder."""
+    Windows entries (and any Windows entry on winmaint_guid) from BootOrder.
+    keep_windows_first: the Windows-first entry stays first while it precedes
+    LOCachy (RELEASED, with LOCachy first, once it does not)."""
     lock = efi_lock()
     try:
-        return _register(esp, first=True, strip_winmaint=True, winmaint_guid=winmaint_guid)
+        return _register(esp, first=True, strip_winmaint=True, winmaint_guid=winmaint_guid,
+                         keep_windows_first=keep_windows_first)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        os.close(lock)
+
+
+def set_windows_first(disk, partition, partuuid, esp="/efi", loader=WINMAINT_LOADER):
+    """Create or reuse the Windows-first entry on the Maintenance Windows ESP
+    and put it first in BootOrder, LOCachy's entries right after it (never
+    removed); other Maintenance Windows entries leave BootOrder."""
+    if not disk.startswith("/dev/"):
+        raise RuntimeError(f"{disk}: disk device path must start with /dev/")
+    partition = int(partition)
+    if partition < 1:
+        raise RuntimeError(f"{partition}: partition number must be >= 1")
+    guid = str(uuid.UUID(partuuid)).lower()
+    if not loader.startswith("\\"):
+        raise RuntimeError(f"{loader}: UEFI loader path must start with backslash")
+    lock = efi_lock()
+    try:
+        require_writable_efivars()
+        order, _, every = parse_entries(command(["efibootmgr", "--verbose"]))
+
+        def matches(item):
+            return (item["label"] == WINFIRST_LABEL and item["part"] == partition and
+                    item["guid"] == guid and item["loader"] == loader.lower())
+
+        exact = [item for item in every if matches(item)]
+        if not exact:
+            command(["efibootmgr", "--create-only", "--disk", disk, "--part", str(partition),
+                     "--label", WINFIRST_LABEL, "--loader", loader])
+            order, _, every = parse_entries(command(["efibootmgr", "--verbose"]))
+            exact = [item for item in every if matches(item)]
+            if not exact:
+                raise RuntimeError(f"firmware did not retain the new {WINFIRST_LABEL} entry")
+        item = next((item for item in exact if item["number"] in order), exact[0])
+        if not item["active"]:
+            command(["efibootmgr", "--bootnum", item["number"], "--active"])
+        _register(esp, first=True, strip_winmaint=True, winmaint_guid=guid, windows_first=item["number"])
+        return item["number"]
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         os.close(lock)
@@ -356,6 +429,11 @@ def main():
     parser.add_argument("--first", action="store_true")
     parser.add_argument("--ensure-first", action="store_true",
                         help="put LOCachy first in BootOrder and strip Maintenance Windows entries from BootOrder")
+    parser.add_argument("--keep-windows-first", action="store_true",
+                        help="with --ensure-first, keep the Windows-first entry first while it precedes LOCachy "
+                             "(exit status 3 when it no longer does and LOCachy was made first)")
+    parser.add_argument("--windows-first", action="store_true",
+                        help="put the Maintenance Windows (default) entry first in BootOrder, LOCachy second")
     parser.add_argument("--winmaint-guid", default=None,
                         help="optional Maintenance Windows ESP PARTUUID to strip from BootOrder or delete")
     parser.add_argument("--bootnext-entry", action="store_true",
@@ -380,10 +458,16 @@ def main():
                                label=args.label, loader=args.loader,
                                esp=None if args.no_esp_check else args.esp)
             return 0
+        if args.windows_first:
+            if not args.disk or args.part is None or not args.partuuid:
+                raise RuntimeError("--windows-first requires --disk, --part and --partuuid")
+            set_windows_first(args.disk, args.part, args.partuuid, esp=args.esp, loader=args.loader)
+            return 0
         if args.remove_entry:
             return remove_entry(label=args.label, partuuid=args.partuuid or args.winmaint_guid)
         if args.ensure_first:
-            return ensure_first(args.esp, winmaint_guid=args.winmaint_guid)
+            return ensure_first(args.esp, winmaint_guid=args.winmaint_guid,
+                                keep_windows_first=args.keep_windows_first)
         return register(args.esp, args.first)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as e:
         print(f"locachy-efi: boot entry not ready: {e}; fallback EFI/BOOT/BOOTX64.EFI is retained", file=sys.stderr)

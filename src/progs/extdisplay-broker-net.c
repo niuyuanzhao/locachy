@@ -445,5 +445,7 @@ int identity_of(int nl, const char *name, int ifindex, struct identity *id)
 
 int identity_equal(const struct identity *a, const struct identity *b)
 {
-    return a->address[0] && !strcmp(a->address, b->address) && !strcmp(a->device, b->device);
+    /* Match by hardware address: a Thunderbolt/USB4 interface can return at a
+     * different sysfs parent path after replugging through another port or dock. */
+    return a->address[0] && !strcmp(a->address, b->address);
 }

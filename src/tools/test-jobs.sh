@@ -39,13 +39,13 @@ echo "host=\"1\"" >>"$t/containers/alpha.conf"
 echo "package=\"x\"" >"$t/containers/beta.conf"
 echo "package=\"x\"" >"$t/containers/keys3.conf"
 touch "$t/cgroup/service/cgroup.procs"
-for i in $(seq 1 120); do
+for i in $(seq 1 150); do
     mkdir "$t/cgroup/job-$i"
     touch "$t/cgroup/job-$i/cgroup.procs" "$t/cgroup/job-$i/cgroup.kill"
     echo "populated 0" >"$t/cgroup/job-$i/cgroup.events"
 done
 install -m 755 "$src/tools/test-jobs-tool.sh" "$run/tool"
-for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint locachy-gpu-unlock locachy-gpu-power; do ln -s "$run/tool" "$t/bin/$p"; done
+for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint locachy-winiso locachy-gpu-unlock locachy-gpu-power locachy-storage; do ln -s "$run/tool" "$t/bin/$p"; done
 ln -s "$run/tool" "$t/lib/network-client"
 install -m 755 "$server" "$run/locachy-jobs"
 install -m 755 "$client" "$run/test-jobs"
@@ -168,12 +168,37 @@ check "tb-sync is accepted" accept tb-sync
 check "winmaint-create rejects out-of-range size" refuse winmaint-create --size-gib 20
 check "winmaint-create rejects size over ceiling" refuse winmaint-create --size-gib 5000
 check "winmaint-create rejects leading zero" refuse winmaint-create --size-gib 048
-check "winmaint-create rejects extra flag" refuse winmaint-create --disk /dev/sda
+check "winmaint-create rejects bare --disk without size" refuse winmaint-create --disk /dev/sda
+check "winmaint-create rejects --disk with path traversal" refuse winmaint-create --size-gib 64 --disk /dev/../sda
+check "winmaint-create rejects --disk outside /dev" refuse winmaint-create --size-gib 64 --disk /etc/passwd
+check "winmaint-create rejects --disk with option-like name" refuse winmaint-create --size-gib 64 --disk /dev/-sda
 check "winmaint-create accepts valid size" accept winmaint-create --size-gib 64
+check "winmaint-create accepts valid size and --disk" accept winmaint-create --size-gib 64 --disk /dev/nvme1n1
 check "winmaint-reclaim rejects extra arg" refuse winmaint-reclaim --now
 check "winmaint-reclaim is accepted" accept winmaint-reclaim
 check "winmaint-boot-once is accepted" accept winmaint-boot-once
 check "winmaint-heal-boot is accepted" accept winmaint-heal-boot
+check "winmaint-boot-default refuses no mode" refuse winmaint-boot-default
+check "winmaint-boot-default refuses an unknown mode" refuse winmaint-boot-default linux
+check "winmaint-boot-default refuses locachy --reboot" refuse winmaint-boot-default locachy --reboot
+check "winmaint-boot-default refuses other flags" refuse winmaint-boot-default windows --force
+check "winmaint-boot-default accepts windows" accept winmaint-boot-default windows
+check "winmaint-boot-default accepts windows --reboot" accept winmaint-boot-default windows --reboot
+check "winmaint-boot-default accepts locachy" accept winmaint-boot-default locachy
+check "winiso-fetch refuses another positional" refuse winiso-fetch windows
+check "winiso-fetch refuses an uppercase language" refuse winiso-fetch --lang EN-us
+check "winiso-fetch refuses a language without region" refuse winiso-fetch --lang en
+check "winiso-fetch refuses a four-letter language" refuse winiso-fetch --lang engl-US
+check "winiso-fetch refuses a long region" refuse winiso-fetch --lang en-USA
+check "winiso-fetch refuses a two-digit region" refuse winiso-fetch --lang es-41
+check "winiso-fetch refuses a shell-like language" refuse winiso-fetch --lang "en-US;id"
+check "winiso-fetch refuses an empty language" refuse winiso-fetch --lang ""
+check "winiso-fetch refuses --version" refuse winiso-fetch --version 11
+check "winiso-fetch refuses a repeated language" refuse winiso-fetch --lang en-US --lang zh-CN
+check "winiso-fetch refuses a trailing option" refuse winiso-fetch --lang en-US --force
+check "winiso-fetch accepts no options" accept winiso-fetch
+check "winiso-fetch accepts --lang en-US" accept winiso-fetch --lang en-US
+check "winiso-fetch accepts --lang es-419" accept winiso-fetch --lang es-419
 check "gpu-unlock-install refuses off" refuse gpu-unlock-install off
 check "gpu-unlock-install refuses shell injection" refuse gpu-unlock-install "all;id"
 check "gpu-unlock-install accepts all" accept gpu-unlock-install all
@@ -196,14 +221,63 @@ check "new fixed kinds finish" idle
 check "tb-sync ran network-client --sync-tb-filter" grep -q "network-client --sync-tb-filter \[1\]" "$t/calls"
 check "boot --winmaint-shrink ran locachy-boot --winmaint-shrink" grep -q "locachy-boot --winmaint-shrink \[1\]" "$t/calls"
 check "winmaint-create ran locachy-winmaint create --size-gib 64" grep -q "locachy-winmaint create --size-gib 64 \[3\]" "$t/calls"
+check "winmaint-create --disk ran locachy-winmaint create --size-gib 64 --disk /dev/nvme1n1" grep -q "locachy-winmaint create --size-gib 64 --disk /dev/nvme1n1 \[5\]" "$t/calls"
 check "winmaint-reclaim ran locachy-winmaint reclaim" grep -q "locachy-winmaint reclaim \[1\]" "$t/calls"
 check "winmaint-boot-once ran locachy-winmaint boot-once" grep -q "locachy-winmaint boot-once \[1\]" "$t/calls"
 check "winmaint-heal-boot ran locachy-winmaint heal-boot" grep -q "locachy-winmaint heal-boot \[1\]" "$t/calls"
+check "winmaint-boot-default ran locachy-winmaint boot-default windows" grep -q "locachy-winmaint boot-default windows \[2\]" "$t/calls"
+check "winmaint-boot-default ran locachy-winmaint boot-default windows --reboot" grep -q "locachy-winmaint boot-default windows --reboot \[3\]" "$t/calls"
+check "winmaint-boot-default ran locachy-winmaint boot-default locachy" grep -q "locachy-winmaint boot-default locachy \[2\]" "$t/calls"
+check "winiso-fetch ran locachy-winiso fetch windows" grep -q "locachy-winiso fetch windows \[2\]" "$t/calls"
+check "winiso-fetch ran locachy-winiso fetch windows --lang es-419" grep -q "locachy-winiso fetch windows --lang es-419 \[4\]" "$t/calls"
 check "gpu-unlock-install ran locachy-gpu-unlock install --target all" grep -q "locachy-gpu-unlock install --target all \[3\]" "$t/calls"
 check "gpu-unlock-set ran locachy-gpu-unlock set 0000:01:00.0" grep -q "locachy-gpu-unlock set 0000:01:00.0 \[2\]" "$t/calls"
 check "gpu-unlock-remove ran locachy-gpu-unlock remove" grep -q "locachy-gpu-unlock remove \[1\]" "$t/calls"
 check "gpu-power-apply ran locachy-gpu-power apply full" grep -q "locachy-gpu-power apply full \[2\]" "$t/calls"
 check "gpu-powerd ran locachy-gpu-power nvidia-powerd on" grep -q "locachy-gpu-power nvidia-powerd on \[2\]" "$t/calls"
+# Storage volume kinds: strict argument validation and exact argv dispatch.
+check "storage-mount refuses uppercase name" refuse storage-mount Data
+check "storage-mount refuses path traversal" refuse storage-mount ../data
+check "storage-mount refuses option-like name" refuse storage-mount -data
+check "storage-mount refuses shell metacharacters" refuse storage-mount "data;id"
+check "storage-mount refuses overlong name" refuse storage-mount a23456789012345678901234567890123
+check "storage-mount refuses extra argument" refuse storage-mount data extra
+check "storage-umount refuses missing name" refuse storage-umount
+check "storage-set-role refuses unknown role" refuse storage-set-role data root
+check "storage-set-auto refuses invalid toggle" refuse storage-set-auto data yes
+check "storage-set-compute refuses invalid name" refuse storage-set-compute /dev/sda
+check "storage-remove refuses invalid name" refuse storage-remove .hidden
+check "storage-attach refuses device outside /dev" refuse storage-attach --name data --dev /etc/passwd --role shared
+check "storage-attach refuses device subdirectory" refuse storage-attach --name data --dev /dev/disk/by-id/x --role shared
+check "storage-attach refuses device traversal" refuse storage-attach --name data --dev /dev/../sda --role shared
+check "storage-attach refuses wrong flag order" refuse storage-attach --dev /dev/nvme1n1p1 --name data --role shared
+check "storage-format refuses unknown fs" refuse storage-format --name data --dev /dev/nvme1n1 --fs xfs --role data --encrypt none
+check "storage-format refuses unknown encrypt" refuse storage-format --name data --dev /dev/nvme1n1 --fs ext4 --role data --encrypt aes
+check "storage-array refuses single device" refuse storage-array --name pool --devs /dev/nvme1n1 --raid raid1 --role shared --encrypt none
+check "storage-array refuses trailing comma" refuse storage-array --name pool --devs /dev/nvme1n1,/dev/nvme2n1, --raid raid1 --role shared --encrypt none
+check "storage-array refuses unknown raid" refuse storage-array --name pool --devs /dev/nvme1n1,/dev/nvme2n1 --raid raid5 --role shared --encrypt none
+check "storage-array refuses bad device in list" refuse storage-array --name pool --devs /dev/nvme1n1,/tmp/x --raid raid1 --role shared --encrypt none
+check "storage-mount accepts valid name" accept storage-mount data_1.0-a
+check "storage-umount accepts valid name" accept storage-umount data_1.0-a
+check "storage-set-role accepts valid args" accept storage-set-role data compute
+check "storage-set-auto accepts valid args" accept storage-set-auto data off
+check "storage-set-compute accepts volume name" accept storage-set-compute data
+check "storage-set-compute accepts none" accept storage-set-compute none
+check "storage-remove accepts valid name" accept storage-remove data
+check "storage-attach accepts valid args" accept storage-attach --name bulk --dev /dev/nvme1n1p1 --role shared
+check "storage-format accepts valid args" accept storage-format --name scratch --dev /dev/nvme2n1 --fs btrfs --role compute --encrypt luks
+check "storage-array accepts valid args" accept storage-array --name pool0 --devs /dev/nvme1n1,/dev/nvme2n1 --raid raid1 --role shared --encrypt none
+check "storage kinds finish" idle
+check "storage-mount ran locachy-storage mount" grep -q "locachy-storage mount data_1.0-a \[2\]" "$t/calls"
+check "storage-umount ran locachy-storage umount" grep -q "locachy-storage umount data_1.0-a \[2\]" "$t/calls"
+check "storage-set-role ran locachy-storage set-role" grep -q "locachy-storage set-role data compute \[3\]" "$t/calls"
+check "storage-set-auto ran locachy-storage set-auto" grep -q "locachy-storage set-auto data off \[3\]" "$t/calls"
+check "storage-set-compute ran locachy-storage set-compute-storage data" grep -q "locachy-storage set-compute-storage data \[2\]" "$t/calls"
+check "storage-set-compute ran locachy-storage set-compute-storage none" grep -q "locachy-storage set-compute-storage none \[2\]" "$t/calls"
+check "storage-remove ran locachy-storage remove" grep -q "locachy-storage remove data \[2\]" "$t/calls"
+check "storage-attach ran locachy-storage create --mode attach" grep -q "locachy-storage create --mode attach --name bulk --dev /dev/nvme1n1p1 --role shared \[9\]" "$t/calls"
+check "storage-format ran locachy-storage create --mode format" grep -q "locachy-storage create --mode format --name scratch --dev /dev/nvme2n1 --fs btrfs --role compute --encrypt luks \[13\]" "$t/calls"
+check "storage-array ran locachy-storage create --mode array" grep -q "locachy-storage create --mode array --name pool0 --devs /dev/nvme1n1,/dev/nvme2n1 --raid raid1 --role shared --encrypt none \[13\]" "$t/calls"
 # The service keeps its own files to root (umask 077); the files a step
 # writes (mirror lists, pacman.conf, rc.conf) are read by others too.
 check "every step runs with umask 022, not the umask of the service" \

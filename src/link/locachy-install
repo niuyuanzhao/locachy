@@ -6,7 +6,10 @@ partitioning or formatting. The installer publishes the boot image and
 registers its UEFI entry, retaining the removable-media fallback.
 """
 import argparse
+from contextlib import contextmanager, nullcontext
+import fcntl
 import getpass
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -220,6 +223,43 @@ def esp_ours_only(esp):
     return all(str(p.relative_to(esp)) in ESP_FILES for p in esp.rglob("*"))
 
 
+@contextmanager
+def installation_lock(private=False):
+    # One record and one set of target mutations per live session. Never
+    # unlink the lock file: another open of its path must see the same inode.
+    directory = RESUME_RECORD.parent
+    if private:
+        fd = private_lock_fd()
+    else:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if directory.is_symlink():
+            raise ValueError(f"installation state must not be a symlink: {directory}")
+        fd = os.open(directory / "operation.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        if not private:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("Another installation operation is already running") from None
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def private_lock_fd():
+    # The private worker inherits the parent's locked open file description;
+    # it must not open a second one and compete with its own parent.
+    try:
+        fd = int(os.environ.pop("LOCACHY_INSTALL_LOCK_FD", ""))
+        if fd < 3 or not os.path.samestat(os.fstat(fd), (RESUME_RECORD.parent / "operation.lock").lstat()):
+            raise ValueError
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.set_inheritable(fd, False)
+        return fd
+    except (OSError, ValueError):
+        raise ValueError("The private installer requires the live installer's operation lock") from None
+
+
 def read_resume_record():
     try:
         record = json.loads(RESUME_RECORD.read_text(encoding="utf-8"))
@@ -267,11 +307,16 @@ def safe_arguments(args):
         values.pop(key, None)
     argv = []
     for key, value in values.items():
-        if value is None or value is False or value == "":
+        if value is None or value is False or value == "" or value == []:
+            continue
+        if key == "winmaint_gib" and not getattr(args, "winmaint_disk", None):
             continue
         option = "--" + key.replace("_", "-")
         if value is True:
             argv.append(option)
+        elif isinstance(value, list):
+            for item in value:
+                argv.extend((option, str(item)))
         else:
             argv.extend((option, str(value)))
     if args.copy_network is False:
@@ -279,44 +324,116 @@ def safe_arguments(args):
     return argv
 
 
-def write_resume_record(install_id, root, argv, args, phase="target"):
-    INSTALL_STATE.write_json(RESUME_RECORD, {"schema": 2, "phase": phase, "install_id": install_id,
-                             "root": str(root), "argv": argv, "update_repo": args.update_repo or "",
-                             "update_branch": args.update_branch or "", "apps_repo": args.apps_repo or "",
-                             "apps_branch": args.apps_branch or "", "apps_commit": apps_meta().get("commit", ""),
-                             "source": source_revision()})
-    # Its app presets beside it, as long as it can be continued: before the
-    # target has its own copy, a continued run installs from these (pinned).
-    # A run without app presets (a medium from before them, none fetched)
-    # keeps none, and leaves none of an earlier run.
-    if apps_catalog() != RESUME_APPS:
-        if apps_meta():
-            APPS.copy_catalog(str(apps_catalog()), str(RESUME_APPS))
-        else:
-            shutil.rmtree(RESUME_APPS, ignore_errors=True)
+def catalog_digest(catalog):
+    if catalog is None or not os.path.lexists(catalog):
+        return None
+    presets = APPS.read_catalog(catalog)
+    meta = APPS.read_meta(catalog)
+    # copy_catalog changes the installation timestamp, not the catalog inputs.
+    meta.pop("installed", None)
+    return INSTALL_STATE.digest({"meta": meta, "presets": INSTALL_STATE.files_digest(
+        catalog, [Path(path).name for path in presets.values()])})
 
 
-def resume_catalog(root):
-    """The app presets a continued installation installs from: its target's,
-    else those kept beside its record; None without either (or with one that
-    cannot be read, such as an empty one an older installer kept)."""
-    for catalog in (root / APPS_CATALOG, RESUME_APPS):
+def write_resume_record(install_id, root, argv, args, phase="target", mounts=None):
+    if not re.fullmatch(r"[0-9a-f]{32}", install_id):
+        raise ValueError("Invalid installation ID")
+    catalog = apps_catalog()
+    fingerprint = catalog_digest(catalog)
+    if fingerprint is not None:
+        # Use a separate snapshot for each install ID. Publishing the new
+        # record is the only switch; the previous record's pin stays intact
+        # if staging or publication fails.
+        pinned = RESUME_APPS.with_name(f"{RESUME_APPS.name}.{install_id}")
+        if not os.path.lexists(pinned):
+            APPS.copy_catalog(str(catalog), str(pinned))
+        if catalog_digest(pinned) != fingerprint:
+            raise ValueError("The installation's pinned app catalog does not match its inputs")
+    else:
+        pinned = None
+    record = {"schema": 2, "phase": phase, "install_id": install_id,
+              "root": str(root), "argv": argv, "update_repo": args.update_repo or "",
+              "update_branch": args.update_branch or "", "apps_repo": args.apps_repo or "",
+              "apps_branch": args.apps_branch or "", "apps_commit": apps_meta().get("commit", ""),
+              "apps_catalog_path": str(pinned) if pinned is not None else None,
+              "apps_catalog_digest": fingerprint, "source": source_revision()}
+    if mounts is not None:
+        record["mounts"] = mounts
+    INSTALL_STATE.write_json(RESUME_RECORD, record)
+    return record
+
+
+def legacy_resume_catalog(record):
+    """Reopen a valid pre-snapshot record without accepting a newer catalog."""
+    expected = str(record.get("apps_commit") or "")
+    candidates = []
+    root = record.get("root")
+    if root and record.get("phase") != "preflight":
+        candidates.append(Path(root) / APPS_CATALOG)
+    candidates.append(RESUME_APPS)
+    for path in candidates:
         try:
-            if APPS.read_meta(str(catalog)):
-                return catalog
+            if catalog_digest(path) is None:
+                continue
+            meta = APPS.read_meta(str(path))
+            if expected and meta.get("commit", "") != expected:
+                continue
+            return path
         except (OSError, ValueError):
-            pass
+            continue
+    if expected:
+        raise ValueError("The older installation record's app catalog is missing or changed; refusing a newer one")
     return None
+
+
+def resume_catalog(record):
+    """Open the exact snapshot, or a validated pre-snapshot selection."""
+    if "apps_catalog_digest" not in record and "apps_catalog_path" not in record:
+        return legacy_resume_catalog(record)
+    fingerprint = record.get("apps_catalog_digest")
+    path = record.get("apps_catalog_path")
+    if fingerprint is None:
+        if path is not None:
+            raise ValueError("The installation's app catalog pin is damaged")
+        return None
+    if path != (str(RESUME_APPS) + "." + record["install_id"]):
+        raise ValueError("The installation's app catalog pin has an unexpected path")
+    try:
+        if catalog_digest(Path(path)) == fingerprint:
+            return Path(path)
+    except (OSError, ValueError):
+        pass
+    raise ValueError("The installation's pinned app catalog is missing or changed")
+
+
+def use_resume_catalog(record):
+    pinned = resume_catalog(record)
+    # Presence, rather than truthiness, distinguishes an explicit no-catalog
+    # selection from a legacy medium that should supply its bundled catalog.
+    os.environ["LOCACHY_APPS_CATALOG"] = str(pinned) if pinned is not None else ""
+    os.environ["LOCACHY_APPS"] = ""
+
+
+def target_identities(root_fs, esp_fs):
+    """Filesystem identities, independent of changing /dev names or major/minor numbers."""
+    identities = {}
+    for role, fs in (("root", root_fs), ("esp", esp_fs)):
+        uuid_value = output(["blkid", "-p", "-s", "UUID", "-o", "value", fs["source"]])
+        if not uuid_value:
+            raise ValueError(f"Cannot identify the target {role} filesystem: {fs['source']}")
+        identities[role] = uuid_value
+    return identities
 
 
 def resumed_target(record):
     """The target of the recorded installation, still mounted and still its."""
-    root = Path(record["root"])
+    root = Path(record.get("root", ""))
     marker = root / ".locachy-installer/install-id"
     try:
-        if not os.path.ismount(root) or marker.read_text(encoding="utf-8").strip() != record["install_id"]:
+        if not root.is_absolute() or not os.path.ismount(root) or marker.is_symlink() or marker.parent.is_symlink() or \
+                marker.read_text(encoding="utf-8").strip() != record["install_id"]:
             raise OSError
-    except OSError:
+    except (OSError, UnicodeError):
         raise ValueError(f"{root} is not that installation's target (not mounted, or another's)")
     return root
 
@@ -337,6 +454,27 @@ def partition_child(disk, number):
     return f"{disk}{sep}{number}"
 
 
+def same_device_path(a, b):
+    """Whether two device paths name the same block device (symlinks resolved)."""
+    if not a or not b:
+        return False
+    return a == b or os.path.realpath(a) == os.path.realpath(b)
+
+
+def disk_size_bytes(disk):
+    """The size of a whole disk in bytes (blockdev, else lsblk)."""
+    try:
+        return int(output(["blockdev", "--getsize64", disk]))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        devices = block_devices(disk)
+        return int(devices[0].get("size") or 0) if devices else 0
+
+
+def winmaint_tail_mib(args):
+    """The tail Maintenance Windows needs on its disk, in MiB: C: and the 128 MiB ESP and 16 MiB MSR."""
+    return int(getattr(args, "winmaint_gib", WINMAINT_DEFAULT_GIB) or WINMAINT_DEFAULT_GIB) * 1024 + WINMAINT_OVERHEAD_MIB
+
+
 def prepare_partitions(args, passphrase=None):
     """Partition/format target block devices when --disk or --format-root/--format-esp
     are given, optionally wrapping root and swap in LUKS2 (locachy-crypt and
@@ -345,13 +483,24 @@ def prepare_partitions(args, passphrase=None):
         disk = args.disk
         if not disk.startswith("/dev/"):
             raise ValueError("Disk must be a /dev/ block device: " + disk)
-        swap_gib = getattr(args, "swap_gib", 8)
-        sfdisk_script = f"label: gpt\n,512M,U\n"
-        if swap_gib and swap_gib > 0:
-            sfdisk_script += f",{int(swap_gib)}G,S\n,+,L\n"
+        swap_gib = getattr(args, "swap_gib", 8) or 0
+        winmaint_disk = getattr(args, "winmaint_disk", None) or ""
+        tail_mib = winmaint_tail_mib(args) if winmaint_disk and same_device_path(winmaint_disk, disk) else 0
+        sfdisk_script = "label: gpt\n,512M,U\n"
+        if tail_mib:
+            # The root ends where the Maintenance Windows tail begins: locachy-winmaint appends it there.
+            used_mib = 1 + 512 + (int(swap_gib) * 1024 if swap_gib > 0 else 0)
+            root_mib = disk_size_bytes(disk) // (1 << 20) - used_mib - tail_mib - 2
+            if root_mib < (MIN_ROOT_BYTES >> 20):
+                raise ValueError(f"{disk}: no room for the root beside the {tail_mib} MiB Maintenance Windows tail")
+            root_line = f",{root_mib}M,L\n"
+        else:
+            root_line = ",+,L\n"
+        if swap_gib > 0:
+            sfdisk_script += f",{int(swap_gib)}G,S\n{root_line}"
             esp_part, swap_part, root_part = partition_child(disk, 1), partition_child(disk, 2), partition_child(disk, 3)
         else:
-            sfdisk_script += ",+,L\n"
+            sfdisk_script += root_line
             esp_part, swap_part, root_part = partition_child(disk, 1), None, partition_child(disk, 2)
         run(["sfdisk", "--wipe", "always", disk], input=sfdisk_script, text=True)
         run(["udevadm", "settle"])
@@ -467,15 +616,16 @@ def source_line():
 
 
 def apps_catalog():
-    """The app presets' catalog this run installs from: LOCACHY_APPS_CATALOG
-    (the live entry's; continued, the target's own), else the medium's."""
-    return Path(os.environ.get("LOCACHY_APPS_CATALOG") or MEDIUM_APPS_CATALOG)
+    """The selected catalog path; an explicit empty selection means none."""
+    path = os.environ.get("LOCACHY_APPS_CATALOG", MEDIUM_APPS_CATALOG)
+    return Path(path) if path else None
 
 
 def apps_meta():
     """Where that catalog came from (its CATALOG); {} without one."""
+    catalog = apps_catalog()
     try:
-        return APPS.read_meta(apps_catalog())
+        return APPS.read_meta(catalog) if catalog is not None else {}
     except (OSError, ValueError):
         return {}
 
@@ -642,8 +792,159 @@ ESP_BYTES = 512 << 20
 # default modules 5.4 GiB with 1.3 GiB of package cache;
 # the build's workspace comes on top while it runs.
 MIN_ROOT_BYTES = 16 << 30
+# What prepare_partitions' layout takes besides its partitions: the 1 MiB
+# before the first one and the 2 MiB it keeps free at the end.
+DISK_SLACK_BYTES = 3 << 20
+STORAGE_ROLES = ("shared", "data", "compute")
+STORAGE_RAIDS = ("single", "raid0", "raid1", "raid10")
+STORAGE_MODES = ("format", "attach", "array")
+STORAGE_FORMAT_FS = ("ext4", "btrfs")
+STORAGE_ATTACH_FS = ("ext4", "btrfs", "xfs", "ntfs", "exfat", "vfat")
+STORAGE_ENCRYPT = ("auto", "luks", "none")
+VOLUME_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+
+
+def winmaint_default_gib():
+    """Maintenance Windows' Windows C: size by default: winmaint_size_gib in this source's rc.conf,
+    the default locachy-winmaint reads too (its DEFAULT_WIN_C_GIB), else 48."""
+    try:
+        for line in (SOURCE / "rc.conf").read_text(encoding="utf-8").splitlines():
+            found = re.fullmatch(r'winmaint_size_gib="(\d+)"\s*', line)
+            if found:
+                return int(found.group(1))
+    except OSError:
+        pass
+    return 48
+
+
+# Maintenance Windows (locachy-winmaint): the Windows C: size in GiB, and the
+# tail it needs beside it (a 128 MiB ESP, a 16 MiB MSR, alignment slack).
+WINMAINT_MIN_GIB = 40
+WINMAINT_DEFAULT_GIB = winmaint_default_gib()
+WINMAINT_MAX_GIB = 4096
+WINMAINT_OVERHEAD_MIB = 256
+# locachy-winmaint's GPT partition names: it finds its triplet by them.
+WINMAINT_PART_LABELS = ("LOCACHY_WIN_ESP", "LOCACHY_WIN_MSR", "LOCACHY_WIN_C")
 KEYMAPS = "/usr/share/kbd/keymaps"
 ZONEINFO = "/usr/share/zoneinfo"
+
+
+def parse_extra_volumes(specs, encrypt_root=False):
+    """Parse and validate repeatable --extra-volume key=value specs."""
+    allowed_keys = {"name", "mode", "dev", "devs", "fs", "raid", "role", "encrypt", "compute_storage"}
+    volumes = []
+    seen_names = set()
+    compute_owners = []
+    for raw in specs or []:
+        text = (raw or "").strip()
+        if not text:
+            raise ValueError("--extra-volume: empty specification")
+        kv = {}
+        for part in text.split(","):
+            tok = part.strip()
+            if not tok or "=" not in tok:
+                raise ValueError(f"--extra-volume: expected key=value in {raw!r}")
+            k, v = (x.strip() for x in tok.split("=", 1))
+            if k not in allowed_keys:
+                raise ValueError(f"--extra-volume: unknown key {k!r} in {raw!r}")
+            if k in kv:
+                raise ValueError(f"--extra-volume: duplicate key {k!r} in {raw!r}")
+            kv[k] = v
+        name = kv.get("name", "")
+        if not VOLUME_NAME_RE.fullmatch(name):
+            raise ValueError(f"--extra-volume: invalid volume name {name!r}")
+        if name in seen_names:
+            raise ValueError(f"--extra-volume: duplicate volume name {name!r}")
+        seen_names.add(name)
+
+        mode = kv.get("mode", "")
+        if mode not in STORAGE_MODES:
+            raise ValueError(f"--extra-volume {name}: mode must be one of {', '.join(STORAGE_MODES)}")
+
+        role = kv.get("role", "shared")
+        if role not in STORAGE_ROLES:
+            raise ValueError(f"--extra-volume {name}: role must be one of {', '.join(STORAGE_ROLES)}")
+
+        cs_raw = kv.get("compute_storage", "0")
+        if cs_raw not in ("0", "1"):
+            raise ValueError(f"--extra-volume {name}: compute_storage must be 0 or 1")
+        compute_storage = cs_raw == "1"
+        if compute_storage:
+            if role not in ("shared", "compute"):
+                raise ValueError(
+                    f"--extra-volume {name}: compute_storage=1 requires role 'shared' or 'compute', not {role!r}"
+                )
+            compute_owners.append(name)
+
+        if mode == "format":
+            if "devs" in kv or "raid" in kv:
+                raise ValueError(f"--extra-volume {name}: mode=format does not accept devs or raid")
+            dev = kv.get("dev", "")
+            if not dev.startswith("/dev/"):
+                raise ValueError(f"--extra-volume {name}: mode=format requires dev=/dev/...")
+            fs = kv.get("fs", "ext4")
+            if fs not in STORAGE_FORMAT_FS:
+                raise ValueError(f"--extra-volume {name}: mode=format fs must be ext4 or btrfs")
+            enc = kv.get("encrypt", "auto")
+            if enc not in STORAGE_ENCRYPT:
+                raise ValueError(f"--extra-volume {name}: encrypt must be auto, luks or none")
+            eff_enc = ("luks" if encrypt_root else "none") if enc == "auto" else enc
+            volumes.append({"name": name, "mode": mode, "devs": [dev], "fs": fs, "raid": "", "role": role,
+                            "encrypt": enc, "effective_encrypt": eff_enc, "compute_storage": compute_storage})
+        elif mode == "attach":
+            if "devs" in kv or "fs" in kv or "raid" in kv:
+                raise ValueError(f"--extra-volume {name}: mode=attach does not accept devs, fs or raid")
+            if "encrypt" in kv and kv["encrypt"] not in ("", "none", "auto"):
+                raise ValueError(f"--extra-volume {name}: mode=attach preserves existing data and cannot set encrypt={kv['encrypt']}")
+            dev = kv.get("dev", "")
+            if not dev.startswith("/dev/"):
+                raise ValueError(f"--extra-volume {name}: mode=attach requires dev=/dev/...")
+            volumes.append({"name": name, "mode": mode, "devs": [dev], "fs": "", "raid": "", "role": role,
+                            "encrypt": "none", "effective_encrypt": "none", "compute_storage": compute_storage})
+        else:  # array
+            if "dev" in kv:
+                raise ValueError(f"--extra-volume {name}: mode=array requires devs=DEV1+DEV2..., not dev")
+            devs = [d.strip() for d in kv.get("devs", "").split("+") if d.strip()]
+            if not devs or any(not d.startswith("/dev/") for d in devs):
+                raise ValueError(f"--extra-volume {name}: mode=array requires '+'-separated /dev/... paths in devs")
+            if len(set(devs)) != len(devs):
+                raise ValueError(f"--extra-volume {name}: duplicate device in array devs")
+            fs = kv.get("fs", "btrfs")
+            if fs != "btrfs":
+                raise ValueError(f"--extra-volume {name}: mode=array only supports fs=btrfs")
+            raid = kv.get("raid", "raid1")
+            if raid not in STORAGE_RAIDS:
+                raise ValueError(f"--extra-volume {name}: raid must be one of {', '.join(STORAGE_RAIDS)}")
+            min_devs = 4 if raid == "raid10" else 2
+            if len(devs) < min_devs:
+                raise ValueError(f"--extra-volume {name}: raid={raid} requires at least {min_devs} disks")
+            enc = kv.get("encrypt", "auto")
+            if enc not in STORAGE_ENCRYPT:
+                raise ValueError(f"--extra-volume {name}: encrypt must be auto, luks or none")
+            eff_enc = ("luks" if encrypt_root else "none") if enc == "auto" else enc
+            volumes.append({"name": name, "mode": mode, "devs": devs, "fs": "btrfs", "raid": raid, "role": role,
+                            "encrypt": enc, "effective_encrypt": eff_enc, "compute_storage": compute_storage})
+
+    if len(compute_owners) > 1:
+        raise ValueError("At most one --extra-volume may set compute_storage=1 (got: " + ", ".join(compute_owners) + ")")
+    return volumes
+
+
+def extra_volume_packages(args):
+    """Packages the storage options need: btrfs-progs (Btrfs volumes and arrays), cryptsetup (LUKS
+    volumes), and, with Maintenance Windows, dosfstools and mtools (its ESP and tools; the QEMU
+    runner's own packages stay with the winmaint module)."""
+    pkgs = []
+    vols = parse_extra_volumes(getattr(args, "extra_volume", None) or [],
+                               encrypt_root=bool(getattr(args, "encrypt", False)))
+    for v in vols:
+        if (v["mode"] == "array" or v["fs"] == "btrfs") and "btrfs-progs" not in pkgs:
+            pkgs.append("btrfs-progs")
+        if v["effective_encrypt"] == "luks" and "cryptsetup" not in pkgs:
+            pkgs.append("cryptsetup")
+    if getattr(args, "winmaint_disk", None):
+        pkgs.extend(p for p in ("dosfstools", "mtools") if p not in pkgs)
+    return pkgs
 
 
 def default_features(language):
@@ -666,7 +967,10 @@ def presets(source_dir=None, catalog=None):
     for p in sorted(sdir.glob("*.conf")) if sdir.is_dir() else []:
         if re.search(r'^host="1"\s*$', p.read_text(encoding="utf-8"), re.M):
             found[p.stem] = (p, True)
-    for name, path in APPS.read_catalog(catalog or apps_catalog()).items():
+    catalog = catalog if catalog is not None else apps_catalog()
+    if catalog is None:
+        return found
+    for name, path in APPS.read_catalog(catalog).items():
         p = Path(path)
         host = APPS.conf_values(p.read_text(encoding="utf-8")).get("host") == "1"
         found.setdefault(name, (p, host))
@@ -723,12 +1027,36 @@ def live_disks():
     return used
 
 
-LSBLK_COLUMNS = "PATH,MAJ:MIN,TYPE,SIZE,MODEL,TRAN,RM,RO,FSTYPE,LABEL,PARTTYPENAME,MOUNTPOINTS"
+LSBLK_COLUMNS = ("PATH,MAJ:MIN,TYPE,SIZE,START,LOG-SEC,PTTYPE,MODEL,SERIAL,TRAN,RM,RO,FSTYPE,LABEL,"
+                 "PARTLABEL,PARTTYPENAME,MOUNTPOINTS")
 
 
 def block_devices(path=None):
     return json.loads(output(["lsblk", "--json", "--bytes", "--tree", "--output", LSBLK_COLUMNS]
                              + ([path] if path else []))).get("blockdevices", [])
+
+
+def winmaint_partition(node):
+    """Whether an lsblk node is one of locachy-winmaint's partitions (by its GPT name)."""
+    return node.get("type") == "part" and (node.get("partlabel") or "") in WINMAINT_PART_LABELS
+
+
+def winmaint_free_tail(dev):
+    """The free bytes at the end of a disk with 512-byte sectors, as locachy-winmaint create
+    measures them (its free_tail_sectors): from the first 1 MiB boundary after the last
+    partition (1 MiB on a disk with none; one without a partition table gets an empty GPT
+    first) to the last sector before the backup GPT. Free space between partitions does not
+    count. None when a partition's start is unknown."""
+    last_lba = int(dev.get("size") or 0) // 512 - 34
+    start = 2048
+    for child in dev.get("children") or []:
+        if child.get("type") != "part":
+            continue
+        if child.get("start") is None:
+            return None
+        end = int(child["start"]) + int(child.get("size") or 0) // 512 - 1
+        start = max(start, (end + 2048) // 2048 * 2048)
+    return max(0, last_lba - start + 1) * 512
 
 
 def in_use(device):
@@ -755,11 +1083,21 @@ def disks():
     for d in block_devices():
         if d.get("type") != "disk" or d.get("ro") or d["path"].startswith("/dev/zram") or d.get("maj:min") in live:
             continue
+        pttype = (d.get("pttype") or "").lower()
+        log_sec = int(d.get("log-sec") or 512)
+        parts = [c for c in d.get("children") or [] if c.get("type") == "part"]
+        # The free tail Maintenance Windows can use: GPT (or no table yet) with 512-byte sectors only.
+        measurable = log_sec == 512 and (pttype == "gpt" or (not pttype and not parts and not d.get("fstype")))
         found.append({"path": d["path"], "size": int(d.get("size") or 0), "model": (d.get("model") or "").strip(),
+                      "serial": (d.get("serial") or "").strip(),
                       "tran": d.get("tran") or "", "removable": bool(d.get("rm")), "in_use": in_use(d),
+                      "pttype": pttype, "log_sec": log_sec, "fstype": d.get("fstype") or "",
+                      "free_tail": winmaint_free_tail(d) if measurable else None,
+                      "maintenance_windows": any(winmaint_partition(c) for c in parts),
                       "children": [{"path": c["path"], "type": c.get("type") or "", "size": int(c.get("size") or 0),
                                     "fstype": c.get("fstype") or "", "label": c.get("label") or "",
                                     "parttypename": c.get("parttypename") or "",
+                                    "maintenance_windows": winmaint_partition(c),
                                     "mountpoints": [p for p in c.get("mountpoints") or [] if p]}
                                    for c in d.get("children") or []]})
     return found
@@ -769,6 +1107,7 @@ def check_targets(args):
     """The block devices given, before anything is written: whole disks or
     partitions that are not the live system's, not in use and large enough."""
     live = live_disks()
+    primary_ancestors = set()
 
     def device(path, kind):
         if not (path or "").startswith("/dev/"):
@@ -777,7 +1116,10 @@ def check_targets(args):
             dev = block_devices(path)[0]
         except (IndexError, subprocess.SubprocessError, ValueError):
             raise ValueError(f"{path}: no such block device")
-        if dev.get("type") != kind:
+        if isinstance(kind, tuple):
+            if dev.get("type") not in kind:
+                raise ValueError(f"{path}: unexpected block device type {dev.get('type')}")
+        elif dev.get("type") != kind:
             raise ValueError(f"{path}: not a {'whole disk' if kind == 'disk' else 'partition'}")
         if dev.get("ro"):
             raise ValueError(f"{path}: read-only")
@@ -787,19 +1129,224 @@ def check_targets(args):
         if why:
             raise ValueError(why)
         return dev
+
     if args.disk:
         dev = device(args.disk, "disk")
-        need = ESP_BYTES + max(args.swap_gib, 0) * (1 << 30) + MIN_ROOT_BYTES
+        if any(winmaint_partition(c) for c in dev.get("children") or []):
+            raise ValueError(f"{args.disk}: holds Maintenance Windows partitions; installing here would erase them")
+        primary_ancestors |= ancestors(args.disk)
+        need = DISK_SLACK_BYTES + ESP_BYTES + max(args.swap_gib, 0) * (1 << 30) + MIN_ROOT_BYTES
         if int(dev.get("size") or 0) < need:
-            raise ValueError(f"{args.disk}: {int(dev.get('size') or 0) >> 30} GiB, at least {need >> 30} GiB are needed")
+            raise ValueError(f"{args.disk}: {int(dev.get('size') or 0) >> 30} GiB, "
+                             f"at least {gib_up(need)} GiB are needed")
     elif args.format_root:
         paths = [p for p in (args.format_esp, args.format_root, args.format_swap) if p]
         if len(set(paths)) != len(paths):
             raise ValueError("The ESP, root and swap partitions must be different")
+        identities = set()
         for path in paths:
             dev = device(path, "part")
+            identity = dev.get("maj:min") or os.path.realpath(path)
+            if identity in identities:
+                raise ValueError("The ESP, root and swap partitions must be different")
+            identities.add(identity)
+            if winmaint_partition(dev):
+                raise ValueError(f"{path}: a Maintenance Windows partition; installing here would erase it")
+            primary_ancestors |= ancestors(path)
             if path == args.format_root and int(dev.get("size") or 0) < MIN_ROOT_BYTES:
                 raise ValueError(f"{path}: the root needs at least {MIN_ROOT_BYTES >> 30} GiB")
+    elif getattr(args, "root", None) and getattr(args, "esp", None):
+        for mpath in (args.root, args.esp):
+            try:
+                fs = filesystem(canonical(mpath))
+                if fs["source"].startswith("/dev/"):
+                    primary_ancestors |= ancestors(fs["source"])
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+
+    vols = parse_extra_volumes(getattr(args, "extra_volume", None) or [],
+                               encrypt_root=bool(getattr(args, "encrypt", False)))
+    completed_vols = set()
+    if vols and getattr(args, "resume", False) and getattr(args, "root", None):
+        completed_vols = checked_extra_volumes(Path(args.root), vols)
+
+    used_whole_disks = set()
+    used_ancestors = set()
+    used_devices = set()
+
+    for vol in vols:
+        if vol["name"] in completed_vols:
+            for dev_path in vol["devs"]:
+                anc = ancestors(dev_path)
+                used_ancestors |= anc
+                if vol["mode"] != "attach":
+                    used_whole_disks |= anc
+            continue
+        mode = vol["mode"]
+        array_ancestors = set()
+        for dev_path in vol["devs"]:
+            if mode in ("format", "array"):
+                dev = device(dev_path, "disk")
+                if any(winmaint_partition(c) for c in dev.get("children") or []):
+                    raise ValueError(f"--extra-volume {vol['name']}: {dev_path} holds Maintenance Windows partitions; "
+                                     "locachy-storage never formats it")
+            else:
+                dev = device(dev_path, ("part", "disk"))
+                if winmaint_partition(dev) or any(winmaint_partition(c) for c in dev.get("children") or []):
+                    raise ValueError(f"--extra-volume {vol['name']}: {dev_path} is a Maintenance Windows partition "
+                                     "or holds them; locachy-storage never attaches it")
+                fstype = (dev.get("fstype") or "").strip()
+                ptype = (dev.get("parttypename") or "").lower()
+                if fstype == "swap" or "swap" in ptype or "efi system" in ptype:
+                    raise ValueError(f"--extra-volume {vol['name']}: {dev_path} cannot be attached (swap or EFI partition)")
+                if fstype not in STORAGE_ATTACH_FS:
+                    raise ValueError(
+                        f"--extra-volume {vol['name']}: {dev_path} has unsupported or missing filesystem {fstype!r}"
+                    )
+            anc = ancestors(dev_path)
+            dev_id = dev.get("maj:min") or dev_path
+            if primary_ancestors and (anc & primary_ancestors):
+                raise ValueError(f"--extra-volume {vol['name']}: {dev_path} overlaps the primary system disk")
+            if mode == "array" and (anc & array_ancestors):
+                raise ValueError(
+                    f"--extra-volume {vol['name']}: {dev_path} shares a physical disk with another array member"
+                )
+            if mode in ("format", "array"):
+                if anc & used_ancestors:
+                    raise ValueError(f"--extra-volume {vol['name']}: {dev_path} is already used by another volume")
+                used_whole_disks |= anc
+            else:
+                if dev_id in used_devices or (anc & used_whole_disks):
+                    raise ValueError(f"--extra-volume {vol['name']}: {dev_path} is already used by another volume")
+                if dev.get("type") == "disk":
+                    used_whole_disks |= anc
+            used_devices.add(dev_id)
+            used_ancestors |= anc
+            if mode == "array":
+                array_ancestors |= anc
+    check_winmaint(args, primary_ancestors=primary_ancestors,
+                   created_volumes=completed_vols)
+
+
+def gib_up(size):
+    """Bytes as whole GiB, rounded up: a least size is never understated."""
+    return (size + (1 << 30) - 1) >> 30
+
+
+def recorded_maintenance_windows(root):
+    """Read existing target metadata; an unreadable record is not an empty disk."""
+    path = Path(root) / "var/lib/locachy/winmaint/state.json"
+    if not os.path.lexists(path):
+        return None
+    try:
+        if path.is_symlink():
+            raise ValueError("unexpected symlink")
+        state = json.loads(path.read_text(encoding="utf-8"))
+        disk, sectors = state["disk"], state["partitions"]["c"]["sectors"]
+        gib, remainder = divmod(sectors * 512, 1 << 30)
+        if state.get("schema") != 1 or not isinstance(disk, str) or not disk.startswith("/dev/") or remainder or gib < 1:
+            raise ValueError("invalid Maintenance Windows record")
+        return state, disk, gib
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ValueError(f"{path}: Maintenance Windows is recorded on the target but cannot be read ({error})") from error
+
+
+def matching_maintenance_windows(args, root):
+    recorded = recorded_maintenance_windows(root)
+    if recorded is None:
+        return None
+    state, disk, gib = recorded
+    if not same_device_path(disk, args.winmaint_disk) or gib != int(args.winmaint_gib):
+        raise ValueError(f"Maintenance Windows is already configured on the target ({disk}, {gib} GiB) and is kept; "
+                         "a continued installation cannot change it")
+    return state
+
+
+def check_winmaint(args, primary_ancestors=None, created_volumes=()):
+    """--winmaint-disk, before anything is written: a whole disk with 512-byte logical sectors
+    (locachy-winmaint reads its GPT in 512-byte sectors) that is not the live medium's and has
+    room for the Maintenance Windows tail: the system disk (--disk; partitioning reserves the
+    tail), a secondary disk a mode=format extra volume formats (locachy-storage reserves the
+    tail, leaving at least 1 GiB for the volume), or any other disk not claimed by a Btrfs
+    array: a GPT disk, or one without a partition table or filesystem (it gets an empty GPT),
+    with enough unallocated space after its last partition, measured as locachy-winmaint
+    create measures it. A continued installation checks what is on the disk by then (the
+    system disk's partitions, a volume already formatted), so changed --winmaint-disk or
+    --winmaint-gib are checked against what create will find. Once Maintenance Windows is
+    recorded in the target it is kept, never recreated: a continued installation must then
+    name that same disk and size."""
+    disk = getattr(args, "winmaint_disk", None)
+    if not disk:
+        return
+    if not disk.startswith("/dev/"):
+        raise ValueError("--winmaint-disk must be a /dev/ block device: " + disk)
+    if getattr(args, "resume", False) and getattr(args, "root", None):
+        if matching_maintenance_windows(args, Path(args.root)) is not None:
+            return
+    try:
+        dev = block_devices(disk)[0]
+    except (IndexError, subprocess.SubprocessError, ValueError):
+        raise ValueError(f"--winmaint-disk {disk}: no such block device")
+    if dev.get("type") != "disk":
+        raise ValueError(f"--winmaint-disk {disk}: not a whole disk")
+    if dev.get("ro"):
+        raise ValueError(f"--winmaint-disk {disk}: read-only")
+    anc = ancestors(disk)
+    if anc & live_disks():
+        raise ValueError(f"--winmaint-disk {disk}: on the running system's or the live medium's disk")
+    on_resumed_primary = bool(getattr(args, "resume", False) and primary_ancestors and (anc & primary_ancestors))
+    if not on_resumed_primary:
+        why = in_use(dev)
+        if why:
+            raise ValueError("--winmaint-disk: " + why)
+    log_sec = int(dev.get("log-sec") or 512)
+    if log_sec != 512:
+        raise ValueError(f"--winmaint-disk {disk}: {log_sec}-byte logical sectors; Maintenance Windows "
+                         "needs a disk with 512-byte sectors")
+    tail = winmaint_tail_mib(args) << 20
+    size = int(dev.get("size") or 0)
+    if args.disk and same_device_path(disk, args.disk):
+        need = DISK_SLACK_BYTES + ESP_BYTES + max(args.swap_gib, 0) * (1 << 30) + MIN_ROOT_BYTES + tail
+        if size < need:
+            raise ValueError(f"{disk}: {size >> 30} GiB, at least {gib_up(need)} GiB are needed with Maintenance Windows")
+        return
+    shared_format = None
+    for vol in parse_extra_volumes(getattr(args, "extra_volume", None) or [],
+                                   encrypt_root=bool(getattr(args, "encrypt", False))):
+        if any(ancestors(path) & anc for path in vol["devs"]):
+            if vol["mode"] == "array":
+                raise ValueError(f"--winmaint-disk {disk}: cannot share a disk with array volume {vol['name']}")
+            if vol["mode"] == "format" and vol["name"] not in created_volumes:
+                shared_format = vol
+    if shared_format is not None:
+        # locachy-storage --mode format --reserve-tail-mib wipes and partitions the disk,
+        # requiring at least 1 GiB for the volume plus GPT overhead plus the reserved tail.
+        need = (1 << 30) + tail + (4 << 20)
+        if size < need:
+            raise ValueError(
+                f"--winmaint-disk {disk}: {size >> 30} GiB, at least {gib_up(need)} GiB are needed "
+                f"for volume {shared_format['name']} and Maintenance Windows"
+            )
+        return
+    parts = [c for c in dev.get("children") or [] if c.get("type") == "part"]
+    pttype = (dev.get("pttype") or "").lower()
+    if not pttype and not parts and dev.get("fstype"):
+        raise ValueError(f"--winmaint-disk {disk}: has an existing {dev.get('fstype')} filesystem; refusing to overwrite")
+    if pttype and pttype != "gpt":
+        raise ValueError(f"--winmaint-disk {disk}: has {'an MBR (dos)' if pttype == 'dos' else 'a ' + pttype} "
+                         "partition table; Maintenance Windows needs a GPT disk")
+    if not pttype and parts:
+        raise ValueError(f"--winmaint-disk {disk}: its partition table type is unknown; Maintenance Windows needs a GPT disk")
+    if any(winmaint_partition(c) for c in parts):
+        raise ValueError(f"--winmaint-disk {disk}: already holds Maintenance Windows partitions")
+    free = winmaint_free_tail(dev)
+    if free is None:
+        raise ValueError(f"--winmaint-disk {disk}: a partition's start is unknown, so the space after "
+                         "the last partition cannot be measured")
+    if free < tail:
+        raise ValueError(f"--winmaint-disk {disk}: {free / (1 << 30):.1f} GiB unallocated at the end of the disk, "
+                         f"after its last partition (free space between partitions does not count); "
+                         f"at least {tail / (1 << 30):.1f} GiB are needed")
 
 
 def check_choices(args):
@@ -831,6 +1378,10 @@ def check_choices(args):
         raise ValueError("--tpm needs --encrypt: the TPM unlocks an encrypted disk")
     if args.secure_boot_microsoft and not args.secure_boot:
         raise ValueError("--secure-boot-microsoft goes with --secure-boot")
+    parse_extra_volumes(getattr(args, "extra_volume", None) or [],
+                        encrypt_root=bool(getattr(args, "encrypt", False)))
+    if not WINMAINT_MIN_GIB <= int(args.winmaint_gib) <= WINMAINT_MAX_GIB:
+        raise ValueError(f"--winmaint-gib must be between {WINMAINT_MIN_GIB} and {WINMAINT_MAX_GIB}")
     for option, path in (("--luks-passphrase-file", args.luks_passphrase_file), ("--password-file", args.password_file)):
         if path:
             secret = read_secret(path)
@@ -870,6 +1421,9 @@ def describe(parser):
         "container_defaults": sorted(default_containers({"desktop"})),
         "machines": [{"name": n, "description": d} for n, d in machine_profiles()],
         "repo_sections": list(REPO_SECTIONS),
+        "storage_roles": list(STORAGE_ROLES),
+        "storage_raids": list(STORAGE_RAIDS),
+        "winmaint": {"min_gib": WINMAINT_MIN_GIB, "default_gib": WINMAINT_DEFAULT_GIB, "max_gib": WINMAINT_MAX_GIB},
         "keymaps": keymaps(), "timezones": timezones(),
         "tpm": {"usable": usable, "advice": advice, "version": tpm.get("tpm_version", 0),
                 "setup_mode": bool(tpm.get("setup_mode"))},
@@ -930,6 +1484,10 @@ def apply_customizations(args, root):
         if getattr(args, "encrypt", False) and "cryptsetup" not in existing:
             added.append("cryptsetup")
             existing.add("cryptsetup")
+        for pkg in extra_volume_packages(args):
+            if pkg not in existing:
+                added.append(pkg)
+                existing.add(pkg)
         for feat in features:
             for pkg in FEATURE_PACKAGES[feat]:
                 if pkg not in existing:
@@ -969,10 +1527,16 @@ def apply_customizations(args, root):
         copy_network_profiles(root)
 
     rc = root / "etc/locachy/rc.conf"
-    lines = [s for s in rc.read_text().splitlines()
-             if not s.startswith(("service_link=", "debug_link_interface=", "debug_link_mac=", "login_skip=", "language=",
-                                  "update_repo=", "update_branch=", "apps_repo=", "apps_branch=",
-                                  "machine=", "keymap="))]
+    extra_vols = parse_extra_volumes(getattr(args, "extra_volume", None) or [],
+                                     encrypt_root=bool(getattr(args, "encrypt", False)))
+    compute_vol = next((v["name"] for v in extra_vols if v["compute_storage"]), "")
+    drop_rc = ("service_link=", "debug_link_interface=", "debug_link_mac=", "login_skip=", "language=",
+               "update_repo=", "update_branch=", "apps_repo=", "apps_branch=", "machine=", "keymap=")
+    if compute_vol:
+        drop_rc += ("compute_storage=",)
+    if getattr(args, "winmaint_disk", None):
+        drop_rc += ("winmaint_size_gib=",)
+    lines = [s for s in rc.read_text().splitlines() if not s.startswith(drop_rc)]
     if tzone != "auto":
         lines = [s for s in lines if not s.startswith("service_timezone=")]
     if getattr(args, "no_ntp", False):
@@ -1008,6 +1572,10 @@ def apply_customizations(args, root):
         for k, v in FEATURE_RC_MAP.get(feat, {}).items():
             lines = [s for s in lines if not s.startswith(k + "=")]
             lines.append(f'{k}="{v}"')
+    if compute_vol:
+        lines.append(f'compute_storage="{compute_vol}"')
+    if getattr(args, "winmaint_disk", None):
+        lines.append(f'winmaint_size_gib="{int(args.winmaint_gib)}"')
     rc.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # All of the catalog the installed system's (its updates start from it),
@@ -1019,6 +1587,52 @@ def apply_customizations(args, root):
     for cname in containers:
         shutil.copyfile(known[cname][0], conf_dir / f"{cname}.conf")
     return manifest_changed
+
+
+def winmaint_helper():
+    loader = importlib.machinery.SourceFileLoader("winmaint", str(SOURCE / "link/locachy-winmaint"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    helper = importlib.util.module_from_spec(spec)
+    loader.exec_module(helper)
+    return helper
+
+
+def winmaint_container_present(root):
+    path = root / "etc/locachy/containers/winmaint.conf"
+    return not path.is_symlink() and path.is_file() and \
+        'vm_kind="winmaint"' in path.read_text(encoding="utf-8").splitlines()
+
+
+def create_maintenance_windows(args, root):
+    """Create the Windows tail once; finish its target configuration on a retry."""
+    helper = winmaint_helper()
+    state = matching_maintenance_windows(args, root)
+    if state is not None:
+        # The helper saves state after formatting, but before writing the
+        # container configuration. Never rerun partitioning in that window.
+        try:
+            helper.verify_state_against_gpt(state, helper.parse_gpt_disk(args.winmaint_disk))
+        except (OSError, RuntimeError, KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"Maintenance Windows: recorded partitions cannot be verified: {error}") from error
+        print("Maintenance Windows: recorded partitions kept", flush=True)
+    else:
+        try:
+            pttype = output(["blkid", "-p", "-s", "PTTYPE", "-o", "value", args.winmaint_disk])
+        except (OSError, subprocess.SubprocessError):
+            pttype = ""
+        if pttype and pttype != "gpt":
+            raise ValueError(f"Maintenance Windows: unsafe or interrupted disk setup on {args.winmaint_disk}; "
+                             "inspect the disk in the terminal")
+        if not pttype:
+            run(["sfdisk", args.winmaint_disk], input="label: gpt\n", text=True)
+            run(["udevadm", "settle"])
+        run([sys.executable, "-I", str(SOURCE / "link/locachy-winmaint"), "create",
+             "--root", str(root), "--disk", args.winmaint_disk, "--size-gib", str(int(args.winmaint_gib))])
+        if matching_maintenance_windows(args, root) is None:
+            raise RuntimeError("Maintenance Windows: helper did not record the partitions")
+    helper.write_container_conf(root)
+    if not winmaint_container_present(root):
+        raise ValueError("Maintenance Windows: the target container configuration is not a Windows entry")
 
 
 def validate(root_path, esp_path, install_id=None):
@@ -1106,6 +1720,7 @@ def selected_package_roots(args):
         chosen.extend(modules[name].get("requires", []))
     if args.encrypt:
         names.add("cryptsetup")
+    names.update(extra_volume_packages(args))
     known = presets()
     for name in parse_csv_items(args.containers):
         if name not in known:
@@ -1149,6 +1764,120 @@ def trust_install_keys(fingerprints, target=None):
     return install_key_helper().trust(SOURCE, RESUME_RECORD.parent, fingerprints, target)
 
 
+def recorded_extra_volumes(root):
+    path = root / "etc/locachy/volumes.json"
+    if not os.path.lexists(path):
+        return set()
+    try:
+        if path.is_symlink():
+            raise ValueError("unexpected symlink")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        volumes = data["volumes"]
+        if data.get("schema") != 1 or not isinstance(volumes, list) or any(
+                not isinstance(v, dict) or not VOLUME_NAME_RE.fullmatch(v.get("name") or "") for v in volumes):
+            raise ValueError("invalid volume record")
+        return {v["name"] for v in volumes}
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise ValueError(f"Cannot read extra storage records in {path}: {error}") from error
+
+
+def extra_volume_pending(root, name):
+    return root / ".locachy-installer" / f"volume-{name}.pending"
+
+
+def checked_extra_volumes(root, volumes):
+    """An unfinished destructive helper cannot be safely invoked twice."""
+    recorded = recorded_extra_volumes(root)
+    stages = INSTALL_STATE.Stages(root / ".locachy-installer")
+    completed = stages.stages.get("extra-volumes", {}).get("success") is True
+    for volume in volumes:
+        name = volume["name"]
+        if name not in recorded and (completed or os.path.lexists(extra_volume_pending(root, name))):
+            raise ValueError(f"Extra storage volume {name}: previous work has no volume record; "
+                             "inspect the disks in the terminal. Resume will not format them again.")
+    return recorded
+
+
+def apply_extra_volumes(args, root):
+    """Create missing volumes; a recorded volume never goes through format again."""
+    vols = parse_extra_volumes(getattr(args, "extra_volume", None) or [],
+                               encrypt_root=bool(getattr(args, "encrypt", False)))
+    existing_names = checked_extra_volumes(root, vols)
+
+    passphrase_path = ""
+    temp_passphrase = None
+    src_pass = getattr(args, "luks_passphrase_file", None)
+    if src_pass and any(v["effective_encrypt"] == "luks" for v in vols):
+        raw_bytes = Path(src_pass).read_bytes()
+        stripped = raw_bytes.rstrip(b"\r\n")
+        if stripped != raw_bytes:
+            tmp_dir = "/run" if Path("/run").is_dir() and os.access("/run", os.W_OK) else None
+            fd, tmp_name = tempfile.mkstemp(prefix="locachy-vol-pass-", dir=tmp_dir)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(stripped)
+            temp_passphrase = Path(tmp_name)
+            passphrase_path = tmp_name
+        else:
+            passphrase_path = str(src_pass)
+
+    winmaint_disk = getattr(args, "winmaint_disk", None) or ""
+    winmaint_anc = None
+
+    def matches_winmaint_disk(dev_path):
+        nonlocal winmaint_anc
+        if not winmaint_disk:
+            return False
+        if same_device_path(dev_path, winmaint_disk):
+            return True
+        if winmaint_anc is None:
+            try:
+                winmaint_anc = ancestors(winmaint_disk)
+            except (OSError, subprocess.SubprocessError):
+                winmaint_anc = set()
+        if not winmaint_anc:
+            return False
+        try:
+            return bool(ancestors(dev_path) & winmaint_anc)
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    storage_tool = SOURCE / "link/locachy-storage"
+    try:
+        for v in vols:
+            pending = extra_volume_pending(root, v["name"])
+            if v["name"] in existing_names:
+                pending.unlink(missing_ok=True)
+                print(f"Extra storage volume {v['name']}: already recorded in target, skipped", flush=True)
+                continue
+            cmd = [sys.executable, "-I", str(storage_tool), "create",
+                   "--root", str(root), "--no-mount",
+                   "--name", v["name"], "--mode", v["mode"], "--role", v["role"]]
+            if v["mode"] == "array":
+                cmd.extend(["--devs", ",".join(v["devs"]), "--raid", v["raid"],
+                            "--encrypt", v["effective_encrypt"]])
+            elif v["mode"] == "format":
+                cmd.extend(["--dev", v["devs"][0], "--fs", v["fs"],
+                            "--encrypt", v["effective_encrypt"]])
+                if matches_winmaint_disk(v["devs"][0]):
+                    cmd.extend(["--reserve-tail-mib", str(winmaint_tail_mib(args))])
+            else:  # attach
+                cmd.extend(["--dev", v["devs"][0], "--encrypt", "none"])
+            if v["effective_encrypt"] == "luks" and passphrase_path:
+                cmd.extend(["--passphrase-file", passphrase_path])
+            print(f"Configuring extra storage volume {v['name']} ({v['mode']}, role={v['role']})...", flush=True)
+            if v["mode"] != "attach":
+                INSTALL_STATE.write_text(pending, "formatting\n")
+            run(cmd)
+            if v["name"] not in recorded_extra_volumes(root):
+                raise RuntimeError(f"Extra storage volume {v['name']}: helper did not record the volume")
+            pending.unlink(missing_ok=True)
+    finally:
+        if temp_passphrase is not None:
+            temp_passphrase.unlink(missing_ok=True)
+    return vols
+
+
 def install(args, root, esp, root_fs, esp_fs, level):
     # A private mount namespace keeps the original ESP mount intact for the
     # live shell, while no build or package script can reach it through root.
@@ -1169,6 +1898,9 @@ def install(args, root, esp, root_fs, esp_fs, level):
         extra_pkgs = []
         if getattr(args, "encrypt", False):
             extra_pkgs.append("cryptsetup")
+        for pkg in extra_volume_packages(args):
+            if pkg not in extra_pkgs:
+                extra_pkgs.append(pkg)
         for hp in host_preset_packages(chosen_containers):
             if hp not in extra_pkgs:
                 extra_pkgs.append(hp)
@@ -1248,12 +1980,27 @@ def install(args, root, esp, root_fs, esp_fs, level):
                                       "install_id", "preflight", "yes", "check", "describe_json", "trust_key")}
         config_inputs = {"options": config_values, "files": INSTALL_STATE.files_digest(
             SOURCE, ("link/modules.json", "link/locachy-install", "machines", "containers", "rc.conf")),
-                         "system": stages.stages.get("system", {}), "apps": apps_meta().get("commit", "")}
+                         "system": stages.stages.get("system", {}), "apps": catalog_digest(apps_catalog())}
         def configure():
-            if apply_customizations(args, root):
-                run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "sync", "--first-install"])
+            apply_customizations(args, root)
+            # An earlier configuration run may already have appended packages
+            # to the manifest before its sync failed. Reconcile on every
+            # configuration attempt, not only when this attempt appended them.
+            run(["arch-chroot", str(root), "/usr/local/bin/locachy-pkg", "sync", "--first-install"])
             run(["arch-chroot", str(root), "sh", "/usr/local/src/locachy/make.sh", level, cpu])
         stages.run("configuration", config_inputs, configure)
+        extra_vols = parse_extra_volumes(getattr(args, "extra_volume", None) or [],
+                                         encrypt_root=bool(getattr(args, "encrypt", False)))
+        if extra_vols:
+            extra_inputs = {"volumes": [{"name": v["name"], "mode": v["mode"], "devs": v["devs"],
+                                         "fs": v["fs"], "raid": v["raid"], "role": v["role"],
+                                         "encrypt": v["effective_encrypt"],
+                                         "compute_storage": v["compute_storage"]} for v in extra_vols],
+                            "winmaint_disk": getattr(args, "winmaint_disk", None) or "",
+                            "winmaint_gib": int(args.winmaint_gib) if getattr(args, "winmaint_disk", None) else 0}
+            recorded = checked_extra_volumes(root, extra_vols)
+            stages.run("extra-volumes", extra_inputs, lambda: apply_extra_volumes(args, root),
+                       present=all(v["name"] in recorded for v in extra_vols))
         secure_boot = getattr(args, "secure_boot", False)
         if getattr(args, "encrypt", False) and getattr(args, "tpm", False) and not secure_boot:
             tpm_inputs = {"encrypted": True, "tpm": True}
@@ -1316,8 +2063,24 @@ def install(args, root, esp, root_fs, esp_fs, level):
         if registered.returncode:
             print("UEFI entry was not registered (the reason above). The installed image and fallback remain; "
                   "locachy-boot --register-only repairs the entry on the installed system.", flush=True)
+        # Maintenance Windows last: nothing before needs it (locachy-boot packs nothing for
+        # it unless a shrink plan is armed, and create --root never arms one), so a failed
+        # create leaves a target that starts, and --resume reuses the stages before it.
+        if getattr(args, "winmaint_disk", None):
+            wm_inputs = {"disk": args.winmaint_disk, "gib": int(args.winmaint_gib)}
+            # Even a successful old journal is not evidence that the helper's
+            # state and container entry are both still present.
+            wm_state = matching_maintenance_windows(args, root)
+            if wm_state is None and stages.stages.get("winmaint", {}).get("success") is True:
+                raise ValueError("Maintenance Windows: the successful stage's disk record is missing; "
+                                 "inspect the disk in the terminal. Resume will not recreate it.")
+            stages.run("winmaint", wm_inputs, lambda: create_maintenance_windows(args, root),
+                       present=wm_state is not None and winmaint_container_present(root))
         state = root / "var/lib/locachy/install.json"
         repo, branch, _ = update_source(args)
+        extra_summary = [{"name": v["name"], "mode": v["mode"], "devs": v["devs"], "fs": v["fs"],
+                          "raid": v["raid"], "role": v["role"], "encrypt": v["effective_encrypt"],
+                          "compute_storage": v["compute_storage"]} for v in extra_vols]
         state.write_text(json.dumps({"cpu_level": level, "cpu": cpu,
                                      "repos": repo_sections(getattr(args, "repos", ",".join(REPO_SECTIONS))),
                                      "ime": effective_ime(args), "user": args.user,
@@ -1328,6 +2091,9 @@ def install(args, root, esp, root_fs, esp_fs, level):
                                      "language": getattr(args, "language", "en_US.UTF-8") or "en_US.UTF-8",
                                      "features": parse_csv_items(getattr(args, "features", "")),
                                      "containers": parse_csv_items(getattr(args, "containers", "")),
+                                     "extra_volumes": extra_summary,
+                                     "maintenance_windows": ({"disk": args.winmaint_disk, "gib": int(args.winmaint_gib)}
+                                                             if getattr(args, "winmaint_disk", None) else None),
                                      "update_repo": repo, "update_branch": branch,
                                      "root": root_fs["source"], "esp": esp_fs["source"],
                                      "completed": time.strftime("%Y-%m-%d %H:%M:%S")}, indent=2) + "\n")
@@ -1421,6 +2187,8 @@ def interactive_wizard(args):
             f"format ESP={args.format_esp} Root={args.format_root} Swap={args.format_swap or 'none'}" if args.format_root else
             f"mounted Root={args.root or '(not set)'} ESP={args.esp or '(not set)'}"
         ))
+        if getattr(args, "extra_volume", None):
+            print(f"     Additional storage   : {'; '.join(args.extra_volume)}")
         fde_desc = ("ON (LUKS2 + TPM auto-unlock: guards a removed disk only)" if args.tpm
                     else "ON (LUKS2 passphrase)") if args.encrypt else "OFF"
         if args.encrypt and tpm is None:
@@ -1453,7 +2221,8 @@ def interactive_wizard(args):
         if choice == "q":
             return False
         elif choice == "1":
-            mode = input("Partition mode: [a]uto whole disk, [p]ick partitions to format, [m]ounted paths [a/p/m]: ").strip().lower()
+            mode = input("Partition mode: [a]uto whole disk, [p]ick partitions to format, [m]ounted paths, "
+                         "[e]xtra disks/arrays [a/p/m/e]: ").strip().lower()
             if mode == "a":
                 subprocess.run(["lsblk", "-d", "-o", "NAME,SIZE,MODEL,TYPE"])
                 args.disk = input("Whole disk to partition (e.g. /dev/sda or /dev/nvme0n1): ").strip()
@@ -1467,6 +2236,46 @@ def interactive_wizard(args):
                 args.format_esp = input("ESP partition to format FAT32 (e.g. /dev/sda1): ").strip()
                 args.format_root = input("Root partition to format ext4/LUKS2 (e.g. /dev/sda2): ").strip()
                 args.format_swap = input("Swap partition to format (optional, Enter for none): ").strip() or None
+            elif mode == "e":
+                subprocess.run(["lsblk", "-o", "NAME,SIZE,TYPE,FSTYPE,LABEL,MODEL"])
+                if args.extra_volume:
+                    print("Configured additional volumes:")
+                    for idx, spec in enumerate(args.extra_volume, 1):
+                        print(f"  {idx}. {spec}")
+                sub = input("Extra storage: [a]dd volume/array, [c]lear all, [b]ack [a/c/b]: ").strip().lower()
+                if sub == "c":
+                    args.extra_volume = []
+                elif sub == "a":
+                    kind = input("Type: [f]ormat whole disk, [t]tach existing partition (keep data), "
+                                 "[r]aid Btrfs array [f/t/r]: ").strip().lower()
+                    if kind in ("f", "t", "r"):
+                        default_name = "pool" if kind == "r" else ("data" if not args.extra_volume else f"data{len(args.extra_volume) + 1}")
+                        vname = input(f"Volume name [{default_name}]: ").strip() or default_name
+                        role = input("Role [shared / data / compute] [shared]: ").strip() or "shared"
+                        parts = [f"name={vname}"]
+                        if kind == "f":
+                            dev = input("Whole disk to format (e.g. /dev/nvme1n1): ").strip()
+                            fs = input("Filesystem [ext4 / btrfs] [ext4]: ").strip() or "ext4"
+                            enc = input("Encryption [auto / luks / none] [auto]: ").strip() or "auto"
+                            parts += ["mode=format", f"dev={dev}", f"fs={fs}", f"role={role}", f"encrypt={enc}"]
+                        elif kind == "t":
+                            dev = input("Existing partition to attach without formatting (e.g. /dev/nvme1n1p1): ").strip()
+                            parts += ["mode=attach", f"dev={dev}", f"role={role}"]
+                        else:
+                            raw_devs = input("Whole disks separated by '+' (e.g. /dev/nvme1n1+/dev/nvme2n1): ").strip()
+                            raid = input("RAID profile [single / raid0 / raid1 / raid10] [raid1]: ").strip() or "raid1"
+                            enc = input("Encryption [auto / luks / none] [auto]: ").strip() or "auto"
+                            parts += ["mode=array", f"devs={raw_devs}", f"raid={raid}", f"role={role}", f"encrypt={enc}"]
+                        if role in ("shared", "compute"):
+                            cs = input("Use as default Compute storage? [y/N]: ").strip().lower()
+                            if cs in ("y", "yes"):
+                                parts.append("compute_storage=1")
+                        spec = ",".join(parts)
+                        try:
+                            parse_extra_volumes(list(args.extra_volume) + [spec], encrypt_root=bool(args.encrypt))
+                            args.extra_volume.append(spec)
+                        except ValueError as err:
+                            print("Invalid volume: " + str(err))
             else:
                 args.disk = args.format_esp = args.format_root = args.format_swap = None
                 args.root = input("Mounted empty ext4 root (e.g. /mnt): ").strip()
@@ -1677,6 +2486,19 @@ def make_parser():
     parser.add_argument("--full-name", default="", help="optional display name for the installed user")
     parser.add_argument("--work-dir", help="build workspace; default TARGET_ROOT/.locachy-installer")
     parser.add_argument("--cache-dir", help="package cache; default TARGET_ROOT/var/cache/pacman/pkg")
+    parser.add_argument("--extra-volume", action="append", default=[], metavar="SPEC",
+                        help="a storage volume beside the system: name=NAME,mode=format,dev=/dev/DISK,fs=ext4|btrfs,"
+                             "role=data|shared|compute,encrypt=auto|luks|none (whole disk, erased); "
+                             "name=NAME,mode=attach,dev=/dev/PART,role=... (existing partition, data kept); "
+                             "name=NAME,mode=array,devs=/dev/A+/dev/B,raid=single|raid0|raid1|raid10,role=...,encrypt=... "
+                             "(Btrfs array); optional compute_storage=1 on one volume with role shared or compute")
+    parser.add_argument("--winmaint-disk", metavar="DEV",
+                        help="the disk that hosts Maintenance Windows (Windows C: and its tail): the system disk "
+                             "(--disk), a formatted --extra-volume's disk, or a secondary disk with free tail space; "
+                             "none by default")
+    parser.add_argument("--winmaint-gib", type=int, default=WINMAINT_DEFAULT_GIB,
+                        help="Windows C: size in GiB with --winmaint-disk (%d..%d, default %d)"
+                             % (WINMAINT_MIN_GIB, WINMAINT_MAX_GIB, WINMAINT_DEFAULT_GIB))
     parser.add_argument("--wizard", action="store_true", help="run the interactive configuration wizard")
     parser.add_argument("--yes", action="store_true", help="confirm the explicitly supplied empty target mounts")
     parser.add_argument("--check", action="store_true", help="validate and show targets without writing")
@@ -1731,9 +2553,20 @@ def main():
                                  "--update-repo=" + repo, "--update-branch=" + branch,
                                  "--apps-repo=" + apps_repo, "--apps-branch=" + apps_branch])
         return 0
+    if os.geteuid() != 0:
+        parser.error("Run from the live installer as root")
+    context = nullcontext(None) if args.check and not (args.private or args.resume or args.trust_key) else \
+        installation_lock(args.private)
+    try:
+        with context as lock_fd:
+            return run_installation(parser, args, lock_fd)
+    except (OSError, ValueError) as error:
+        print("locachy-install: " + str(error), file=sys.stderr)
+        return 1
+
+
+def run_installation(parser, args, lock_fd):
     if (args.resume or args.trust_key) and not args.private:
-        if os.geteuid() != 0:
-            parser.error("Run from the live installer as root")
         try:
             record = read_resume_record()
             before_target = record.get("phase") == "preflight"
@@ -1747,23 +2580,28 @@ def main():
             return trust_install_keys(args.trust_key, root)
         # Old records have no phase: they are target resumes, never fresh
         # formatting requests. Preflight records have not touched a target.
+        stored = parser.parse_args(record["argv"])
         args = parser.parse_args(record["argv"] + [a for a in sys.argv[1:] if a != "--resume"])
         args.resume, args.install_id = not before_target, record["install_id"]
+        # A resume is a continuation, not a second configuration pass. In
+        # particular, --wizard must not be able to replace the target after
+        # the resume checks have run (the old path allowed exactly that).
+        target_options = ("root", "esp", "disk", "format_root", "format_esp", "format_swap", "swap_gib",
+                          "encrypt", "tpm", "secure_boot", "secure_boot_microsoft",
+                          "extra_volume", "winmaint_disk", "winmaint_gib", "wizard")
+        if any(getattr(args, key) != getattr(stored, key) for key in target_options):
+            parser.error("A continued installation cannot change its target or storage configuration")
         if not before_target:
             if args.disk or args.format_root or args.format_esp or args.format_swap:
                 parser.error("A target resume record must not partition or format")
+            if (args.root, args.esp) != (str(root), str(root / "efi")):
+                parser.error("A continued installation cannot change the target mounts")
             print("Continuing the installation on " + str(root) + ", where it stopped.", flush=True)
         else:
             print("Continuing installation preflight; no target was partitioned or formatted.", flush=True)
         # The app presets it started with stay pinned, including a preflight
         # that stopped before it had a target to hold them.
-        pinned = resume_catalog(root) if root else (RESUME_APPS if RESUME_APPS.is_dir() else None)
-        if pinned:
-            os.environ["LOCACHY_APPS_CATALOG"] = str(pinned)
-            os.environ["LOCACHY_APPS"] = ""
-        elif record.get("apps_commit") and record["apps_commit"] != apps_meta().get("commit"):
-            print(f"App presets: this run's, not {str(record['apps_commit'])[:12]} the installation started with "
-                  "(its target has none yet)", flush=True)
+        use_resume_catalog(record)
     if args.copy_network is None:
         args.copy_network = bool(live_nm_connections())
     if os.geteuid() != 0:
@@ -1799,16 +2637,37 @@ def main():
         print_source()
     try:
         level = cpu_level(args.level)
+        target = identities = None
+        if not (args.disk or args.format_root):
+            target = validate(args.root, args.esp, args.install_id if args.resume else None)
+            if not args.check and not args.private:
+                identities = target_identities(*target[2:])
+                if args.resume and "mounts" in record and record["mounts"] != identities:
+                    raise ValueError("The target root or ESP filesystem changed since installation began")
         if args.check and (args.disk or args.format_root):
             # --check writes nothing: what would be partitioned and formatted.
+            extra_note = ""
+            extra_vols = parse_extra_volumes(getattr(args, "extra_volume", None) or [],
+                                             encrypt_root=bool(getattr(args, "encrypt", False)))
+            if extra_vols:
+                extra_note = "; extra volumes: " + ", ".join(
+                    f"{v['name']} ({v['mode']} {'+'.join(v['devs'])})" for v in extra_vols
+                )
+            if args.winmaint_disk:
+                extra_note += f"; Maintenance Windows {args.winmaint_gib} GiB on {args.winmaint_disk}"
             print("Would " + (f"partition {args.disk} (all of it) and format it" if args.disk else
                               "format " + ", ".join(p for p in (args.format_esp, args.format_root, args.format_swap) if p)) +
                   ("; LUKS2" + (" + TPM" if args.tpm else "") if args.encrypt else "") +
+                  extra_note +
                   f"; CPU {level}, own builds for {args.cpu}", flush=True)
             return 0
         if not args.private and not args.check:
             args.install_id = args.install_id or uuid.uuid4().hex
-            status = preflight_keys(args)
+            try:
+                status = preflight_keys(args)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+                print("Installation source-key preflight failed: " + str(error), file=sys.stderr, flush=True)
+                status = 1
             if status:
                 if not args.resume:
                     write_resume_record(args.install_id, args.root or "", safe_arguments(args), args, phase="preflight")
@@ -1836,15 +2695,12 @@ def main():
             write_resume_record(args.install_id, args.root or "", safe_arguments(args), args, phase="partitioning")
             prepare_partitions(args, passphrase)
             args.yes = True
-            # Replace all destructive options with the prepared target's
-            # mounts immediately, before starting any package operation.
+            # Keep the partitioning record until the mounts are verified and
+            # their target-local marker is durable.
             args.disk = args.format_root = args.format_esp = args.format_swap = None
-            write_resume_record(args.install_id, args.root, safe_arguments(args), args)
-            marker = Path(args.root) / ".locachy-installer/install-id"
-            marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            marker.write_text(args.install_id + "\n", encoding="utf-8")
-            args.resume = True
-        root, esp, root_fs, esp_fs = validate(args.root, args.esp, args.install_id if args.resume else None)
+            target = validate(args.root, args.esp)
+            identities = target_identities(*target[2:])
+        root, esp, root_fs, esp_fs = target
         print("Root: " + root_fs["source"] + " at " + str(root), flush=True)
         print("ESP:  " + esp_fs["source"] + " at " + str(esp), flush=True)
         print("Target CPU: " + level + "; input method: " + effective_ime(args) +
@@ -1894,7 +2750,14 @@ def main():
                 fwd += ["--work-dir", args.work_dir]
             if args.cache_dir:
                 fwd += ["--cache-dir", args.cache_dir]
-            write_resume_record(args.install_id, root, fwd, args)
+            for spec in getattr(args, "extra_volume", None) or []:
+                fwd += ["--extra-volume", spec]
+            if args.winmaint_disk:
+                fwd += ["--winmaint-disk", args.winmaint_disk, "--winmaint-gib", str(args.winmaint_gib)]
+            if not args.resume:
+                INSTALL_STATE.write_text(root / ".locachy-installer/install-id", args.install_id + "\n")
+            active = write_resume_record(args.install_id, root, fwd, args, mounts=identities)
+            use_resume_catalog(active)
             secrets = []
             if args.luks_passphrase_file:
                 secrets += ["--luks-passphrase-file", args.luks_passphrase_file]
@@ -1902,8 +2765,8 @@ def main():
                 secrets += ["--password-file", args.password_file]
             done = run(["unshare", "--mount", "--propagation", "private", "--pid", "--fork", "--kill-child", "--mount-proc",
                         "--cgroup", sys.executable, os.path.realpath(__file__)] + fwd + secrets +
-                       ["--install-id", args.install_id] + (["--resume"] if args.resume else []) +
-                       ["--private", "--yes"], check=False)
+                        ["--install-id", args.install_id, "--resume", "--private", "--yes"], check=False,
+                        pass_fds=(lock_fd,), env=dict(os.environ, LOCACHY_INSTALL_LOCK_FD=str(lock_fd)))
             if done.returncode < 0:
                 print(f"locachy-install: the installation was stopped by signal {-done.returncode}", file=sys.stderr)
             if done.returncode:
@@ -1917,6 +2780,8 @@ def main():
                 print("Continue with: locachy-install --resume", flush=True)
                 return 1
             RESUME_RECORD.unlink(missing_ok=True)
+            if active["apps_catalog_path"] is not None:
+                shutil.rmtree(active["apps_catalog_path"], ignore_errors=True)
             shutil.rmtree(RESUME_APPS, ignore_errors=True)
 
         else:

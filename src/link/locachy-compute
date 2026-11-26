@@ -8,7 +8,7 @@ Manages:
     Wayland/compositor dependency and instant upperdir wipe reset
   - Optional GPU device & host NVIDIA driver library passthrough and host data
     bind-mounts (including secondary NVMe / /mnt / /data paths)
-  - Optional KVM micro-VMs (qemu-system-x86_64 + qcow2 CoW overlay + 9p share)
+  - Optional KVM micro-VMs (qemu-system-x86_64 + qcow2 CoW overlay + virtiofs share)
     isolated under /sys/fs/cgroup/locachy-compute/vm-<name>
   - Authenticated mTLS HTTPS control plane (port 27184) bound strictly to
     tailscale0 and (when compute_bind_tb="1") thunderbolt-net link-local IPv6,
@@ -26,6 +26,8 @@ import json
 import os
 from pathlib import Path
 import re
+import select
+import selectors
 import shlex
 import shutil
 import signal
@@ -81,7 +83,21 @@ def _load_peers_module():
     sys.exit("locachy-compute: locachy_peers.py is not installed")
 
 
+def _load_storage_module():
+    here = Path(__file__).resolve().parent
+    for directory in (here, Path("/usr/local/lib/locachy")):
+        candidate = directory / "locachy_storage.py"
+        if candidate.is_file():
+            spec = importlib.util.spec_from_file_location("locachy_storage", candidate)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+    return None
+
+
 peers_mod = _load_peers_module()
+storage_mod = _load_storage_module()
 
 
 class ComputeError(RuntimeError):
@@ -95,8 +111,35 @@ def _abs_env(name: str, default: str) -> Path:
     return Path(val)
 
 
+def configured_compute_storage_volume() -> str:
+    """Return configured rc.conf compute_storage volume name, or '' if unset."""
+    if os.environ.get("LOCACHY_COMPUTE_BASE"):
+        return ""
+    val = read_rc_conf().get("compute_storage", "").strip()
+    if val in ("", "none", "off"):
+        return ""
+    return val
+
+
 def compute_base() -> Path:
-    return _abs_env("LOCACHY_COMPUTE_BASE", "/var/lib/locachy/compute")
+    explicit = os.environ.get("LOCACHY_COMPUTE_BASE", "").strip()
+    if explicit:
+        if not os.path.isabs(explicit):
+            raise ComputeError(f"LOCACHY_COMPUTE_BASE must be an absolute path: {explicit!r}")
+        return Path(explicit)
+    vol_name = configured_compute_storage_volume()
+    if vol_name:
+        if storage_mod is None:
+            raise ComputeError("compute_storage is configured but locachy_storage.py is not installed")
+        try:
+            _, mp = storage_mod.resolve_compute_volume(vol_name, require_mounted=True)
+        except storage_mod.StorageError as exc:
+            raise ComputeError(f"compute_storage volume {vol_name!r} unavailable: {exc}") from exc
+        base = mp / "locachy-compute"
+        for sub in ("images", "envs", "jobs", "vms", "data"):
+            (base / sub).mkdir(parents=True, exist_ok=True)
+        return base
+    return Path("/var/lib/locachy/compute")
 
 
 def compute_run() -> Path:
@@ -137,18 +180,24 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _atomic_write_json(path: Path, obj: dict, mode: int = 0o600) -> None:
+def _atomic_write_json(path: Path, obj: dict, mode: int = 0o600, *, exclusive: bool = False) -> None:
+    _atomic_write_json_text(path, json.dumps(obj, indent=2, sort_keys=True) + "\n", mode, exclusive=exclusive)
+
+
+def _atomic_write_json_text(path: Path, text: str, mode: int = 0o600, *, exclusive: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(obj, fh, indent=2, sort_keys=True)
-            fh.write("\n")
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
-        tmp = ""
+        if exclusive:
+            os.link(tmp, path)
+        else:
+            os.replace(tmp, path)
+            tmp = ""
     finally:
         if tmp:
             try:
@@ -161,8 +210,9 @@ def parse_mount_spec(spec: str) -> dict[str, str]:
     """Parse HOST:CONTAINER[:ro|:rw] and enforce host-path safety policy.
 
     Allows secondary NVMe / data directories outside /home/USER (e.g. /mnt/...,
-    /data/..., /var/lib/locachy/compute/data/...) while refusing host '/' and
-    sensitive LOCachy control/peer directories.
+    /data/..., /srv/storage/<vol> for shared/compute volumes, or
+    <compute base>/data/...) while refusing host '/', data-only storage volumes,
+    and sensitive LOCachy control/peer directories.
     """
     parts = spec.split(":")
     if len(parts) not in (2, 3):
@@ -187,9 +237,70 @@ def parse_mount_spec(spec: str) -> dict[str, str]:
             if host_real == allowed_data or host_real.startswith(allowed_data + "/"):
                 continue
             raise ComputeError(f"refusing sensitive host mount path: {host_real}")
+    if storage_mod is not None:
+        sroot = os.path.realpath(str(storage_mod.storage_root_path()))
+        if host_real == sroot:
+            raise ComputeError(f"refusing to mount storage root directly: {host_real}")
+        if host_real.startswith(sroot + "/"):
+            rel = host_real[len(sroot) + 1 :]
+            vol_name = rel.split("/", 1)[0]
+            try:
+                vol = storage_mod.get_volume(vol_name)
+            except storage_mod.StorageError:
+                vol = None
+            if vol is not None and vol["role"] not in ("shared", "compute"):
+                raise ComputeError(
+                    f"refusing to mount data-only storage volume {vol_name!r} (role={vol['role']!r})"
+                )
     if not os.path.exists(host_real):
         raise ComputeError(f"host mount path does not exist: {host_real}")
     return {"host": host_real, "target": cont_norm, "mode": mode}
+
+
+def resolve_volume_mount_spec(spec: str) -> dict[str, str]:
+    """Parse NAME[:CONTAINER_PATH[:ro|rw]] and enforce storage volume role & mount state."""
+    if storage_mod is None:
+        raise ComputeError("locachy_storage.py is not installed; --volume is unavailable")
+    try:
+        parsed = storage_mod.parse_compute_volume_spec(spec)
+        _, mp = storage_mod.resolve_compute_volume(parsed["name"], require_mounted=True)
+    except storage_mod.StorageError as exc:
+        raise ComputeError(str(exc)) from exc
+    host_real = os.path.realpath(str(mp))
+    if not os.path.isdir(host_real):
+        raise ComputeError(f"storage volume {parsed['name']!r} mountpoint does not exist: {host_real}")
+    return {
+        "volume": parsed["name"],
+        "host": host_real,
+        "target": parsed["target"],
+        "mode": parsed["mode"],
+    }
+
+
+def _storage_summary() -> dict:
+    vol_name = configured_compute_storage_volume()
+    info = {
+        "storage_volume": vol_name,
+        "compute_base": str(compute_base()),
+        "available_volumes": [],
+    }
+    if storage_mod is not None:
+        try:
+            cfg = storage_mod.load_config()
+            for vol in cfg["volumes"]:
+                if vol["role"] in ("shared", "compute"):
+                    mp = storage_mod.volume_mountpoint(vol["name"])
+                    info["available_volumes"].append(
+                        {
+                            "name": vol["name"],
+                            "role": vol["role"],
+                            "mountpoint": str(mp),
+                            "mounted": storage_mod.is_mountpoint(mp),
+                        }
+                    )
+        except storage_mod.StorageError:
+            pass
+    return info
 
 
 def discover_gpu_resources() -> dict[str, list[str]]:
@@ -437,6 +548,7 @@ def env_create(
     gpu: bool = False,
     net: str = "locachy-net",
     mounts: list[str] | None = None,
+    volumes: list[str] | None = None,
     memory_max: str = "",
     cpu_max: str = "",
     workdir: str = "/",
@@ -454,6 +566,7 @@ def env_create(
     if not img_rootfs.is_dir():
         raise ComputeError(f"base image not found: {image}")
     parsed_mounts = [parse_mount_spec(m) for m in (mounts or [])]
+    parsed_volumes = [resolve_volume_mount_spec(v) for v in (volumes or [])]
     env_map: dict[str, str] = {}
     for item in env_vars or []:
         if "=" not in item:
@@ -477,6 +590,10 @@ def env_create(
         "gpu": bool(gpu),
         "net": net,
         "mounts": parsed_mounts,
+        "volumes": [
+            {"name": v["volume"], "target": v["target"], "mode": v["mode"]}
+            for v in parsed_volumes
+        ],
         "memory_max": memory_max,
         "cpu_max": cpu_max,
         "workdir": workdir if os.path.isabs(workdir) else "/",
@@ -547,6 +664,57 @@ def _job_log_file(job_id: str) -> Path:
     return compute_base() / "jobs" / f"{job_id}.log"
 
 
+_JOB_ACTIVE = ("starting", "running")
+_JOB_START_TIMEOUT = 10.0
+
+
+def _job_pid_identity(pid: int) -> list[str]:
+    # /proc/<pid>/stat field 22; the process name can contain spaces and parentheses.
+    fields = Path(f"/proc/{pid}/stat").read_text(errors="replace").rsplit(")", 1)[1].split()
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    return [boot, fields[19]]
+
+
+def _job_owner_fd(rec: dict) -> int | None:
+    owner = rec.get("supervisor") or {}
+    pid = owner.get("pid", 0)
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    fd = -1
+    try:
+        # Open first so PID reuse during or after verification cannot redirect a signal.
+        fd = os.pidfd_open(pid)
+        info = os.fstat(fd)
+        if owner.get("identity") != [*_job_pid_identity(pid), info.st_dev, info.st_ino]:
+            return None
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        if poller.poll(0):  # Includes an exited supervisor not yet reaped by its parent.
+            return None
+        result, fd = fd, -1
+        return result
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _job_read(path: Path) -> dict:
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    if rec.get("state") not in _JOB_ACTIVE:
+        return rec
+    fd = _job_owner_fd(rec)
+    if fd is not None:
+        os.close(fd)
+        return rec
+    # The supervisor may have committed the result while status opened the older record.
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    if rec.get("state") in _JOB_ACTIVE:
+        rec["state"] = "exited"
+    return rec
+
+
 def job_list() -> list[dict]:
     jdir = compute_base() / "jobs"
     if not jdir.is_dir():
@@ -554,16 +722,9 @@ def job_list() -> list[dict]:
     items = []
     for entry in sorted(jdir.glob("*.json")):
         try:
-            rec = json.loads(entry.read_text(encoding="utf-8"))
+            items.append(_job_read(entry))
         except (OSError, ValueError):
             continue
-        if rec.get("state") == "running" and rec.get("pid"):
-            try:
-                os.kill(int(rec["pid"]), 0)
-            except OSError:
-                rec["state"] = "exited"
-                _atomic_write_json(entry, rec, 0o600)
-        items.append(rec)
     return items
 
 
@@ -571,47 +732,42 @@ def job_load(job_id: str) -> dict:
     path = _job_file(job_id)
     if not path.is_file():
         raise ComputeError(f"job not found: {job_id}")
-    rec = json.loads(path.read_text(encoding="utf-8"))
-    if rec.get("state") == "running" and rec.get("pid"):
-        try:
-            os.kill(int(rec["pid"]), 0)
-        except OSError:
-            rec["state"] = "exited"
-            _atomic_write_json(path, rec, 0o600)
-    return rec
+    return _job_read(path)
 
 
 def job_stop(job_id: str) -> dict:
     rec = job_load(job_id)
-    pid = int(rec.get("pid") or 0)
-    if pid > 0:
+    if rec["state"] not in _JOB_ACTIVE:
+        if rec["state"] == "exited":
+            raise ComputeError(f"cannot stop job {job_id}: no verifiable supervisor")
+        return rec
+    fd = _job_owner_fd(rec)
+    if fd is not None:
         try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
             try:
-                os.kill(pid, 0)
-                time.sleep(0.05)
-            except OSError:
-                break
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-    _cgroup_kill_and_remove(f"job-{job_id}")
-    rec["state"] = "stopped"
-    rec["ended_at"] = _utc_now()
-    _atomic_write_json(_job_file(job_id), rec, 0o600)
-    return rec
+                signal.pidfd_send_signal(fd, signal.SIGUSR1)
+            except ProcessLookupError:
+                pass
+        finally:
+            os.close(fd)
+    deadline = time.monotonic() + _JOB_START_TIMEOUT + 4.0
+    while time.monotonic() < deadline:
+        rec = job_load(job_id)
+        if rec["state"] not in _JOB_ACTIVE:
+            if rec["state"] == "exited":
+                raise ComputeError(f"cannot confirm stop for job {job_id}: supervisor disappeared")
+            if rec.get("cleanup_error"):
+                raise ComputeError(rec["cleanup_error"])
+            return rec
+        time.sleep(0.05)
+    raise ComputeError(f"timed out waiting for job {job_id} to stop")
 
 
 def env_reset(name: str) -> dict:
     """Instantly wipe OverlayFS upper/work while keeping base rootfs & host data intact."""
     meta = env_load(name)
     for job in job_list():
-        if job.get("env") == name and job.get("state") == "running":
+        if job.get("env") == name and job.get("state") in _JOB_ACTIVE:
             job_stop(job["job_id"])
     edir = _env_dir(name)
     for sub in ("upper", "work"):
@@ -628,15 +784,15 @@ def env_reset(name: str) -> dict:
 def env_remove(name: str) -> None:
     env_load(name)
     for job in job_list():
-        if job.get("env") == name and job.get("state") == "running":
+        if job.get("env") == name and job.get("state") in _JOB_ACTIVE:
             job_stop(job["job_id"])
     shutil.rmtree(_env_dir(name))
 
 
 CONTAINER_INNER_SCRIPT = r"""
 set -eu
-lower=$1; upper=$2; work=$3; merged=$4; workdir=$5; want_net=$6; want_gpu=$7; init_bin=$8; mounts_json=$9
-shift 9
+lower=$1; upper=$2; work=$3; merged=$4; workdir=$5; want_net=$6; want_gpu=$7; init_bin=$8; mounts_json=$9; ready_fd=${10}
+shift 10
 
 # Try native overlay first, fall back to userxattr for rootless user namespaces.
 if ! mount -t overlay overlay -o "lowerdir=$lower,upperdir=$upper,workdir=$work,nosuid,nodev" "$merged" 2>/dev/null; then
@@ -759,7 +915,8 @@ exec python3 -c '
 import ctypes, errno, os, signal, struct, sys
 
 merged, workdir, use_init = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-cmd = sys.argv[4:]
+ready_fd = int(sys.argv[4])
+cmd = sys.argv[5:]
 libc = ctypes.CDLL(None, use_errno=True)
 sys_pivot = 155 if os.uname().machine in ("x86_64", "amd64") else 41
 MNT_DETACH = 2
@@ -803,44 +960,296 @@ if os.path.isdir(workdir):
     os.chdir(workdir)
 
 if exec_app_init:
+    os.environ["LOCACHY_APP_READY_FD"] = str(ready_fd)
     os.execvp("/run/locachy-app-init", ["/run/locachy-app-init", *cmd])
 
-# Fallback PID-1 reaper for foreign distro rootfs when app-init is not static:
-# enforces PR_SET_NO_NEW_PRIVS on child, forwards termination signals, reaps all zombies.
+# Foreign rootfs with a dynamic host app-init: use the same close-on-exec
+# handshake with the workload and let PID namespace teardown reap stragglers.
+exec_r, exec_w = os.pipe()
+watched = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
+mask = signal.pthread_sigmask(signal.SIG_BLOCK, watched)
 pid = os.fork()
 if pid == 0:
-    libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
-    os.execvp(cmd[0], cmd)
+    os.close(exec_r)
+    os.close(ready_fd)
+    signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+    try:
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            e = ctypes.get_errno()
+            raise OSError(e, os.strerror(e))
+        os.execvp(cmd[0], cmd)
+    except (OSError, ValueError) as exc:
+        print(f"locachy-compute: cannot execute {cmd[0]!r}: {exc}", file=sys.stderr)
+        os.write(exec_w, b"error")
+        os._exit(127 if isinstance(exc, FileNotFoundError) else 126)
+
+os.close(exec_w)
 
 def _fwd(signum, _frame):
     try:
         os.kill(pid, signum)
-    except OSError:
+    except ProcessLookupError:
         pass
 
-for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+for sig in watched:
     signal.signal(sig, _fwd)
+signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+if not os.read(exec_r, 1):
+    os.write(ready_fd, b"ready\n")
+os.close(exec_r)
+os.close(ready_fd)
 
-rc = 125
 while True:
-    try:
-        wpid, status = os.waitpid(-1, 0)
-    except ChildProcessError:
-        break
-    except InterruptedError:
-        continue
+    wpid, status = os.waitpid(-1, 0)
     if wpid == pid:
-        if os.WIFEXITED(status):
-            rc = os.WEXITSTATUS(status)
-        elif os.WIFSIGNALED(status):
-            rc = 128 + os.WTERMSIG(status)
-        try:
-            os.kill(-1, signal.SIGTERM)
-        except OSError:
-            pass
-sys.exit(rc)
-' "$merged" "$workdir" "$use_init" "$@"
+        rc = os.waitstatus_to_exitcode(status)
+        sys.exit(rc if rc >= 0 else 128 - rc)
+' "$merged" "$workdir" "$use_init" "$ready_fd" "$@"
 """
+
+
+def _job_cgroup_create(cg: Path, spec: dict) -> Path | None:
+    try:
+        cg.parent.mkdir(parents=True, exist_ok=True)
+        cg.mkdir()
+    except FileExistsError as exc:
+        raise ComputeError(f"job cgroup already exists: {cg}") from exc
+    except OSError as exc:
+        if os.environ.get("LOCACHY_COMPUTE_ALLOW_NO_CGROUP") == "1":
+            return None
+        raise ComputeError(f"cannot create job cgroup {cg}: {exc}") from exc
+    try:
+        if not (cg / "cgroup.kill").is_file() or not (cg / "cgroup.procs").is_file():
+            if os.environ.get("LOCACHY_COMPUTE_ALLOW_NO_CGROUP") == "1":
+                cg.rmdir()
+                return None
+            raise ComputeError(f"not a cgroup v2 job directory: {cg}")
+        for key, node in (("memory", "memory.max"), ("cpu", "cpu.max")):
+            if spec[key] and (cg / node).exists():
+                (cg / node).write_text(spec[key] + "\n", encoding="utf-8")
+    except Exception:
+        cg.rmdir()
+        raise
+    return cg
+
+
+def _job_cgroup_cleanup(cg: Path) -> None:
+    (cg / "cgroup.kill").write_text("1\n", encoding="utf-8")
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            cg.rmdir()
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _job_log_tail(path: Path) -> str:
+    try:
+        with path.open("rb") as log:
+            log.seek(max(0, log.seek(0, os.SEEK_END) - 4096))
+            return log.read().decode("utf-8", errors="replace").strip()
+    except FileNotFoundError:
+        return ""
+
+
+def _supervise_job(spec: dict, reply=None) -> dict:
+    """Own the record, child and cgroup until the final status has been committed."""
+    rec = spec["record"]
+    jid = rec["job_id"]
+    path, log_path = Path(spec["path"]), Path(rec["log"])
+    proc = None
+    payload_fd = None
+    cg = None
+    stop_requested = False
+    ready = False
+
+    def send(sig: int) -> None:
+        if payload_fd is not None:
+            try:
+                signal.pidfd_send_signal(payload_fd, sig)
+            except ProcessLookupError:
+                pass
+
+    def request_stop(_sig, _frame) -> None:
+        nonlocal stop_requested
+        if not stop_requested:
+            stop_requested = True
+            if payload_fd is not None:
+                send(signal.SIGTERM)
+                signal.alarm(2)
+
+    # This runs only in a single-purpose CLI process (never in an HTTP worker).
+    for sig in (signal.SIGUSR1, signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, request_stop)
+    signal.signal(signal.SIGALRM, lambda _sig, _frame: send(signal.SIGKILL))
+    owner_fd = os.pidfd_open(os.getpid())
+    try:
+        info = os.fstat(owner_fd)
+        rec["supervisor"] = {
+            "pid": os.getpid(),
+            "identity": [*_job_pid_identity(os.getpid()), info.st_dev, info.st_ino],
+        }
+    finally:
+        os.close(owner_fd)
+    try:
+        _atomic_write_json(path, rec, exclusive=True)
+    except FileExistsError as exc:
+        raise ComputeError(f"job already exists: {jid}") from exc
+
+    try:
+        with open(log_path, "xb", opener=lambda p, flags: os.open(p, flags, 0o600)) as log:
+            cg = _job_cgroup_create(Path(spec["cgroup"]), spec)
+            if cg is not None:
+                rec["cgroup"] = str(cg)
+                if reply is not None:
+                    # setsid covers terminal hangups; migrate out of the submitting
+                    # service/session cgroup as well. Stay outside the payload cgroup.
+                    supervisors = cg.parent / "supervisors"
+                    try:
+                        supervisors.mkdir(exist_ok=True)
+                        (supervisors / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+                    except OSError as exc:
+                        raise ComputeError(f"cannot enter independent supervisor cgroup {supervisors}: {exc}") from exc
+            for sub in ("upper", "work", "merged"):
+                (Path(spec["env_dir"]) / sub).mkdir(exist_ok=True)
+            if stop_requested:
+                raise ComputeError("stop requested before launch")
+
+            def enter_cgroup() -> None:
+                # Popen waits for exec, so the launcher cannot start before joining.
+                try:
+                    (cg / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
+                except OSError as exc:
+                    os.write(2, f"locachy-compute: cannot enter job cgroup {cg}: {exc}\n".encode())
+                    raise
+
+            ready_r, ready_w = os.pipe()
+            try:
+                try:
+                    proc = subprocess.Popen(
+                        [*spec["argv"], str(ready_w), *rec["command"]],
+                        stdin=subprocess.DEVNULL if reply is not None else None,
+                        stdout=log if reply is not None else subprocess.PIPE,
+                        stderr=subprocess.STDOUT, env=spec["env"], pass_fds=(ready_w,),
+                        preexec_fn=enter_cgroup if cg is not None else None,
+                    )
+                finally:
+                    os.close(ready_w)
+                rec["pid"] = proc.pid
+                # Popen has not waited yet, so the PID still belongs to our child.
+                payload_fd = os.pidfd_open(proc.pid)
+                if stop_requested:
+                    send(signal.SIGTERM)
+                    signal.alarm(2)
+                if proc.stdout is not None:
+                    # The foreground output pipe must also be drained during startup.
+                    output = proc.stdout
+                else:
+                    output = None
+                with selectors.DefaultSelector() as sel:
+                    sel.register(ready_r, selectors.EVENT_READ, "ready")
+                    if output is not None:
+                        sel.register(output, selectors.EVENT_READ, "output")
+                    deadline = time.monotonic() + _JOB_START_TIMEOUT
+                    while sel.get_map():
+                        timeout = None if ready else max(0.0, deadline - time.monotonic())
+                        events = sel.select(timeout)
+                        if not ready and (not events or time.monotonic() >= deadline):
+                            raise ComputeError("timed out before the container command started")
+                        for key, _ in events:
+                            chunk = os.read(key.fd, 65536)
+                            if key.data == "ready":
+                                sel.unregister(ready_r)
+                                if chunk == b"ready\n":
+                                    ready = True
+                                    rec["state"] = "running"
+                                    _atomic_write_json(path, rec)
+                                    if reply is not None:
+                                        reply(rec)
+                                else:
+                                    # No start marker means setup/exec failed, not a
+                                    # successful launch followed by a nonzero exit.
+                                    remaining = max(0.0, deadline - time.monotonic())
+                                    try:
+                                        proc.wait(timeout=remaining)
+                                    except subprocess.TimeoutExpired as exc:
+                                        raise ComputeError("launcher closed readiness before reporting startup") from exc
+                                    raise ComputeError(f"container command did not start (launcher exit {proc.returncode})")
+                            elif chunk:
+                                log.write(chunk)
+                                log.flush()
+                                sys.stdout.buffer.write(chunk)
+                                sys.stdout.buffer.flush()
+                            else:
+                                sel.unregister(key.fd)
+                proc.wait()
+            finally:
+                os.close(ready_r)
+                if proc is not None and proc.stdout is not None:
+                    proc.stdout.close()
+    except (ComputeError, OSError, subprocess.SubprocessError) as exc:
+        if not ready:
+            detail = _job_log_tail(log_path)
+            rec["launch_error"] = f"job {jid}: {exc}" + (f"\n{detail}" if detail else "")
+        else:
+            rec["supervisor_error"] = f"job {jid}: {exc}"
+    finally:
+        if proc is not None:
+            if proc.returncode is None:
+                if payload_fd is not None:
+                    send(signal.SIGKILL)
+                else:
+                    proc.kill()  # unreaped direct child, not a PID from disk
+                proc.wait()
+            rec["exit_code"] = proc.returncode
+        signal.alarm(0)
+        if payload_fd is not None:
+            fd, payload_fd = payload_fd, None
+            os.close(fd)
+        if cg is not None:
+            try:
+                _job_cgroup_cleanup(cg)
+            except OSError as exc:
+                rec["cleanup_error"] = f"cannot remove job cgroup {cg}: {exc}"
+        rec["state"] = "stopped" if stop_requested else "succeeded" if ready and rec["exit_code"] == 0 else "failed"
+        rec["ended_at"] = _utc_now()
+        _atomic_write_json(path, rec)
+    return rec
+
+
+def _job_supervisor_main() -> int:
+    # The private request/reply pipes disappear once launch is acknowledged.
+    # Losing the submitter after its complete request does not cancel the job.
+    reply_fd = os.dup(sys.stdout.fileno())
+    os.close(sys.stdout.fileno())
+
+    def reply(payload: dict) -> None:
+        nonlocal reply_fd
+        if reply_fd < 0:
+            return
+        fd, reply_fd = reply_fd, -1
+        try:
+            pending = memoryview((json.dumps(payload) + "\n").encode("utf-8"))
+            while pending:
+                pending = pending[os.write(fd, pending):]
+        except BrokenPipeError:
+            pass
+        finally:
+            os.close(fd)
+
+    try:
+        spec = json.load(sys.stdin)
+        sys.stdin.close()
+        rec = _supervise_job(spec, reply)
+        if "launch_error" in rec:
+            reply({"error": rec["launch_error"]})
+    except (ComputeError, OSError, ValueError) as exc:
+        reply({"error": str(exc)})
+        return 1
+    return 0
 
 
 def run_container(
@@ -850,6 +1259,7 @@ def run_container(
     gpu_override: bool | None = None,
     net_override: str | None = None,
     extra_mounts: list[str] | None = None,
+    extra_volumes: list[str] | None = None,
     workdir_override: str | None = None,
     extra_env: list[str] | None = None,
     memory_override: str | None = None,
@@ -878,6 +1288,13 @@ def run_container(
         mounts.append(parse_mount_spec(spec))
     # Re-validate persisted mounts on every launch.
     mounts = [parse_mount_spec(f"{m['host']}:{m['target']}:{m['mode']}") for m in mounts]
+    # Re-validate persisted and per-run --volume bindings (role & mounted state).
+    for vol_rec in meta.get("volumes", []):
+        resolved = resolve_volume_mount_spec(f"{vol_rec['name']}:{vol_rec['target']}:{vol_rec['mode']}")
+        mounts.append({"host": resolved["host"], "target": resolved["target"], "mode": resolved["mode"]})
+    for vspec in extra_volumes or []:
+        resolved = resolve_volume_mount_spec(vspec)
+        mounts.append({"host": resolved["host"], "target": resolved["target"], "mode": resolved["mode"]})
     mounts_tsv = "\n".join(f"{m['host']}\t{m['target']}\t{m['mode']}" for m in mounts)
 
     memory_max = memory_override if memory_override is not None else meta.get("memory_max", "")
@@ -895,13 +1312,8 @@ def run_container(
         k, v = item.split("=", 1)
         run_env[k] = v
 
-    jid = validate_name(job_id, "job id") if job_id else f"j{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    (edir / "upper").mkdir(parents=True, exist_ok=True)
-    (edir / "work").mkdir(parents=True, exist_ok=True)
-    (edir / "merged").mkdir(parents=True, exist_ok=True)
-
-    cg = _cgroup_prepare(f"job-{jid}", memory_max=memory_max, cpu_max=cpu_max)
-    unshare_cmd = ["unshare", "--mount", "--pid", "--fork", "--kill-child", "--propagation", "slave"]
+    jid = validate_name(job_id, "job id") if job_id else f"j{int(time.time())}-{uuid.uuid4().hex}"
+    unshare_cmd = ["unshare", "--mount", "--pid", "--fork", "--kill-child", "--forward-signals", "--propagation", "slave"]
     net_prefix: list[str] = []
     if net_mode == "none":
         unshare_cmd.append("--net")
@@ -929,94 +1341,62 @@ def run_container(
         "1" if want_gpu else "0",
         init_bin,
         mounts_tsv if mounts_tsv else "[]",
-        *command,
     ]
-
-    log_path = _job_log_file(jid)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _enter_cgroup() -> None:
-        if cg is not None and (cg / "cgroup.procs").exists():
-            try:
-                (cg / "cgroup.procs").write_text(f"{os.getpid()}\n", encoding="utf-8")
-            except OSError:
-                pass
-
-    job_rec: dict = {
-        "version": 1,
-        "job_id": jid,
-        "env": env_name,
-        "image": meta["image"],
-        "command": list(command),
-        "gpu": bool(want_gpu),
-        "net": net_mode,
-        "cgroup": str(cg) if cg else "",
-        "log": str(log_path),
-        "state": "running",
-        "started_at": _utc_now(),
-        "ended_at": "",
-        "exit_code": None,
-        "pid": 0,
+    spec = {
+        "record": {
+            "version": 1,
+            "job_id": jid,
+            "env": env_name,
+            "image": meta["image"],
+            "command": command,
+            "gpu": bool(want_gpu),
+            "net": net_mode,
+            "cgroup": "",
+            "log": str(_job_log_file(jid)),
+            "state": "starting",
+            "started_at": _utc_now(),
+            "ended_at": "",
+            "exit_code": None,
+            "pid": 0,
+        },
+        "path": str(_job_file(jid)),
+        "cgroup": str(cgroup_root() / f"job-{jid}"),
+        "memory": memory_max,
+        "cpu": cpu_max,
+        "env_dir": str(edir),
+        "argv": full_cmd,
+        "env": run_env,
     }
 
     if detach:
-        with open(log_path, "wb") as log_fh:
-            proc = subprocess.Popen(
-                full_cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                env=run_env,
-                preexec_fn=_enter_cgroup,
-                start_new_session=True,
-            )
-        job_rec["pid"] = proc.pid
-        _atomic_write_json(_job_file(jid), job_rec, 0o600)
-
-        def _reaper(p: subprocess.Popen, rec_copy: dict) -> None:
-            rc = p.wait()
-            latest = rec_copy
-            try:
-                latest = json.loads(_job_file(jid).read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                pass
-            if latest.get("state") == "running":
-                latest["state"] = "succeeded" if rc == 0 else "failed"
-            latest["exit_code"] = rc
-            latest["ended_at"] = _utc_now()
-            _atomic_write_json(_job_file(jid), latest, 0o600)
-            _cgroup_kill_and_remove(f"job-{jid}")
-
-        threading.Thread(target=_reaper, args=(proc, dict(job_rec)), daemon=True).start()
-        return job_rec
-
-    with open(log_path, "wb") as log_fh:
+        # A supervisor is deliberately independent of the caller's terminal and
+        # cgroup. It owns the record and stays alive until the child is reaped.
         proc = subprocess.Popen(
-            full_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=run_env,
-            preexec_fn=_enter_cgroup,
+            [sys.executable, str(Path(__file__).resolve()), "_supervise-job"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        job_rec["pid"] = proc.pid
-        _atomic_write_json(_job_file(jid), job_rec, 0o600)
-        assert proc.stdout is not None
-        while True:
-            chunk = proc.stdout.read(4096)
-            if not chunk:
-                break
-            log_fh.write(chunk)
-            log_fh.flush()
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
-        rc = proc.wait()
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(json.dumps(spec).encode("utf-8"))
+        proc.stdin.close()
+        try:
+            with selectors.DefaultSelector() as sel:
+                sel.register(proc.stdout, selectors.EVENT_READ)
+                if not sel.select(_JOB_START_TIMEOUT + 5):
+                    proc.terminate()
+                    raise ComputeError(f"job {jid} supervisor did not report startup; check job status")
+            reply = proc.stdout.readline()
+        finally:
+            proc.stdout.close()
+        if not reply:
+            proc.wait()
+            raise ComputeError(f"job {jid} supervisor exited ({proc.returncode}) before reporting startup")
+        result = json.loads(reply)
+        if "error" in result:
+            raise ComputeError(result["error"])
+        return result
 
-    job_rec["exit_code"] = rc
-    job_rec["state"] = "succeeded" if rc == 0 else "failed"
-    job_rec["ended_at"] = _utc_now()
-    _atomic_write_json(_job_file(jid), job_rec, 0o600)
-    _cgroup_kill_and_remove(f"job-{jid}")
-    return job_rec
+    return _supervise_job(spec)
 
 
 # ---- KVM micro-VM backend ----
@@ -1089,6 +1469,97 @@ def _create_qcow2_overlay(base_disk: Path, overlay_path: Path) -> None:
         raise ComputeError(f"qemu-img overlay creation failed: {proc.stderr.strip()}")
 
 
+VM_DISPLAYS = ("none", "gtk", "sdl")
+VM_FREEZE = ("qmp", "none")
+VIRTIOFSD_CANDIDATES = (
+    "/usr/lib/virtiofsd",
+    "/usr/libexec/virtiofsd",
+    "/usr/bin/virtiofsd",
+)
+
+
+def _parse_vm_share_spec(raw: str) -> dict[str, str]:
+    """Parse HOST_DIR:TAG[:ro|rw] for VM directory shares."""
+    parts = raw.split(":")
+    if len(parts) not in (2, 3):
+        raise ComputeError(f"invalid --share {raw!r}; expected HOST_DIR:TAG[:ro|rw]")
+    hdir, tag = parts[0], parts[1]
+    mode = parts[2] if len(parts) == 3 and parts[2] else "rw"
+    if mode not in ("ro", "rw"):
+        raise ComputeError(f"invalid --share mode {mode!r}; expected ro or rw")
+    m = parse_mount_spec(f"{hdir}:/share/{tag}:{mode}")
+    validate_name(tag, "share tag")
+    if not os.path.isdir(m["host"]):
+        raise ComputeError(f"share path must be a directory: {m['host']}")
+    return {"host": m["host"], "tag": tag, "mode": mode}
+
+
+def _parse_vm_volume_spec(raw: str) -> dict[str, str]:
+    """Parse NAME[:TAG[:ro|rw]] for VM storage volume shares."""
+    parts = raw.split(":")
+    if len(parts) not in (1, 2, 3):
+        raise ComputeError(f"invalid --volume {raw!r}; expected NAME[:TAG[:ro|rw]]")
+    vname = parts[0]
+    tag = parts[1] if len(parts) >= 2 and parts[1] else vname
+    mode = parts[2] if len(parts) == 3 and parts[2] else "rw"
+    if mode not in ("ro", "rw"):
+        raise ComputeError(f"invalid --volume mode {mode!r}; expected ro or rw")
+    validate_name(tag, "share tag")
+    res = resolve_volume_mount_spec(vname)
+    return {"name": res["volume"], "tag": tag, "mode": mode}
+
+
+def find_virtiofsd() -> str:
+    """Locate the Rust virtiofsd binary (LOCACHY_VIRTIOFSD override, PATH, or /usr/lib/virtiofsd)."""
+    override = os.environ.get("LOCACHY_VIRTIOFSD", "").strip()
+    if override:
+        if os.path.isfile(override) and os.access(override, os.X_OK):
+            return override
+        found = shutil.which(override)
+        if found:
+            return found
+        raise ComputeError(f"LOCACHY_VIRTIOFSD not executable: {override!r}")
+    found = shutil.which("virtiofsd")
+    if found:
+        return found
+    for cand in VIRTIOFSD_CANDIDATES:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    raise ComputeError(
+        "virtiofsd is required for VM shares; install the virtiofsd package"
+    )
+
+
+def virtiofsd_build_argv(share: dict[str, str], sock_path: Path, *, binary: str | None = None) -> list[str]:
+    """Build Rust virtiofsd command line (works both as root and as unprivileged uid)."""
+    vfs_bin = binary or find_virtiofsd()
+    sock = _vm_sock_path(str(sock_path), "virtiofs socket")
+    sandbox = os.environ.get("LOCACHY_VIRTIOFSD_SANDBOX", "namespace").strip() or "namespace"
+    if sandbox not in ("namespace", "chroot", "none"):
+        raise ComputeError(f"invalid LOCACHY_VIRTIOFSD_SANDBOX: {sandbox!r}")
+    argv = [
+        vfs_bin,
+        f"--socket-path={sock}",
+        f"--shared-dir={share['host']}",
+        f"--sandbox={sandbox}",
+        "--cache=auto",
+    ]
+    if share.get("mode") == "ro":
+        argv.append("--readonly")
+    return argv
+
+
+def _vm_sock_path(path: str, label: str = "socket") -> str:
+    # QEMU splits -qmp/-chardev options on commas, and UNIX sun_path is limited to 108 bytes.
+    if not os.path.isabs(path) or not re.fullmatch(r"/[A-Za-z0-9._/-]+", path) or len(path) > 100:
+        raise ComputeError(f"invalid {label} path {path!r}: absolute, [A-Za-z0-9._/-], at most 100 bytes")
+    return path
+
+
+def _vm_qmp_path(path: str) -> str:
+    return _vm_sock_path(path, "QMP socket")
+
+
 def vm_create(
     name: str,
     base_disk: str,
@@ -1096,6 +1567,7 @@ def vm_create(
     memory_mb: int = 2048,
     cpus: int = 2,
     shares: list[str] | None = None,
+    volumes: list[str] | None = None,
     cloud_init: str = "",
     net: str = "user",
 ) -> dict:
@@ -1112,15 +1584,21 @@ def vm_create(
     base_real = base_path.resolve()
 
     parsed_shares: list[dict[str, str]] = []
+    seen_tags: set[str] = set()
     for raw in shares or []:
-        if ":" not in raw:
-            raise ComputeError(f"invalid --share {raw!r}; expected HOST_DIR:TAG")
-        hdir, tag = raw.split(":", 1)
-        m = parse_mount_spec(f"{hdir}:/share/{tag}:rw")
-        validate_name(tag, "share tag")
-        if not os.path.isdir(m["host"]):
-            raise ComputeError(f"share path must be a directory: {m['host']}")
-        parsed_shares.append({"host": m["host"], "tag": tag})
+        entry = _parse_vm_share_spec(raw)
+        if entry["tag"] in seen_tags:
+            raise ComputeError(f"duplicate share tag: {entry['tag']}")
+        seen_tags.add(entry["tag"])
+        parsed_shares.append(entry)
+
+    parsed_volumes: list[dict[str, str]] = []
+    for raw in volumes or []:
+        entry = _parse_vm_volume_spec(raw)
+        if entry["tag"] in seen_tags:
+            raise ComputeError(f"duplicate share tag: {entry['tag']}")
+        seen_tags.add(entry["tag"])
+        parsed_volumes.append(entry)
 
     ci_real = ""
     if cloud_init:
@@ -1143,59 +1621,232 @@ def vm_create(
         "memory_mb": int(memory_mb),
         "cpus": int(cpus),
         "shares": parsed_shares,
+        "volumes": parsed_volumes,
         "cloud_init": ci_real,
         "net": net,
         "created_at": _utc_now(),
         "reset_at": _utc_now(),
     }
     _atomic_write_json(vdir / "vm.json", meta, 0o600)
+    for owned in (vdir, overlay, vdir / "vm.json"):
+        _own_for_app(owned)
     return meta
 
 
-def vm_build_argv(meta: dict, *, kvm: bool | None = None) -> list[str]:
+def _vm_display(value: str) -> str:
+    if value not in VM_DISPLAYS:
+        raise ComputeError(f"invalid VM display {value!r}; expected none, gtk, or sdl")
+    return value
+
+
+def _vm_aio() -> str:
+    """Block I/O engine for the VM's disk: io_uring by default (LOCACHY_COMPUTE_AIO=threads when the host forbids it)."""
+    aio = os.environ.get("LOCACHY_COMPUTE_AIO", "io_uring").strip() or "io_uring"
+    if aio not in ("io_uring", "threads"):
+        raise ComputeError(f"invalid LOCACHY_COMPUTE_AIO {aio!r}; expected io_uring or threads")
+    return aio
+
+
+def _vm_vfs_sock_path(rdir: Path, idx: int) -> Path:
+    return Path(_vm_sock_path(str(rdir / f"vfs-{idx}.sock"), "virtiofs socket"))
+
+
+def vm_build_argv(
+    meta: dict,
+    *,
+    kvm: bool | None = None,
+    display: str = "none",
+    qmp_sock: str | None = None,
+) -> list[str]:
     qemu = shutil.which("qemu-system-x86_64") or "/usr/bin/qemu-system-x86_64"
-    use_kvm = os.path.exists("/dev/kvm") if kvm is None else kvm
+    if kvm is None:
+        # LOCACHY_COMPUTE_KVM=0 forces TCG (tests in namespaces without /dev/kvm access).
+        kvm = os.environ.get("LOCACHY_COMPUTE_KVM", "") != "0" and os.path.exists("/dev/kvm")
+    use_kvm = kvm
+    display = _vm_display(display)
     rdir = _vm_run_dir(meta["name"])
+    qmp = _vm_qmp_path(qmp_sock) if qmp_sock else _vm_qmp_path(str(rdir / "qmp.sock"))
+
+    all_shares = [
+        {"host": s["host"], "tag": s["tag"], "mode": s.get("mode", "rw")}
+        for s in meta.get("shares", [])
+    ]
+    for vol in meta.get("volumes", []):
+        res = resolve_volume_mount_spec(vol["name"])
+        all_shares.append({"host": res["host"], "tag": vol["tag"], "mode": vol.get("mode", "rw")})
+
+    # virtiofs is the only share transport: guest RAM is a shared memfd when any share exists.
+    machine = "q35" + (",accel=kvm" if use_kvm else ",accel=tcg")
+    if all_shares:
+        machine += ",memory-backend=mem"
+
+    # The window tag: QEMU's title is "QEMU (TAG)" (GTK) or "QEMU (TAG-N)" (SDL), and the
+    # desktop names a VM app's window by it (base/open.c). Brackets never occur in a VM
+    # name, so one VM's tag never starts another's.
     argv = [
         qemu,
         "-name",
-        f"locachy-compute-{meta['name']}",
+        f"locachy-compute[{meta['name']}]",
         *(["-enable-kvm"] if use_kvm else []),
         "-machine",
-        "q35" + (",accel=kvm" if use_kvm else ",accel=tcg"),
+        machine,
         "-cpu",
         "host" if use_kvm else "max",
         "-smp",
         str(meta["cpus"]),
         "-m",
         str(meta["memory_mb"]),
+    ]
+    if all_shares:
+        argv.extend([
+            "-object",
+            f"memory-backend-memfd,id=mem,size={int(meta['memory_mb'])}M,share=on",
+        ])
+    # window-close=off: closing the window (its button, the bar, the overview) never
+    # pulls the guest's power; QEMU's default quits on any close request.
+    argv.extend([
         "-display",
-        "none",
+        display if display == "none" else f"{display},window-close=off",
         "-serial",
         f"unix:{rdir / 'serial.sock'},server=on,wait=off",
         "-monitor",
         f"unix:{rdir / 'monitor.sock'},server=on,wait=off",
         "-pidfile",
         str(rdir / "qemu.pid"),
+        "-object",
+        "iothread,id=iothread0",
         "-drive",
-        f"file={meta['overlay_disk']},format=qcow2,if=virtio,discard=unmap",
-    ]
+        f"file={meta['overlay_disk']},format=qcow2,if=none,id=hd0,cache=none,aio={_vm_aio()},discard=unmap",
+        "-device",
+        "virtio-blk-pci,drive=hd0,iothread=iothread0",
+    ])
+    if display != "none":
+        # A window: a virtio GPU, keyboard-less USB pointer, and the QEMU display backend.
+        argv.extend(["-device", "virtio-vga", "-device", "qemu-xhci", "-device", "usb-tablet"])
+    argv.extend(["-qmp", f"unix:{qmp},server=on,wait=off"])
     if meta.get("cloud_init"):
         argv.extend(["-drive", f"file={meta['cloud_init']},format=raw,media=cdrom,readonly=on"])
     if meta.get("net") == "user":
         argv.extend(["-nic", "user,model=virtio-net-pci"])
     else:
         argv.extend(["-nic", "none"])
-    for idx, share in enumerate(meta.get("shares", [])):
+    for idx, share in enumerate(all_shares):
+        sock_path = _vm_vfs_sock_path(rdir, idx)
         argv.extend(
             [
-                "-fsdev",
-                f"local,id=fsdev{idx},path={share['host']},security_model=mapped-xattr",
+                "-chardev",
+                f"socket,id=vfs{idx},path={sock_path}",
                 "-device",
-                f"virtio-9p-pci,fsdev=fsdev{idx},mount_tag={share['tag']}",
+                f"vhost-user-fs-pci,queue-size=1024,chardev=vfs{idx},tag={share['tag']}",
             ]
         )
     return argv
+
+
+def _stop_virtiofs_daemons(procs: list[subprocess.Popen], sock_paths: list[Path]) -> None:
+    for proc in procs:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+    deadline = time.monotonic() + 2.0
+    for proc in procs:
+        remaining = max(0.0, deadline - time.monotonic())
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+    for sp in sock_paths:
+        try:
+            sp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _start_virtiofs_daemons(
+    resolved_meta: dict,
+    rdir: Path,
+    *,
+    enter_cg=None,
+    detach: bool = False,
+) -> tuple[list[subprocess.Popen], list[Path]]:
+    """Spawn one virtiofsd per share and wait for each socket to appear."""
+    shares = resolved_meta.get("shares", [])
+    if not shares:
+        return [], []
+    vfs_bin = find_virtiofsd()
+    procs: list[subprocess.Popen] = []
+    socks: list[Path] = []
+    try:
+        for idx, share in enumerate(shares):
+            sock_path = _vm_vfs_sock_path(rdir, idx)
+            sock_path.unlink(missing_ok=True)
+            argv = virtiofsd_build_argv(share, sock_path, binary=vfs_bin)
+            log_path = rdir / f"virtiofsd-{idx}.log"
+            with open(log_path, "wb") as log_fh:
+                proc = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    preexec_fn=enter_cg,
+                    start_new_session=detach,
+                )
+            procs.append(proc)
+            socks.append(sock_path)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if sock_path.exists():
+                    break
+                if proc.poll() is not None:
+                    err = log_path.read_text(encoding="utf-8", errors="replace").strip()
+                    raise ComputeError(
+                        f"virtiofsd for share {share['tag']!r} exited ({proc.returncode}): {err}"
+                    )
+                time.sleep(0.05)
+            if not sock_path.exists():
+                err = log_path.read_text(encoding="utf-8", errors="replace").strip()
+                raise ComputeError(
+                    f"virtiofsd socket did not appear for share {share['tag']!r}: {sock_path}"
+                    + (f" ({err})" if err else "")
+                )
+        return procs, socks
+    except Exception:
+        _stop_virtiofs_daemons(procs, socks)
+        raise
+
+
+def _stop_virtiofs_pids_file(rdir: Path) -> None:
+    pfile = rdir / "virtiofsd.pids"
+    if pfile.is_file():
+        for line in pfile.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip().isdigit():
+                continue
+            pid = int(line.strip())
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                continue
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.05)
+                except OSError:
+                    break
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        pfile.unlink(missing_ok=True)
+    for sock in rdir.glob("vfs-*.sock"):
+        sock.unlink(missing_ok=True)
 
 
 def vm_start(name: str) -> dict:
@@ -1205,10 +1856,11 @@ def vm_start(name: str) -> dict:
     if not shutil.which("qemu-system-x86_64"):
         raise ComputeError("qemu-system-x86_64 is not installed")
     rdir = _vm_run_dir(name)
-    rdir.mkdir(parents=True, exist_ok=True)
+    rdir.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(rdir, 0o700)
     cg = _cgroup_prepare(f"vm-{name}")
-    argv = vm_build_argv(meta)
+    resolved = _vm_resolve_shares(meta)
+    argv = vm_build_argv(resolved)
 
     def _enter_cg() -> None:
         if cg is not None and (cg / "cgroup.procs").exists():
@@ -1217,25 +1869,37 @@ def vm_start(name: str) -> dict:
             except OSError:
                 pass
 
-    log_path = rdir / "qemu.log"
-    with open(log_path, "wb") as log_fh:
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            preexec_fn=_enter_cg,
-            start_new_session=True,
+    vfs_procs, vfs_socks = _start_virtiofs_daemons(resolved, rdir, enter_cg=_enter_cg, detach=True)
+    if vfs_procs:
+        (rdir / "virtiofsd.pids").write_text(
+            "".join(f"{p.pid}\n" for p in vfs_procs), encoding="utf-8"
         )
-    time.sleep(0.2)
-    if proc.poll() is not None:
-        err = log_path.read_text(encoding="utf-8", errors="replace").strip()
-        raise ComputeError(f"VM {name} exited immediately ({proc.returncode}): {err}")
+
+    log_path = rdir / "qemu.log"
+    try:
+        with open(log_path, "wb") as log_fh:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                preexec_fn=_enter_cg,
+                start_new_session=True,
+            )
+        time.sleep(0.2)
+        if proc.poll() is not None:
+            err = log_path.read_text(encoding="utf-8", errors="replace").strip()
+            raise ComputeError(f"VM {name} exited immediately ({proc.returncode}): {err}")
+    except Exception:
+        _stop_virtiofs_daemons(vfs_procs, vfs_socks)
+        (rdir / "virtiofsd.pids").unlink(missing_ok=True)
+        raise
     return {"name": name, "pid": proc.pid, "serial_sock": str(rdir / "serial.sock"), "cgroup": str(cg or "")}
 
 
 def vm_stop(name: str) -> dict:
     vm_load(name)
+    rdir = _vm_run_dir(name)
     pfile = _vm_pid_path(name)
     if pfile.is_file():
         try:
@@ -1255,17 +1919,167 @@ def vm_stop(name: str) -> dict:
         except (OSError, ValueError):
             pass
         pfile.unlink(missing_ok=True)
+    _stop_virtiofs_pids_file(rdir)
     _cgroup_kill_and_remove(f"vm-{name}")
     return {"name": name, "running": False}
+
+
+def _app_uid() -> int:
+    raw = os.environ.get("LOCACHY_COMPUTE_APP_UID", "1000").strip()
+    if not raw.isdigit():
+        raise ComputeError(f"LOCACHY_COMPUTE_APP_UID must be a number: {raw!r}")
+    return int(raw)
+
+
+def _is_real_host_root() -> bool:
+    """True when running as real init_user_ns root (not an unprivileged user namespace)."""
+    if os.geteuid() != 0:
+        return False
+    try:
+        for ln in Path("/proc/self/uid_map").read_text(encoding="utf-8").splitlines():
+            parts = ln.split()
+            if len(parts) == 3 and parts[0] == "0" and parts[1] == "0":
+                return True
+        return False
+    except OSError:
+        return True
+
+
+def _own_for_app(path: Path) -> None:
+    """Real root hands a VM's files to the uid its QEMU runs as (locachy-app: uid 1000)."""
+    if os.geteuid() == 0 and (_is_real_host_root() or os.environ.get("LOCACHY_COMPUTE_APP_UID")):
+        os.chown(path, _app_uid(), -1)
+
+
+def _vm_resolve_shares(meta: dict) -> dict:
+    """Volume shares are re-checked on every start: an unmounted or re-roled volume fails closed."""
+    out = dict(meta)
+    shares = [
+        {"host": s["host"], "tag": s["tag"], "mode": s.get("mode", "rw")}
+        for s in meta.get("shares", [])
+    ]
+    for vol in meta.get("volumes", []):
+        res = resolve_volume_mount_spec(vol["name"])
+        shares.append({"host": res["host"], "tag": vol["tag"], "mode": vol.get("mode", "rw")})
+    out["shares"] = shares
+    out["volumes"] = []
+    return out
+
+
+def _vm_run_argv(meta: dict, display: str, qmp_sock: str | None) -> list[str]:
+    return vm_build_argv(_vm_resolve_shares(meta), display=display, qmp_sock=qmp_sock or None)
+
+
+def vm_run(name: str, *, display: str = "none", qmp_sock: str = "") -> int:
+    """Run a VM in the foreground until it ends; returns QEMU's exit status.
+
+    locachy-app starts this inside the app's own cgroup (app_NAME), so nothing
+    here detaches or joins a cgroup. Any virtiofsd daemons for the VM's shares
+    are spawned as children (inheriting app_NAME), kept alive until QEMU exits
+    so guest writes flush, and reaped on exit. SIGTERM and SIGINT are forwarded
+    to QEMU, which powers the guest off. No root is needed on this path: the run
+    directory, the overlay and vm.json must belong to (or be writable by) the
+    uid that runs this command (LOCACHY_COMPUTE_APP_UID, 1000 by default).
+    """
+    meta = vm_load(name)
+    if not shutil.which("qemu-system-x86_64"):
+        raise ComputeError("qemu-system-x86_64 is not installed")
+    rdir = _vm_run_dir(name)
+    try:
+        rdir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise ComputeError(f"VM run directory {rdir} cannot be created by uid {os.geteuid()}: {exc}") from exc
+    if os.stat(rdir).st_uid != os.geteuid():
+        raise ComputeError(f"VM run directory {rdir} is not owned by uid {os.geteuid()}")
+    os.chmod(rdir, 0o700)
+    if _vm_is_running(name):
+        raise ComputeError(f"VM {name} is already running")
+    resolved = _vm_resolve_shares(meta)
+    argv = vm_build_argv(resolved, display=display, qmp_sock=qmp_sock or None)
+    vfs_procs, vfs_socks = _start_virtiofs_daemons(resolved, rdir, detach=False)
+    pfile = _vm_pid_path(name)
+    previous: dict[int, object] = {}
+    proc_box: list[subprocess.Popen | None] = [None]
+    pending_stop = [False]
+
+    def _forward(_signum, _frame) -> None:
+        p = proc_box[0]
+        if p is None:
+            pending_stop[0] = True
+            return
+        try:
+            p.send_signal(signal.SIGTERM)
+        except OSError:
+            pass
+
+    try:
+        # Install signal forwarding before spawning QEMU so an early SIGTERM
+        # never kills the wrapper before it can forward and clean up virtiofsd.
+        previous = {sig: signal.signal(sig, _forward) for sig in (signal.SIGTERM, signal.SIGINT)}
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+        proc_box[0] = proc
+        pfile.write_text(f"{proc.pid}\n", encoding="utf-8")
+        if pending_stop[0]:
+            try:
+                proc.send_signal(signal.SIGTERM)
+            except OSError:
+                pass
+        rc = proc.wait()
+    finally:
+        for sig, old in previous.items():
+            signal.signal(sig, old)
+        pfile.unlink(missing_ok=True)
+        _stop_virtiofs_daemons(vfs_procs, vfs_socks)
+    return rc if rc >= 0 else 128 - rc
+
+
+def _containers_dir() -> Path:
+    return _abs_env("LOCACHY_CONTAINERS_DIR", "/etc/locachy/containers")
+
+
+def vm_export_app(
+    name: str,
+    *,
+    app_name: str = "",
+    display: str = "gtk",
+    freeze: str = "qmp",
+    network: bool = False,
+) -> dict:
+    """Write /etc/locachy/containers/APP.conf so a compute VM appears in Home as an app."""
+    vm_load(name)
+    app = app_name or f"vm-{name}"
+    validate_name(app, "app name")
+    if display not in ("gtk", "sdl"):
+        raise ComputeError("an app needs a window: --display must be gtk or sdl")
+    if freeze not in VM_FREEZE:
+        raise ComputeError(f"invalid --freeze {freeze!r}; expected qmp or none")
+    conf = {
+        "vm": "1",
+        "vm_kind": "compute",
+        "vm_name": name,
+        "vm_display": display,
+        "vm_freeze": freeze,
+        "network": "1" if network else "0",
+    }
+    cdir = _containers_dir()
+    cdir.mkdir(parents=True, exist_ok=True)
+    text = "# Written by locachy-compute vm export-app: a compute VM shown in Home.\n"
+    text += "".join(f'{key}="{value}"\n' for key, value in conf.items())
+    path = cdir / f"{app}.conf"
+    _atomic_write_json_text(path, text, 0o644)
+    return {"app": app, "path": str(path), **conf}
 
 
 def vm_reset(name: str) -> dict:
     meta = vm_load(name)
     if _vm_is_running(name):
         vm_stop(name)
-    _create_qcow2_overlay(Path(meta["base_disk"]), Path(meta["overlay_disk"]))
+    overlay = Path(meta["overlay_disk"])
+    _create_qcow2_overlay(Path(meta["base_disk"]), overlay)
+    _own_for_app(overlay)
     meta["reset_at"] = _utc_now()
     _atomic_write_json(_vm_dir(name) / "vm.json", meta, 0o600)
+    _own_for_app(_vm_dir(name) / "vm.json")
     return meta
 
 
@@ -1389,9 +2203,11 @@ def _node_health(peers_base: Path) -> dict:
         "memory_kb": mem_kb,
         "gpu_devices": gpus["devices"],
         "gpu_nvidia_libs": len(gpus["nvidia_libs"]),
-        "active_jobs": sum(1 for j in jobs if j.get("state") == "running"),
+        "active_jobs": sum(1 for j in jobs if j.get("state") in _JOB_ACTIVE),
         "envs": len(env_list()),
         "vms": len(vm_list()),
+        "storage_volume": configured_compute_storage_volume(),
+        "compute_base": str(compute_base()),
     }
 
 
@@ -1478,10 +2294,10 @@ class _ComputeHandler(BaseHTTPRequestHandler):
                 cmd = body.get("command")
                 if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
                     raise ComputeError("'command' must be a non-empty string list")
-                # Host mounts are the node operator's (locachy-compute env create),
-                # never a remote peer's choice: a paired peer runs inside an env.
-                if body.get("mounts"):
-                    raise ComputeError("mounts are set on the env by the node operator, not per job")
+                # Host mounts and storage volumes are the node operator's
+                # (locachy-compute env create), never a remote peer's choice.
+                if body.get("mounts") or body.get("volumes"):
+                    raise ComputeError("mounts and volumes are set on the env by the node operator, not per job")
                 rec = run_container(
                     env_name,
                     cmd,
@@ -1745,6 +2561,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--gpu", action="store_true")
     sp.add_argument("--net", choices=("locachy-net", "none"), default="locachy-net")
     sp.add_argument("--mount", action="append", default=[])
+    sp.add_argument("--volume", action="append", default=[], help="Storage volume NAME[:CONTAINER_PATH[:ro|rw]]")
     sp.add_argument("--memory", default="")
     sp.add_argument("--cpu", default="")
     sp.add_argument("--workdir", default="/")
@@ -1763,13 +2580,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-gpu", dest="gpu", action="store_false")
     sp.add_argument("--net", choices=("locachy-net", "none"), default=None)
     sp.add_argument("--mount", action="append", default=[])
+    sp.add_argument("--volume", action="append", default=[], help="Storage volume NAME[:CONTAINER_PATH[:ro|rw]]")
     sp.add_argument("--workdir", default=None)
     sp.add_argument("--env", action="append", default=[])
     sp.add_argument("--memory", default=None)
     sp.add_argument("--cpu", default=None)
     sp.add_argument("--job-id", default=None)
     sp.add_argument("--detach", action="store_true")
-    sp.add_argument("command", nargs=argparse.REMAINDER)
+    sp.add_argument("command", nargs="*")
 
     # job
     p_job = sub.add_parser("job", help="Inspect or stop compute jobs")
@@ -1792,12 +2610,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--disk", required=True, help="Read-only base qcow2 image")
     sp.add_argument("--memory-mb", type=int, default=2048)
     sp.add_argument("--cpus", type=int, default=2)
-    sp.add_argument("--share", action="append", default=[], help="HOST_DIR:TAG 9p share")
+    sp.add_argument("--share", action="append", default=[], help="HOST_DIR:TAG[:ro|rw] directory share")
+    sp.add_argument("--volume", action="append", default=[], help="Storage volume NAME[:TAG[:ro|rw]] (role shared or compute)")
     sp.add_argument("--cloud-init", default="")
     sp.add_argument("--net", choices=("user", "none"), default="user")
     sp = sub_vm.add_parser("cmd", help="Print the QEMU argv for a VM")
     sp.add_argument("name")
+    sp.add_argument("--display", default="none", choices=VM_DISPLAYS)
+    sp.add_argument("--qmp-sock", default="", help="Absolute QMP socket path (default: the run directory's qmp.sock)")
     sp.add_argument("--json", action="store_true")
+    sp = sub_vm.add_parser("run", help="Run a VM in the foreground (locachy-app starts it in the app's cgroup)")
+    sp.add_argument("name")
+    sp.add_argument("--display", default="none", choices=VM_DISPLAYS)
+    sp.add_argument("--qmp-sock", default="")
+    sp = sub_vm.add_parser("export-app", help="Write /etc/locachy/containers/APP.conf so Home shows the VM")
+    sp.add_argument("name")
+    sp.add_argument("--app-name", default="", help="App name (default vm-NAME)")
+    sp.add_argument("--display", default="gtk", choices=("gtk", "sdl"))
+    sp.add_argument("--freeze", default="qmp", choices=VM_FREEZE)
+    sp.add_argument("--network", default="0", choices=("0", "1"))
     sp = sub_vm.add_parser("list")
     sp.add_argument("--json", action="store_true")
     sp = sub_vm.add_parser("start")
@@ -1811,6 +2642,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # gpu
     sp = sub.add_parser("gpu-probe", help="Show detected GPU devices and NVIDIA libraries")
+    sp.add_argument("--json", action="store_true")
+
+    # storage
+    sp = sub.add_parser("storage", help="Show active compute_storage volume, compute base, and bindable volumes")
     sp.add_argument("--json", action="store_true")
 
     # serve
@@ -1852,9 +2687,26 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _parse_cli(parser: argparse.ArgumentParser, argv: list[str] | None) -> argparse.Namespace:
+    """`run ENV [options] -- COMMAND`: the command is everything after the first '--'.
+
+    argparse's REMAINDER positional would take the options that follow ENV, so
+    the split happens before parsing.
+    """
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    if tokens[:1] == ["run"] and "--" in tokens[1:]:
+        cut = tokens.index("--", 1)
+        args = parser.parse_args(tokens[:cut])
+        args.command = tokens[cut + 1 :]
+        return args
+    return parser.parse_args(tokens)
+
+
 def main(argv: list[str] | None = None) -> int:
+    if (sys.argv[1:] if argv is None else argv) == ["_supervise-job"]:
+        return _job_supervisor_main()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = _parse_cli(parser, argv)
     try:
         if args.cmd == "image":
             if args.img_cmd == "import":
@@ -1879,6 +2731,7 @@ def main(argv: list[str] | None = None) -> int:
                     gpu=args.gpu,
                     net=args.net,
                     mounts=args.mount,
+                    volumes=args.volume,
                     memory_max=args.memory,
                     cpu_max=args.cpu,
                     workdir=args.workdir,
@@ -1909,6 +2762,7 @@ def main(argv: list[str] | None = None) -> int:
                 gpu_override=args.gpu,
                 net_override=args.net,
                 extra_mounts=args.mount,
+                extra_volumes=args.volume,
                 workdir_override=args.workdir,
                 extra_env=args.env,
                 memory_override=args.memory,
@@ -1919,7 +2773,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.detach:
                 print(json.dumps(rec, sort_keys=True))
                 return 0
-            return int(rec["exit_code"] or 0)
+            if rec.get("launch_error"):
+                print(f"locachy-compute: {rec['launch_error']}", file=sys.stderr)
+            if rec.get("supervisor_error"):
+                print(f"locachy-compute: {rec['supervisor_error']}", file=sys.stderr)
+            if rec.get("cleanup_error"):
+                print(f"locachy-compute: {rec['cleanup_error']}", file=sys.stderr)
+            rc = rec["exit_code"]
+            if rc is None or (rc == 0 and rec["state"] == "failed"):
+                return 1
+            return rc if rc >= 0 else 128 - rc
 
         if args.cmd == "job":
             if args.job_cmd == "list":
@@ -1949,16 +2812,30 @@ def main(argv: list[str] | None = None) -> int:
                     memory_mb=args.memory_mb,
                     cpus=args.cpus,
                     shares=args.share,
+                    volumes=args.volume,
                     cloud_init=args.cloud_init,
                     net=args.net,
                 )
                 print(json.dumps(meta, sort_keys=True))
             elif args.vm_cmd == "cmd":
-                argv_out = vm_build_argv(vm_load(args.name))
+                argv_out = _vm_run_argv(vm_load(args.name), args.display, args.qmp_sock)
                 if args.json:
                     print(json.dumps(argv_out))
                 else:
                     print(" ".join(shlex.quote(a) for a in argv_out))
+            elif args.vm_cmd == "run":
+                return vm_run(args.name, display=args.display, qmp_sock=args.qmp_sock)
+            elif args.vm_cmd == "export-app":
+                print(json.dumps(
+                    vm_export_app(
+                        args.name,
+                        app_name=args.app_name,
+                        display=args.display,
+                        freeze=args.freeze,
+                        network=args.network == "1",
+                    ),
+                    sort_keys=True,
+                ))
             elif args.vm_cmd == "list":
                 items = vm_list()
                 if args.json:
@@ -1984,6 +2861,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"devices={len(info['devices'])} nvidia_libs={len(info['nvidia_libs'])}")
                 for d in info["devices"]:
                     print(f"  dev {d}")
+            return 0
+
+        if args.cmd == "storage":
+            info = _storage_summary()
+            if args.json:
+                print(json.dumps(info, indent=2, sort_keys=True))
+            else:
+                print(f"storage_volume: {info['storage_volume'] or 'none (root)'}")
+                print(f"compute_base: {info['compute_base']}")
+                for v in info["available_volumes"]:
+                    m = "mounted" if v["mounted"] else "unmounted"
+                    print(f"  {v['name']}\trole={v['role']}\t{m}\t{v['mountpoint']}")
             return 0
 
         if args.cmd == "serve":

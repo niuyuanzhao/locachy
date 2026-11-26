@@ -307,7 +307,10 @@ static const char fake_install[] =
     "if [ \"$1\" = --refresh-live ]; then\n"
     "  echo refresh >>\"$d/refresh-calls\"\n"
     "  if [ -e \"$d/refresh-fail\" ]; then exit 1; fi\n"
-    "  printf '{\"frontend\":\"%s/installer-next\",\"revision\":\"89abcdef0123\",\"input_hash\":\"fixture\",\"source\":\"%s/src\"}\\n' \"$d\" \"$d\"; exit 0\n"
+    "  printf '{\"frontend\":\"%s/installer-next\",\"revision\":\"89abcdef0123\",\"input_hash\":\"fixture\",\"source\":\"%s/src\",\"snapshot\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}\\n' \"$d\" \"$d\"; exit 0\n"
+    "fi\n"
+    "if [ \"$1\" = --resume-status ]; then\n"
+    "  if [ -e \"$d/resume-status.json\" ]; then cat \"$d/resume-status.json\"; else echo null; fi; exit 0\n"
     "fi\n"
     "echo \"$*\" >>\"$d/calls\"\n"
     "for a in \"$@\"; do case $a in --luks-passphrase-file=*|--password-file=*) f=${a#*=};\n"
@@ -409,6 +412,26 @@ static void test_session_handoff(void)
     set_defaults();
     copy(c.password, sizeof c.password, "fixture-user-secret");
     copy(c.passphrase, sizeof c.passphrase, "fixture-disk-secret");
+    copy(c.disk, sizeof c.disk, "/dev/sda");
+    c.nextra = 2;
+    copy(c.extra[0].disk, sizeof c.extra[0].disk, "/dev/nvme1n1");
+    copy(c.extra[0].part, sizeof c.extra[0].part, "/dev/nvme1n1p1");
+    copy(c.extra[0].name, sizeof c.extra[0].name, "archive");
+    c.extra[0].action = EXTRA_ATTACH;
+    c.extra[0].role = role_index("data");
+    c.extra[0].encrypt = VENC_NONE;
+    copy(c.extra[1].disk, sizeof c.extra[1].disk, "/dev/nvme2n1");
+    copy(c.extra[1].name, sizeof c.extra[1].name, "data");
+    c.extra[1].action = EXTRA_FMT_BTRFS;
+    c.extra[1].role = role_index("shared");
+    c.extra[1].encrypt = VENC_LUKS;
+    c.extra[1].compute_storage = 1;
+    copy(c.array_name, sizeof c.array_name, "fastpool");
+    c.array_raid = raid_index("raid0");
+    c.array_role = role_index("compute");
+    c.array_encrypt = VENC_NONE;
+    copy(c.winmaint_disk, sizeof c.winmaint_disk, "/dev/sda");
+    c.winmaint_gib = 64;
     c.lang = ui_lang = 1;
     recovered_installation = 1;
     struct choices expected = c;
@@ -427,13 +450,15 @@ static void test_session_handoff(void)
 
     /* Missing fields, wrong types, unknown names and overlong secrets must
      * preserve every prior choice, the action and the non-secret UI flags. */
-    for (int test = 0; test < 6; test++) {
+    for (int test = 0; test < 8; test++) {
         struct json_object *bad = json_tokener_parse(text);
         if (test == 0) json_object_object_del(bad, "disk_mode");
         if (test == 1) json_object_object_add(bad, "encrypt", json_object_new_string("2"));
         if (test == 2) json_object_array_add(jget(bad, "modules"), json_object_new_string("removed-module"));
         if (test == 3) json_object_object_add(bad, "password", json_object_new_string_len(text, 300));
         if (test == 4) json_object_object_add(bad, "action", json_object_new_string("other"));
+        if (test == 6) json_object_object_add(bad, "array_raid_name", json_object_new_string("raid99"));
+        if (test == 7) json_object_object_add(bad, "winmaint_gib", json_object_new_int(5));
         fd = fixture_session(bad, test != 5);
         copy(action, sizeof action, "unchanged");
         assert(restore_session(fd, action, sizeof action) == -1);
@@ -466,6 +491,7 @@ static void test_refresh_exec_failure(void)
     setenv("LOCACHY_INSTALLER_INPUT_HASH", "old-fixture", 1);
     setenv("LOCACHY_INSTALLER_REVISION", "old-revision", 1);
     setenv("LOCACHY_INSTALL_SNAPSHOT_ROOT", "old-root", 1);
+    setenv("LOCACHY_INSTALL_SNAPSHOT", "old-snapshot", 1);
     unsetenv("LOCACHY_INSTALL_SNAPSHOT_COMMIT");
     unlink(D("refresh-calls"));
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -474,10 +500,14 @@ static void test_refresh_exec_failure(void)
         assert(!strcmp(getenv("LOCACHY_INSTALLER_REVISION"), "old-revision"));
         assert(!strcmp(getenv("LOCACHY_INSTALL_SNAPSHOT_ROOT"), "old-root"));
         assert(!getenv("LOCACHY_INSTALL_SNAPSHOT_COMMIT"));
+        assert(!strcmp(getenv("LOCACHY_INSTALL_SNAPSHOT"), "old-snapshot"));
     }
     assert(!strcmp(slurp(D("refresh-calls")), "refresh\nrefresh\n"));
     setenv("LOCACHY_INSTALLER_INPUT_HASH", "fixture", 1);
-    printf("PASS installer refresh: repeated exec failure leaves original identity\n");
+    assert(refresh_installer("begin") == 0);
+    assert(!strcmp(getenv("LOCACHY_INSTALL_SNAPSHOT"),
+                   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    printf("PASS installer refresh: failed exec retains the old snapshot; matching binary adopts the new one\n");
 }
 
 static void test_recovered_preflight(void)
@@ -508,6 +538,314 @@ static void test_recovered_preflight(void)
     at = nkeys = recovered_installation = 0;
     keys[0] = END;
     printf("PASS installer recovery: preflight secrets prompted, encryption order independent\n");
+}
+
+static const char multi_disk_describe[] =
+    "{\"defaults\": {\"user\": \"user\", \"hostname\": \"locachy\", \"keymap\": \"us\", \"timezone\": \"auto\","
+    " \"swap_gib\": 8, \"level\": \"auto\", \"cpu\": \"auto\", \"repos\": [\"core\", \"extra\", \"multilib\"],"
+    " \"update_repo\": \"https://github.com/niuyuanzhao/locachy.git\", \"update_branch\": \"main\","
+    " \"apps_repo\": \"https://github.com/niuyuanzhao/locachy-apps.git\", \"apps_branch\": \"main\", \"copy_network\": false},"
+    " \"languages\": [\"en_US.UTF-8\", \"zh_CN.UTF-8\"],"
+    " \"levels\": {\"supported\": [\"x86-64\", \"x86-64-v2\"], \"auto\": \"x86-64-v2\", \"cpu_model\": \"ivybridge\"},"
+    " \"ime\": [{\"name\": \"off\", \"label\": \"OFF (no Rime packages)\"}],"
+    " \"modules\": [{\"name\": \"desktop\", \"description\": \"Shared Wayland compositor\"}],"
+    " \"module_defaults\": {\"en_US.UTF-8\": [\"desktop\"], \"zh_CN.UTF-8\": [\"desktop\"]},"
+    " \"containers\": [{\"name\": \"foot\", \"host\": true}],"
+    " \"container_defaults\": [\"foot\"],"
+    " \"machines\": [{\"name\": \"generic\", \"description\": \"Generic PC\"}],"
+    " \"repo_sections\": [\"core\", \"extra\", \"multilib\"],"
+    " \"storage_roles\": [\"shared\", \"data\", \"compute\"],"
+    " \"storage_raids\": [\"single\", \"raid0\", \"raid1\", \"raid10\"],"
+    " \"winmaint\": {\"min_gib\": 40, \"default_gib\": 48, \"max_gib\": 4096},"
+    " \"keymaps\": [\"us\"], \"timezones\": [\"UTC\"],"
+    " \"tpm\": {\"usable\": false, \"advice\": \"no TPM: a passphrase\"},"
+    " \"source\": {\"text\": \"medium\", \"not_newest\": false},"
+    " \"apps\": {\"text\": \"medium\", \"not_newest\": false},"
+    " \"network_profiles\": 0, \"memory_bytes\": 17179869184, \"esp_bytes\": 536870912, \"min_root_bytes\": 17179869184,"
+    " \"disks\": ["
+    "{\"path\": \"/dev/nvme0n1\", \"size\": 549755813888, \"model\": \"Samsung 990\", \"serial\": \"S990-A\", \"tran\": \"nvme\","
+    " \"removable\": false, \"in_use\": \"\", \"children\": ["
+    "  {\"path\": \"/dev/nvme0n1p1\", \"type\": \"part\", \"size\": 536870912, \"fstype\": \"vfat\", \"label\": \"EFI\", \"parttypename\": \"EFI System\", \"mountpoints\": []}]},"
+    "{\"path\": \"/dev/nvme1n1\", \"size\": 1073741824000, \"model\": \"WD Black\", \"serial\": \"WD-1\", \"tran\": \"nvme\","
+    " \"removable\": false, \"in_use\": \"\", \"pttype\": \"gpt\", \"log_sec\": 512, \"free_tail\": 536332975104, \"children\": ["
+    "  {\"path\": \"/dev/nvme1n1p1\", \"type\": \"part\", \"size\": 536870912000, \"fstype\": \"ntfs\", \"label\": \"Archive\", \"parttypename\": \"Microsoft basic data\", \"mountpoints\": []},"
+    "  {\"path\": \"/dev/nvme1n1p2\", \"type\": \"part\", \"size\": 536870912, \"fstype\": \"vfat\", \"label\": \"ESP\", \"parttypename\": \"EFI System\", \"mountpoints\": []}]},"
+    "{\"path\": \"/dev/nvme2n1\", \"size\": 1073741824000, \"model\": \"WD Black\", \"serial\": \"WD-2\", \"tran\": \"nvme\","
+    " \"removable\": false, \"in_use\": \"\", \"log_sec\": 512, \"free_tail\": 1073740758528, \"children\": []},"
+    "{\"path\": \"/dev/nvme3n1\", \"size\": 1073741824000, \"model\": \"WD Black\", \"serial\": \"WD-3\", \"tran\": \"nvme\","
+    " \"removable\": false, \"in_use\": \"\", \"log_sec\": 512, \"free_tail\": 1073740758528, \"children\": []}]}\n";
+
+static void test_multi_disk_storage_and_winmaint(void)
+{
+    write_file(D("describe.json"), multi_disk_describe, 0644);
+
+    /* 1. Primary disk is NEVER auto-selected; serials are shown; attach + format + winmaint. */
+    k('\n');                    /* Install LOCachy */
+    k(K_EOL); k('\n');          /* Network: Next -> Disk */
+    k(SNAP);
+    /* Select primary disk nvme0n1 (row 1 after disk mode). */
+    k(K_DOWN); k('\n');
+    /* Navigate past nvme1n1, nvme2n1, nvme3n1, Swap -> Additional disk nvme1n1. */
+    k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN);
+    /* Configure nvme1n1: Attach existing partition (action 1), part 0 (ntfs), name "archive", role 1 ("data"). */
+    k('\n'); k(K_DOWN); k('\n'); k('\n');
+    k(KEY('a' & 0x1F, KEYS_CTRL)); type("archive"); k('\n');
+    k(K_DOWN); k('\n');
+    /* Next row: Additional disk nvme2n1 -> Format whole disk (ext4) (action 2), accept "data", role 0 (shared),
+     * enc 0 (auto), default compute storage: y. */
+    k(K_DOWN); k('\n'); k(K_DOWN); k(K_DOWN); k('\n'); k('\n'); k('\n'); k('\n'); k('y');
+    /* Next rows: nvme3n1 (leave untouched), then Maintenance Windows -> Right (on system disk /dev/nvme0n1),
+     * then Down -> Windows C: size -> Right (48 -> 64 GiB). */
+    k(K_DOWN); k(K_DOWN); k(K_RIGHT); k(K_DOWN); k(K_RIGHT);
+    k(SNAP);
+    k(K_EOL); k('\n');          /* Disk: Next -> Encryption */
+    k(K_DOWN); k('\n'); type("correct horse"); k('\n'); type("correct horse"); k('\n');
+    k(K_EOL); k('\n');          /* Encryption: Next -> User */
+    k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
+    for (int s = S_USER; s < S_SUMMARY; s++) { k(K_EOL); k('\n'); }
+    k(SNAP);
+    k(K_EOL); k('\n'); k('n');  /* Install -> --check, then N at confirm */
+    run("multi-disk: no auto-select, attach, format, Maintenance Windows");
+
+    /* First snap (before picking primary): disk list shows serials and no primary selected yet. */
+    assert(snapped("[S990-A]") && snapped("[WD-1]") && snapped("[WD-2]"));
+    assert(snapped("( ) /dev/nvme0n1"));
+    assert(snapped("Additional disks & arrays"));
+    assert(snapped("attach /dev/nvme1n1p1 (ntfs) as archive [data]"));
+    assert(snapped("format (ext4, auto) as data [shared] *compute"));
+    assert(snapped("attached (keep data, volume archive): /dev/nvme1n1p1"));
+    assert(snapped("erased (volume data): /dev/nvme2n1"));
+    assert(snapped("on system disk (/dev/nvme0n1), Windows C: 64 GiB"));
+
+    /* Verify E_NOTE vs E_WARN classification in build_summary(). */
+    build_step(S_SUMMARY, 120);
+    int saw_attach_note = 0, saw_format_warn = 0;
+    for (int i = 0; i < nentries; i++) {
+        if (strstr(entries[i].text, "attached (keep data, volume archive)")) {
+            assert(entries[i].id == E_NOTE);
+            saw_attach_note = 1;
+        }
+        if (strstr(entries[i].text, "erased (volume data): /dev/nvme2n1")) {
+            assert(entries[i].id == E_WARN);
+            saw_format_warn = 1;
+        }
+    }
+    assert(saw_attach_note && saw_format_warn);
+
+    const char *calls = slurp(D("calls"));
+    printf("multi-disk calls: %s", calls);
+    assert(strstr(calls, "--check --disk=/dev/nvme0n1 --swap-gib=8 "));
+    assert(strstr(calls, "--extra-volume=name=archive,mode=attach,dev=/dev/nvme1n1p1,role=data"));
+    assert(strstr(calls, "--extra-volume=name=data,mode=format,dev=/dev/nvme2n1,fs=ext4,role=shared,encrypt=auto,compute_storage=1"));
+    assert(strstr(calls, "--winmaint-disk=/dev/nvme0n1 --winmaint-gib=64"));
+
+    /* 2. Btrfs array: 1 disk warns, 2 disks valid, raid10 with 2 disks warns, 2-disk raid1 emits mode=array;
+     *    changing primary clears conflict; winmaint + format on same secondary disk warns. */
+    k('\n');                    /* Install LOCachy */
+    k(K_EOL); k('\n');          /* Network -> Disk */
+    /* Before choosing primary, c.disk must still be empty. */
+    k(K_DOWN); k('\n');         /* Choose primary /dev/nvme0n1 */
+    /* Jump to nvme2n1 in Additional disks (past nvme1n1, nvme2n1, nvme3n1, Swap, extra nvme1n1). */
+    k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN);
+    /* Mark nvme2n1 as Add to Btrfs array (action 4). */
+    k('\n'); k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN); k('\n');
+    k(SNAP);                    /* 1 array disk -> warning visible */
+    /* Mark nvme3n1 as Add to Btrfs array (action 4). */
+    k(K_DOWN); k('\n'); k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN); k('\n');
+    /* Now array rows appear below nvme3n1: name, RAID (raid1), role (shared -> compute), enc, compute (no -> yes). */
+    k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_LEFT); /* role: shared -> compute */
+    k(K_DOWN); k(K_DOWN); k(K_RIGHT);           /* Array as Compute storage: yes */
+    k(SNAP);
+    k(K_EOL); k('\n');          /* Disk -> Encryption */
+    k(K_DOWN); k('\n'); type("correct horse"); k('\n'); type("correct horse"); k('\n');
+    k(K_EOL); k('\n');          /* Encryption -> User */
+    k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
+    for (int s = S_USER; s < S_SUMMARY; s++) { k(K_EOL); k('\n'); }
+    k(SNAP);
+    k(K_EOL); k('\n'); k('n');  /* Install -> --check, then N */
+    run("multi-disk: Btrfs raid1 array");
+    assert(snapped("Btrfs array needs at least 2 disks."));
+    assert(snapped("Array RAID mode") && snapped("< raid1 >"));
+    assert(snapped("erased (volume pool): /dev/nvme2n1"));
+    assert(snapped("erased (volume pool): /dev/nvme3n1"));
+    calls = slurp(D("calls"));
+    printf("array calls: %s", calls);
+    assert(strstr(calls, "--extra-volume=name=pool,mode=array,devs=/dev/nvme2n1+/dev/nvme3n1,raid=raid1,role=compute,encrypt=auto,compute_storage=1"));
+
+    /* Direct unit checks on problem(S_DISK) edge cases:
+     * (a) raid10 with 2 disks rejected; (b) primary change clears extra assignment;
+     * (c) winmaint on same disk as Btrfs array rejected;
+     * (d) winmaint on same disk as EXTRA_FMT_EXT4/EXTRA_FMT_BTRFS allowed when disk fits
+     *     1 GiB + tail + 4 MiB (ignoring old partitions), rejected when undersized;
+     * (e) empty c.disk at defaults. */
+    char why[256];
+    c.array_raid = raid_index("raid10");
+    assert(problem(S_DISK, why, sizeof why) && strstr(why, "at least 4 disks"));
+    c.array_raid = raid_index("raid1");
+    assert(!problem(S_DISK, why, sizeof why));
+    /* Maintenance Windows on a secondary disk with free tail space (nvme1n1: 500.5 GiB used of 1000 GiB). */
+    copy(c.winmaint_disk, sizeof c.winmaint_disk, "/dev/nvme1n1");
+    c.winmaint_gib = 48;
+    assert(!problem(S_DISK, why, sizeof why));
+    {
+        /* Only the unallocated space after the last partition counts (locachy-winmaint create
+         * appends there): 220 GiB unallocated in all but 20 GiB at the end is refused; exactly
+         * C: + 256 MiB there is enough, a sector less is not. */
+        c.disk_mode = WHOLE;
+        copy(c.disk, sizeof c.disk, "/dev/nvme0n1");
+        struct disk *w = &disks[disk_index("/dev/nvme1n1")], saved = *w;
+        w->free_tail = 20LL << 30;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "unallocated after its last partition"));
+        w->free_tail = (48LL << 30) + (256LL << 20);
+        assert(!problem(S_DISK, why, sizeof why));
+        w->free_tail -= 512;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "unallocated after its last partition"));
+        w->free_tail = -1;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "cannot be measured"));
+        *w = saved;
+        copy(w->pttype, sizeof w->pttype, "dos");
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "has a partition table of type MBR (dos); Maintenance Windows needs GPT"));
+        *w = saved;
+        w->log_sec = 4096;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "uses 4096-byte sectors"));
+        *w = saved;
+        w->winmaint = 1;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "already holds Maintenance Windows partitions"));
+        *w = saved;
+        w->nparts = 0;
+        w->pttype[0] = '\0';
+        copy(w->fstype, sizeof w->fstype, "ext4");
+        w->free_tail = -1;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "has a whole-disk filesystem (ext4); Maintenance Windows would overwrite it"));
+        *w = saved;
+        c.winmaint_disk[0] = '\0';
+        assert(!problem(S_DISK, why, sizeof why));
+
+        /* A disk or partition of Maintenance Windows is never formatted or attached, and never installed on. */
+        struct disk *a = &disks[disk_index("/dev/nvme2n1")]; /* a Btrfs array member here */
+        a->winmaint = 1;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "/dev/nvme2n1 holds Maintenance Windows partitions and cannot be formatted"));
+        a->winmaint = 0;
+        struct part p = saved.parts[0];
+        assert(part_attachable(&p));
+        p.winmaint = 1;
+        assert(!part_attachable(&p));
+        struct disk *s = &disks[disk_index("/dev/nvme0n1")];
+        s->winmaint = 1;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "installing here would erase them"));
+        s->winmaint = 0;
+        c.disk_mode = PARTS;
+        copy(c.esp, sizeof c.esp, "/dev/nvme1n1p2");
+        copy(c.root, sizeof c.root, "/dev/nvme1n1p1");
+        w->parts[1].winmaint = 1;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "/dev/nvme1n1p2 is a Maintenance Windows partition"));
+        w->parts[1].winmaint = 0;
+        c.disk_mode = WHOLE;
+        c.esp[0] = c.root[0] = '\0';
+
+        /* The system disk's least size has the 1 MiB before the first partition and the 2 MiB kept at the end. */
+        long long least = (3LL << 20) + esp_bytes + (long long)c.swap_gib * (1LL << 30) + min_root_bytes;
+        assert(disk_needs() == least);
+        long long size = s->size;
+        s->size = least - 1;
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "is too small"));
+        s->size = least;
+        assert(!problem(S_DISK, why, sizeof why));
+        copy(c.winmaint_disk, sizeof c.winmaint_disk, "/dev/nvme0n1");
+        assert(disk_needs() == least + (48LL << 30) + (256LL << 20));
+        assert(problem(S_DISK, why, sizeof why) && strstr(why, "is too small"));
+        s->size = size;
+        assert(!problem(S_DISK, why, sizeof why));
+    }
+    c.winmaint_disk[0] = '\0';
+    c.winmaint_gib = 48;
+    copy(c.winmaint_disk, sizeof c.winmaint_disk, "/dev/nvme2n1");
+    assert(problem(S_DISK, why, sizeof why) && strstr(why, "cannot host both Maintenance Windows and a Btrfs array"));
+    c.winmaint_disk[0] = '\0';
+
+    /* Formatted secondary disk + Maintenance Windows on /dev/nvme1n1 (1000 GiB with 500.5 GiB old partitions). */
+    int ei = c.nextra++;
+    memset(&c.extra[ei], 0, sizeof c.extra[ei]);
+    copy(c.extra[ei].disk, sizeof c.extra[ei].disk, "/dev/nvme1n1");
+    copy(c.extra[ei].name, sizeof c.extra[ei].name, "data");
+    c.extra[ei].action = EXTRA_FMT_EXT4;
+    c.extra[ei].role = role_index("shared");
+    c.extra[ei].encrypt = VENC_AUTO;
+    copy(c.winmaint_disk, sizeof c.winmaint_disk, "/dev/nvme1n1");
+    c.winmaint_gib = 48;
+    assert(!problem(S_DISK, why, sizeof why));
+    /* Old partitions on nvme1n1 are wiped by format, so 900 GiB C: fits on the 1000 GiB disk. */
+    c.winmaint_gib = 900;
+    assert(!problem(S_DISK, why, sizeof why));
+    /* Undersized formatted disk + winmaint (999 GiB C: + 256 MiB + 1 GiB + 4 MiB > 1000 GiB) is rejected. */
+    c.winmaint_gib = 999;
+    assert(problem(S_DISK, why, sizeof why) && strstr(why, "for the formatted volume and Maintenance Windows"));
+    /* Same check holds for EXTRA_FMT_BTRFS. */
+    c.extra[ei].action = EXTRA_FMT_BTRFS;
+    c.winmaint_gib = 48;
+    assert(!problem(S_DISK, why, sizeof why));
+    /* Disk page and Summary page reflect shared reserved-tail hosting clearly. */
+    build_step(S_DISK, 120);
+    int saw_disk_tail = 0, saw_disk_note = 0;
+    for (int i = 0; i < nentries; i++) {
+        if (strstr(entries[i].text, "on /dev/nvme1n1 (reserved tail)")) saw_disk_tail = 1;
+        if (strstr(entries[i].text, "Formatting /dev/nvme1n1 reserves the tail for Maintenance Windows.")) saw_disk_note = 1;
+    }
+    assert(saw_disk_tail && saw_disk_note);
+    build_step(S_SUMMARY, 120);
+    int saw_sum_tail = 0, saw_sum_erased = 0;
+    for (int i = 0; i < nentries; i++) {
+        if (strstr(entries[i].text, "on /dev/nvme1n1 (reserved tail), Windows C: 48 GiB")) saw_sum_tail = 1;
+        if (strstr(entries[i].text, "erased (volume data, Maintenance Windows tail): /dev/nvme1n1")) {
+            assert(entries[i].id == E_WARN);
+            saw_sum_erased = 1;
+        }
+    }
+    assert(saw_sum_tail && saw_sum_erased);
+    extra_clear_disk("/dev/nvme1n1");
+    c.winmaint_disk[0] = '\0';
+
+    act(R_DISK + 2, '\n'); /* switch primary to /dev/nvme2n1 -> clears its array membership */
+    assert(extra_for_disk("/dev/nvme2n1") < 0);
+    assert(problem(S_DISK, why, sizeof why) && strstr(why, "at least 2 disks"));
+    memset(&c, 0, sizeof c);
+    set_defaults();
+    assert(c.disk[0] == '\0' && c.winmaint_gib == 48);
+    assert(problem(S_DISK, why, sizeof why) && strstr(why, "Choose the disk"));
+
+    /* 3. Interactive flow: format secondary /dev/nvme2n1 AND place Maintenance Windows on /dev/nvme2n1. */
+    k('\n');                    /* Install LOCachy */
+    k(K_EOL); k('\n');          /* Network -> Disk */
+    k(K_DOWN); k('\n');         /* Choose primary /dev/nvme0n1 */
+    /* Jump to nvme2n1 in Additional disks (past nvme1n1, nvme2n1, nvme3n1, Swap, extra nvme1n1). */
+    k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN); k(K_DOWN);
+    /* Configure nvme2n1: Format whole disk (ext4) (action 2), accept "data", role 0 (shared),
+     * enc 0 (auto), default compute storage: n. */
+    k('\n'); k(K_DOWN); k(K_DOWN); k('\n'); k('\n'); k('\n'); k('\n'); k('n');
+    /* Next rows: nvme3n1 (leave untouched), then Maintenance Windows -> Right x3
+     * (off -> nvme0n1 -> nvme1n1 -> nvme2n1). */
+    k(K_DOWN); k(K_DOWN); k(K_RIGHT); k(K_RIGHT); k(K_RIGHT);
+    k(SNAP);
+    k(K_EOL); k('\n');          /* Disk -> Encryption */
+    k(K_DOWN); k('\n'); type("correct horse"); k('\n'); type("correct horse"); k('\n');
+    k(K_EOL); k('\n');          /* Encryption -> User */
+    k(K_DOWN); k(K_DOWN); k('\n'); type("Locachy123"); k('\n'); type("Locachy123"); k('\n');
+    for (int s = S_USER; s < S_SUMMARY; s++) { k(K_EOL); k('\n'); }
+    k(SNAP);
+    k(K_EOL); k('\n'); k('n');  /* Install -> --check, then N at confirm */
+    run("multi-disk: format secondary disk + Maintenance Windows on same disk");
+    assert(snapped("on /dev/nvme2n1 (reserved tail)"));
+    assert(snapped("Formatting /dev/nvme2n1 reserves the tail for Maintenance Windows."));
+    assert(snapped("erased (volume data, Maintenance Windows tail): /dev/nvme2n1"));
+    assert(snapped("on /dev/nvme2n1 (reserved tail), Windows C: 48 GiB"));
+    assert(snapped("Nothing is missing."));
+    calls = slurp(D("calls"));
+    printf("shared-tail calls: %s", calls);
+    assert(strstr(calls, "--extra-volume=name=data,mode=format,dev=/dev/nvme2n1,fs=ext4,role=shared,encrypt=auto"));
+    assert(strstr(calls, "--winmaint-disk=/dev/nvme2n1 --winmaint-gib=48"));
+
+    write_file(D("describe.json"), describe, 0644);
+    printf("PASS installer multi-disk: attach, format, btrfs array, winmaint, validation\n");
 }
 
 int main(int argc, char **argv)
@@ -694,6 +1032,25 @@ int main(int argc, char **argv)
     assert(!strstr(slurp(D("calls")), "--yes"));
     unlink(D("check-fail"));
 
+    /* A backend can reject reconstructing an old target command before it emits
+     * Continue with (the archived ISO did this for an incompatible CATALOG).
+     * The public resume status still keeps c available; it must never fall back
+     * to the formatting summary. */
+    write_file(D("resume-status.json"),
+               "{\"schema\":2,\"phase\":\"target\",\"install_id\":\"0123456789abcdef0123456789abcdef\","
+               "\"root\":\"/run/locachy-install-target\",\"argv\":[\"--user\",\"boot-test\"]}\n", 0600);
+    write_file(D("install-fail"), "", 0644);
+    to_summary("correct horse");
+    k(K_EOL); k('\n'); k('y');
+    for (int i = 0; i < 6; i++) k(WAIT);
+    k(SNAP);
+    run("backend rejects resume command: preserve c from resume status");
+    assert(snapped("The installation failed."));
+    assert(snapped("c: continue"));
+    assert(!snapped("b: back to the summary"));
+    unlink(D("resume-status.json"));
+    unlink(D("install-fail"));
+
     /* The installation fails: the failure, its reason, the way back. */
     write_file(D("install-fail"), "", 0644);
     to_summary("correct horse");
@@ -844,6 +1201,7 @@ int main(int argc, char **argv)
     calls = slurp(D("calls"));
     assert(strstr(calls, "--check ") && strstr(calls, " --update-branch=main --apps-repo=off --apps-branch=next"));
 
+    test_multi_disk_storage_and_winmaint();
     test_session_handoff();
     test_refresh_exec_failure();
     test_recovered_preflight();

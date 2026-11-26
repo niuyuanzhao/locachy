@@ -3,6 +3,7 @@
 No real mount, package transaction, user mapping or block device is used.
   python3 -B tools/test-target-root.py SCRATCH_PARENT
 """
+import fcntl
 import os
 from pathlib import Path
 import subprocess
@@ -30,6 +31,17 @@ class TargetRoot(unittest.TestCase):
         prefix = self.text.split('if [ -z "${MAKE_ROOT_NS:-}" ]; then', 1)[0]
         self.script = self.root / "preflight"
         self.script.write_text(prefix + "printf 'PREFLIGHT-PASS\\n'\n")
+        # Exercise the real lock, marker and workspace setup in the final
+        # namespace, with no real mounts or package commands.
+        self.builder = self.root / "builder"
+        self.builder.write_text(self.text.split("# This build's mirror lists", 1)[0] +
+                                'printf "TARGET-READY\\n"\n')
+        (self.root / "link").mkdir()
+        (self.root / "link/locachy-repos").write_text("# No additional repository levels in the fixture.\n")
+        self.command("mount", 'test "$*" = "-t cgroup2 cgroup2 /sys/fs/cgroup"')
+        self.command("grep", 'test "$*" = "-q ^Server /etc/pacman.d/mirrorlist"')
+        self.marker = self.target / ".locachy-installer/install-id"
+        self.install_id = "a" * 32
         self.command("id", "printf '0\\n'")
         self.command("realpath", 'python3 -c "import os,sys; print(os.path.realpath(sys.argv[-1]))" "$@"')
         self.command("mountpoint", 'test "${FIX_MOUNTED:-1}" = 1')
@@ -37,6 +49,7 @@ class TargetRoot(unittest.TestCase):
                               '*LABEL*) printf "%s\\n" "${FIX_LABEL:-locachy-root}" ;; *) exit 1 ;; esac')
         self.command("stat", 'case "$*" in *" /") printf "1\\n" ;; *) printf "%s\\n" "${FIX_DEVICE:-2}" ;; esac')
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"], CALLS=str(self.calls))
+        self.env.pop("MAKE_ROOT_NS", None)
 
     def command(self, name, body):
         path = self.bin / name
@@ -116,6 +129,101 @@ class TargetRoot(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("work directory must be empty", result.stderr)
         self.assertEqual(sentinel.read_text(), "keep")
+
+    def run_builder(self, *flags, work="work"):
+        workspace = ["--work-dir", str(self.root / work)] if work else []
+        return subprocess.run(["bash", str(self.builder), "--target-root", str(self.target),
+                               "--install-id", self.install_id, *workspace, *flags],
+                              env=dict(self.env, MAKE_ROOT_NS="1"), text=True, capture_output=True, timeout=10)
+
+    def test_marker_is_on_target_and_resume_preserves_existing_contents(self):
+        first = self.run_builder()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(self.marker.read_bytes(), (self.install_id + "\n").encode())
+        self.assertEqual(self.marker.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.root / "work/install-id").exists())
+        self.assertEqual(list(self.marker.parent.iterdir()), [self.marker])
+        marker_stat = self.marker.stat()
+        for path in (self.root / "work/previous.log", self.target / "keep"):
+            path.write_text("untouched")
+        for work in ("work", "other-work", None):
+            with self.subTest(work=work):
+                result = self.run_builder("--resume", work=work)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("TARGET-READY", result.stdout)
+                self.assertIn("where the installation stopped", result.stdout)
+                self.assertEqual((self.target / "keep").read_text(), "untouched")
+                self.assertEqual((self.root / "work/previous.log").read_text(), "untouched")
+                self.assertEqual(self.marker.read_text(), self.install_id + "\n")
+                current = self.marker.stat()
+                self.assertEqual((current.st_ino, current.st_mtime_ns), (marker_stat.st_ino, marker_stat.st_mtime_ns))
+
+    def test_resume_refuses_missing_wrong_or_aliased_target_marker(self):
+        workspace = self.root / "work"
+        workspace.mkdir()
+        external_marker = workspace / "install-id"
+        external_marker.write_text(self.install_id + "\n")
+        result = self.run_builder("--resume")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs a regular target installation marker", result.stderr)
+        self.assertFalse(self.marker.parent.exists())
+        self.marker.parent.symlink_to(workspace, target_is_directory=True)
+        result = self.run_builder("--resume")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("without symlinks", result.stderr)
+        self.marker.parent.unlink()
+        self.marker.parent.mkdir()
+        self.marker.symlink_to(external_marker)
+        result = self.run_builder("--resume")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs a regular target installation marker", result.stderr)
+        self.marker.unlink()
+        for contents in ("b" * 32 + "\n", self.install_id + "\n\n"):
+            with self.subTest(contents=contents):
+                self.marker.write_text(contents)
+                for flags in ([], ["--resume"]):
+                    result = self.run_builder(*flags, work="new-work")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(self.marker.read_text(), contents)
+                    self.assertFalse((self.root / "new-work").exists())
+
+    def test_target_lock_excludes_other_workspaces_and_releases_on_close(self):
+        self.assertEqual(self.run_builder().returncode, 0)
+        fd = os.open(self.target, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_builder("--resume", work="other-work")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot lock target", result.stderr)
+            self.assertFalse((self.root / "other-work").exists())
+            other = os.open(self.target, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(other)
+        finally:
+            os.close(fd)
+        result = self.run_builder("--resume", work="other-work")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_pacman_locks_are_never_removed_on_resume(self):
+        self.assertEqual(self.run_builder().returncode, 0)
+        for path in (self.target / "var/lib/pacman/db.lck", self.root / "work/raw-db/db.lck"):
+            with self.subTest(path=path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("wb") as stream:
+                    stream.write(b"open lock")
+                    stream.flush()
+                    original = os.fstat(stream.fileno())
+                    result = self.run_builder("--resume")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"pacman database is locked: {path}", result.stderr)
+                    self.assertEqual(path.stat().st_ino, original.st_ino)
+                    self.assertEqual(path.read_bytes(), b"open lock")
+                path.unlink()
+        result = self.run_builder("--resume")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_root_namespace_has_no_subuid_or_systemd_requirement(self):
         block = self.text.split('if [ "$(id -u)" = 0 ]; then', 1)[1].split('    # The clipboard contract', 1)[0]

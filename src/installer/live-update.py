@@ -6,6 +6,7 @@ beside one another and published only after success; the old process is never
 signalled. It switches itself with exec, passing its state through a sealed fd.
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -56,11 +57,19 @@ def check_programs(stage):
 
 
 def build(source, root=Path("/"), state=Path("/run/locachy-installer/live")):
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # A serial refresh can overlap tty1 startup. Only one process may build
+    # and publish for this live root; the lock is closed before the UI exec.
+    with (state / "build.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return build_locked(source, root, state)
+
+
+def build_locked(source, root, state):
     fingerprint = input_hash(source)
     stage = state / fingerprint
     metadata = stage / "live.json"
     if not metadata.is_file():
-        state.mkdir(mode=0o700, parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix="build-", dir=state))
         try:
             print("Installer: building the live programs from " + (revision(source)[:12] or "the bundled source"),
@@ -122,6 +131,11 @@ def main():
                                       "bundled: updates are off", "bundled: local changes over the fetched commit")):
         raise RuntimeError("the source could not be refreshed: " + how)
     data = build(source)
+    snapshot = os.environ.get("LOCACHY_INSTALL_SNAPSHOT")
+    if snapshot:
+        if len(snapshot) != 64 or any(c not in "0123456789abcdef" for c in snapshot):
+            raise RuntimeError("invalid live installation snapshot")
+        data["snapshot"] = snapshot
     if args.mode == "refresh":
         print(json.dumps(data))
         return

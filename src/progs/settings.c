@@ -63,6 +63,7 @@ __attribute__((weak)) int clipboard_set(int primary, const void *text, size_t si
 __attribute__((weak)) int key_poll_many(struct pollfd *extra, size_t count, int timeout_ms);
 __attribute__((weak)) int keys_modifiers(void);
 __attribute__((weak)) int screen_list_cards(struct screen_card_info *out, int max);
+__attribute__((weak)) int base_app_action(const char *action, const char *name, char *why, size_t size);
 
 /* The modifiers held at the last key read (none in tests without keys.c). */
 static int mods_now(void)
@@ -81,7 +82,8 @@ static double settings_mono_sec(void)
 }
 
 static int power_thresh_count(void);
-static void apply_saved_battery_thresholds(void);
+static int rc_bat_adaptive;
+static int64_t rc_bat_full_until;
 extern int rc_bat_start, rc_bat_end;
 
 #define FG          theme_rgb(THEME_FG, 0xD0D0D0)
@@ -107,6 +109,8 @@ static int hib_after = 30;      /* 10..600 s */
 static int rc_lid_holdoff = 30; /* 0..120 s */
 static int rc_battery_critical = 5; /* 0..50 % */
 static int tailscale_enabled; /* rc.conf has service_tailscale */
+#define TAILNET_SSH_SERVICE "/usr/local/lib/locachy/tailnet-ssh-client"
+static int tailnet_ssh_on;    /* rc.conf has service_tailnet_ssh */
 static int bluetooth_on;      /* rc.conf has service_bluetooth */
 static int rclone_on;         /* rc.conf has service_rclone */
 /* The interface's languages: English (what the programs are written in) and
@@ -334,11 +338,52 @@ static struct screen_card_info drm_cards[8];
 static int ndrm_cards;
 static int extd_tb_shared = -1;
 static int extd_paired_only;
-/* Headless compute node: service_compute, compute_bind_tb, compute_gpu. */
+/* Headless compute node: service_compute, compute_bind_tb, compute_gpu, compute_storage. */
 #define COMPUTE_SERVICE "/usr/local/lib/locachy/compute-client"
 static int compute_on;
 static int compute_bind_tb;
 static int compute_gpu = 1;
+static char compute_storage_cfg[40];
+/* Storage Volumes (locachy-storage): managed volumes and unmanaged disks from
+ * `locachy-storage status --json`. */
+#ifndef LOCACHY_STORAGE
+#define LOCACHY_STORAGE "/usr/local/bin/locachy-storage"
+#endif
+#define MAX_STORAGE_VOLS 16
+#define MAX_STORAGE_DISKS 16
+struct storage_vol {
+    char name[40];
+    char topology[16];
+    char fs[16];
+    char raid[16];
+    char role[16];
+    char encrypt[16];
+    int auto_mount;
+    int mounted;
+    char mount_path[128];
+    char drives_path[128];
+    unsigned long long total_bytes;
+    unsigned long long used_bytes;
+    char health[32];
+};
+struct storage_disk {
+    char path[64];
+    char model[96];
+    unsigned long long size;
+    char tran[16];
+    char first_part[64];
+    char first_fstype[24];
+    int nparts;
+    int in_use;
+    int is_root; /* locachy-winmaint's candidate_disks: the system disk */
+};
+static struct storage_vol storage_vols[MAX_STORAGE_VOLS];
+static int nstorage_vols;
+static struct storage_disk storage_disks[MAX_STORAGE_DISKS];
+static int nstorage_disks;
+static int storage_job;
+static char storage_what[32];
+static int storage_remove_asked = -1; /* volume index awaiting second Delete, or -1 */
 /* Paired devices (locachy-pair): count cached from locachy-pair list --machine (-1 unknown). */
 #ifndef LOCACHY_PAIR
 #define LOCACHY_PAIR "/usr/local/bin/locachy-pair"
@@ -357,8 +402,18 @@ static const int winmaint_sizes[] = { 40, 48, 64, 96, 128 };
 static int winmaint_size_gib = 48;
 static int winmaint_created, winmaint_created_gib;
 static int winmaint_reclaim_asked, winmaint_boot_once_asked;
+static int winmaint_default_asked, winmaint_reboot_asked;
+/* boot-default: Windows first until switched back (state.json "boot_default"); from
+ * locachy-winmaint status --json, set in this boot (Windows at the next restart) or
+ * overridden (LOCachy runs although Windows starts first: picked in the firmware menu). */
+static int winmaint_windows_first, winmaint_first_pending, winmaint_first_overridden;
 static int winmaint_job;
 static char winmaint_what[24];
+/* Where a new partition goes: "" the system disk (auto), else a /dev path that
+ * locachy-winmaint offers (candidate_disks); the disk it is on, once created. */
+static char winmaint_disk_cfg[40], winmaint_resolved[40];
+static struct storage_disk winmaint_cands[MAX_STORAGE_DISKS];
+static int nwinmaint_cands;
 static int tb_sync_job;
 static int cpu_opt_auto = -1; /* 1 auto native ISA, 0 baseline; -1 unset (read from /usr/local/lib/locachy/cpu) */
 /* rc.conf power_profile: CPU energy preference and ACPI platform profile. */
@@ -1226,7 +1281,6 @@ static void apply_all(void)
         write_glob("/sys/devices/platform/i8042/serio*/press_to_select", tp_pts);
         write_glob("/sys/devices/platform/i8042/serio*/serio*/press_to_select", tp_pts);
     }
-    apply_saved_battery_thresholds();
     apply_labwc();
 }
 
@@ -1245,6 +1299,8 @@ static void on_rc(const char *name, const char *value, void *arg)
         hib_after = atoi(value);
     } else if (strcmp(name, "service_tailscale") == 0) {
         tailscale_enabled = 1;
+    } else if (strcmp(name, "service_tailnet_ssh") == 0) {
+        tailnet_ssh_on = value[0] != '\0';
     } else if (strcmp(name, "service_bluetooth") == 0) {
         bluetooth_on = 1;
     } else if (strcmp(name, "service_rclone") == 0) {
@@ -1369,6 +1425,9 @@ static void on_rc(const char *name, const char *value, void *arg)
         compute_bind_tb = strcmp(value, "1") == 0;
     } else if (strcmp(name, "compute_gpu") == 0) {
         compute_gpu = strcmp(value, "0") != 0;
+    } else if (strcmp(name, "compute_storage") == 0) {
+        snprintf(compute_storage_cfg, sizeof compute_storage_cfg, "%s",
+                 strcmp(value, "none") == 0 ? "" : value);
     } else if (strcmp(name, "winmaint_size_gib") == 0 && value[0]) {
         size_t digits = strspn(value, "0123456789");
         int v = digits > 0 && digits <= 4 && value[digits] == '\0' ? atoi(value) : 0;
@@ -1389,6 +1448,13 @@ static void on_rc(const char *name, const char *value, void *arg)
         cpu_opt_auto = strcmp(value, "auto") == 0 ? 1 : strcmp(value, "baseline") == 0 ? 0 : -1;
     } else if (strcmp(name, "face_dlib") == 0) {
         snprintf(face_dlib, sizeof face_dlib, "%s", value);
+    } else if (strcmp(name, "battery_charge_adaptive") == 0) {
+        rc_bat_adaptive = strcmp(value, "1") == 0;
+    } else if (strcmp(name, "battery_charge_full_until") == 0) {
+        char *end;
+        errno = 0;
+        long long v = strtoll(value, &end, 10);
+        rc_bat_full_until = !errno && end != value && !*end && v > 0 ? v : 0;
     } else if (strcmp(name, "battery_charge_start") == 0 && value[0]) {
         int v = atoi(value);
         if (v >= 0 && v <= 99) rc_bat_start = v;
@@ -1424,6 +1490,7 @@ static void save_rc(void)
         { "lid_holdoff", holdoff }, { "battery_critical", crit },
         { "tailscale_enabled", NULL }, /* superseded by the service line */
         { "service_tailscale", tailscale_enabled ? TAILSCALE_SERVICE : NULL },
+        { "service_tailnet_ssh", tailnet_ssh_on ? TAILNET_SSH_SERVICE : NULL },
         { "trackpoint_sensitivity", sens }, { "trackpoint_speed", speed },
         { "trackpoint_press_to_select", pts },
     };
@@ -3338,7 +3405,7 @@ static void format_bar(char *out, size_t size, int val, int min, int max)
 }
 
 /* The rows above the screens: the pointer and battery ones, then Tailscale
- * (installed, on, its account), Clash (installed, its mode, subscription,
+ * (installed, on, its account, SSH), Clash (installed, its mode, subscription,
  * status), Tor (installed, its front, bridges, status), Bluetooth (tools
  * installed, service, devices), each saved network's
  * MAC address, the wallpaper, the terminal key, the time zone, network time
@@ -3350,7 +3417,7 @@ static int ts_index(void)
 
 static int cl_index(void)
 {
-    return ts_index() + 3;
+    return ts_index() + 4;
 }
 
 static int tr_index(void)
@@ -3428,15 +3495,22 @@ static int compute_index(void)
     return paired_devices_index() + 1;
 }
 
-/* Maintenance Windows: size, status (create/reclaim), boot once, heal boot, VM. */
-static int winmaint_index(void)
+/* Maintenance Windows' start mode: Windows first until switched back, and restart into
+ * it now. Shown in the Maintenance Windows group, after "Boot Windows once". */
+static int winmaint_mode_index(void)
 {
     return compute_index() + 3;
 }
 
+/* Maintenance Windows: size, status (create/reclaim), boot once, heal boot, VM. */
+static int winmaint_index(void)
+{
+    return winmaint_mode_index() + 2;
+}
+
 static int link_index(void)
 {
-    return winmaint_index() + 5;
+    return winmaint_index() + 6;
 }
 
 /* The password, automatic locking, whether the screen is locked at boot, the
@@ -3591,9 +3665,19 @@ static int bat_page_index(void)
     return kb_index() + nkeyboards_seen;
 }
 
-static int bat_thresh_index(void)
+static int bat_adaptive_index(void)
 {
     return bat_page_index() + 1;
+}
+
+static int bat_full_index(void)
+{
+    return bat_adaptive_index() + 1;
+}
+
+static int bat_thresh_index(void)
+{
+    return bat_full_index() + 1;
 }
 
 static int hwinfo_index(void)
@@ -3673,9 +3757,26 @@ static int nvidia_powerd_index(void)
     return gpu_power_index() + 1;
 }
 
-static int num_hw_items(void)
+/* Storage Volumes (System > Storage Volumes): compute default storage,
+ * dynamic managed volumes (nstorage_vols), and unmanaged internal disks row. */
+static int storage_compute_index(void)
 {
     return nvidia_powerd_index() + 1;
+}
+
+static int storage_vols_index(void)
+{
+    return storage_compute_index() + 1;
+}
+
+static int storage_disks_index(void)
+{
+    return storage_vols_index() + nstorage_vols;
+}
+
+static int num_hw_items(void)
+{
+    return storage_disks_index() + 1;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -3800,7 +3901,8 @@ static const struct ui_help_line settings_keys[] = {
     { "Delete", N_("Remove the selected key, entry or component (some ask: Delete again)") },
     { "/, Ctrl+F", N_("Find a setting") },
     { "F3, Shift+F3", N_("The next or previous setting found") },
-    { "m", N_("Secure Boot: enroll with Microsoft's keys too") },
+    { "m", N_("Secure Boot: enroll with Microsoft's keys too; Storage: mount/unmount volume") },
+    { "a", N_("Storage volume: toggle auto-mount at boot") },
     { "p, Shift+arrows", N_("Screens: a screen's exact X,Y; move it (Ctrl+Shift: by 1 pixel)") },
     { "Ctrl+C", N_("Battery and hardware pages: copy the page") },
     { "Ctrl+A, Home, End", N_("In a line you type: select all, the start, the end") },
@@ -5355,10 +5457,12 @@ static void category_entries(int cat)
         add_items(zram_index(), 1);
         add_title(_("NVIDIA GPU power"));
         add_items(gpu_power_index(), 2);
-        add_items(bat_thresh_index(), power_thresh_count());
         add_title(_("Display"));
         add_items(blank_index(), 2);
         add_title(_("Battery & Energy"));
+        add_items(bat_adaptive_index(), 2);
+        power_charge_notes();
+        add_items(bat_thresh_index(), power_thresh_count());
         add_items(bat_page_index(), 1);
         add_power_category_notes();
         break;
@@ -5368,7 +5472,7 @@ static void category_entries(int cat)
         add_items(nw_index(), nnets + 1);
         if (nnets == 0) add_entry(E_NOTE, _("No saved network yet."));
         add_title(_("Tailscale"));
-        add_items(ts_index(), 3);
+        add_items(ts_index(), 4);
         add_title(_("Clash"));
         add_items(cl_index(), 4);
         add_title(_("Tor"));
@@ -5379,6 +5483,12 @@ static void category_entries(int cat)
         add_items(tnet_index(), 1);
         add_title(_("Compute Node"));
         add_items(compute_index(), 3);
+        if (compute_storage_cfg[0]) {
+            char csnote[128];
+            snprintf(csnote, sizeof csnote, _("Default compute storage: %.40s (change under System > Storage Volumes)."),
+                     compute_storage_cfg);
+            add_entry(E_NOTE, csnote);
+        }
         break;
     case CAT_APPEARANCE:
         add_title(_("Colors"));
@@ -5444,10 +5554,17 @@ static void category_entries(int cat)
         add_items(repo_index(), NREPO_SECTIONS + 2);
         add_title(_("Optional Components"));
         add_items(opt_index(), NOPT_MODULES);
+        add_title(_("Storage Volumes"));
+        add_items(storage_compute_index(), 1);
+        add_items(storage_vols_index(), nstorage_vols);
+        if (nstorage_vols == 0) add_entry(E_NOTE, _("No extra storage volumes configured."));
+        add_items(storage_disks_index(), 1);
         add_title(_("Debug Cable"));
         add_items(link_index(), 1);
         add_title(_("Maintenance Windows"));
-        add_items(winmaint_index(), 5);
+        add_items(winmaint_index(), 3);
+        add_items(winmaint_mode_index(), 2);
+        add_items(winmaint_index() + 3, 3);
         break;
     }
 }
@@ -5556,6 +5673,7 @@ static void show_category(int c, int focus_page)
     }
     if (c == CAT_POWER) {
         power_refresh_devices_if_stale();
+        power_refresh_charge_status();
     }
     /* Network rows' statuses refresh once keys settle on CAT_NETWORK;
      * browsing past the category probes none. */
@@ -6114,11 +6232,23 @@ static int parse_winmaint_state(const char *text, int *size_gib)
     return 1;
 }
 
+/* state.json's "boot_default": "windows" (locachy-winmaint boot-default windows). */
+static int parse_winmaint_windows_first(const char *text)
+{
+    const char *k = text ? strstr(text, "\"boot_default\"") : NULL;
+    const char *col = k ? strchr(k + 14, ':') : NULL;
+    if (!col) return 0;
+    col++;
+    while (*col == ' ' || *col == '\t' || *col == '\n' || *col == '\r') col++;
+    return strncmp(col, "\"windows\"", 9) == 0;
+}
+
 static void load_winmaint_status(void)
 {
     char buf[8192];
     winmaint_created = 0;
     winmaint_created_gib = 0;
+    winmaint_windows_first = 0;
     int fd = open(WINMAINT_STATE_FILE, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return;
     size_t len = 0;
@@ -6131,13 +6261,16 @@ static void load_winmaint_status(void)
     close(fd);
     buf[len] = '\0';
     winmaint_created = parse_winmaint_state(buf, &winmaint_created_gib);
+    winmaint_windows_first = winmaint_created && parse_winmaint_windows_first(buf);
 }
+
+static void winmaint_load_targets(void);
 
 static void winmaint_status_row(void)
 {
     char why[160] = "";
     int id = 0, pos = 0;
-    winmaint_boot_once_asked = 0;
+    winmaint_boot_once_asked = winmaint_default_asked = winmaint_reboot_asked = 0;
     if (winmaint_job) {
         snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
         return;
@@ -6146,7 +6279,8 @@ static void winmaint_status_row(void)
     if (!winmaint_created) {
         char sz[16];
         snprintf(sz, sizeof sz, "%d", winmaint_size_gib);
-        const char *args[] = { "--size-gib", sz, NULL };
+        const char *args[] = { "--size-gib", sz, "--disk", winmaint_disk_cfg, NULL };
+        if (!winmaint_disk_cfg[0]) args[2] = NULL; /* the system disk: no --disk */
         winmaint_reclaim_asked = 0;
         if (jobs_submit("winmaint-create", args, &id, &pos, why, sizeof why) < 0) {
             snprintf(notice, sizeof notice, _("Could not create Maintenance Windows: %s"), why);
@@ -6178,7 +6312,7 @@ static void winmaint_boot_once_row(void)
 {
     char why[160] = "";
     int id = 0, pos = 0;
-    winmaint_reclaim_asked = 0;
+    winmaint_reclaim_asked = winmaint_default_asked = winmaint_reboot_asked = 0;
     if (winmaint_job) {
         snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
         return;
@@ -6206,11 +6340,98 @@ static void winmaint_boot_once_row(void)
     snprintf(notice, sizeof notice, "%s", _("Arming one-shot Windows boot..."));
 }
 
+/* Start in Windows by default (locachy-winmaint boot-default, a winmaint-* job as boot-once):
+ * Enter twice turns it on (Windows first on every restart, LOCachy second); one Enter turns
+ * it off again (LOCachy first), also after LOCachy was picked in the firmware menu. */
+static void winmaint_default_row(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    winmaint_reclaim_asked = winmaint_boot_once_asked = winmaint_reboot_asked = 0;
+    if (winmaint_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
+        return;
+    }
+    load_winmaint_status();
+    if (!winmaint_created) {
+        winmaint_default_asked = 0;
+        snprintf(notice, sizeof notice, "%s", _("Maintenance Windows is not created yet."));
+        return;
+    }
+    int on = !winmaint_windows_first;
+    if (on && !winmaint_default_asked) {
+        winmaint_default_asked = 1;
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter again: Windows starts first on every restart until switched back (LOCachy stays second)."));
+        return;
+    }
+    winmaint_default_asked = 0;
+    const char *args_on[] = { "windows", NULL }, *args_off[] = { "locachy", NULL };
+    if (jobs_submit("winmaint-boot-default", on ? args_on : args_off, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not change which system starts first: %s"), why);
+        return;
+    }
+    winmaint_job = id;
+    snprintf(winmaint_what, sizeof winmaint_what, "boot-default");
+    snprintf(notice, sizeof notice, "%s",
+             on ? _("Setting Windows to start first...") : _("Setting LOCachy to start first again..."));
+}
+
+/* What Enter does on the start mode's two rows (their hint, and Left/Right's notice). */
+static void winmaint_mode_hint(int idx, char *out, size_t size)
+{
+    if (idx == winmaint_mode_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", winmaint_windows_first ?
+                 _("Enter: LOCachy starts first again (Windows stays in the firmware boot menu).") :
+                 _("Enter, twice: Windows starts first on every restart until switched back (LOCachy stays second)."));
+    } else {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s",
+                 _("Enter, twice: Windows starts first until switched back, and the computer restarts now."));
+    }
+}
+
+/* Reboot into Windows now: boot-default windows --reboot, after a second Enter. */
+static void winmaint_reboot_row(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    winmaint_reclaim_asked = winmaint_boot_once_asked = winmaint_default_asked = 0;
+    if (winmaint_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
+        return;
+    }
+    load_winmaint_status();
+    if (!winmaint_created) {
+        winmaint_reboot_asked = 0;
+        snprintf(notice, sizeof notice, "%s", _("Maintenance Windows is not created yet."));
+        return;
+    }
+    if (!winmaint_reboot_asked) {
+        winmaint_reboot_asked = 1;
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter again: Windows starts first until switched back, and the computer restarts now."));
+        return;
+    }
+    winmaint_reboot_asked = 0;
+    const char *args[] = { "windows", "--reboot", NULL };
+    if (jobs_submit("winmaint-boot-default", args, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not restart into Windows: %s"), why);
+        return;
+    }
+    winmaint_job = id;
+    snprintf(winmaint_what, sizeof winmaint_what, "boot-default");
+    snprintf(notice, sizeof notice, "%s", _("Restarting into Windows..."));
+}
+
 static void winmaint_heal_boot_row(void)
 {
     char why[160] = "";
     int id = 0, pos = 0;
-    winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+    winmaint_reclaim_asked = winmaint_boot_once_asked = winmaint_default_asked = winmaint_reboot_asked = 0;
     if (winmaint_job) {
         snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
         return;
@@ -6224,9 +6445,14 @@ static void winmaint_heal_boot_row(void)
     snprintf(notice, sizeof notice, "%s", _("Restoring LOCachy first in UEFI boot order..."));
 }
 
+/* The Windows virtual machine is a managed app (locachy-app's vm_kind winmaint),
+ * shown on the shared Wayland display: never a terminal from here, since sudo
+ * drops WAYLAND_DISPLAY and QEMU would fall back to a headless VNC display. */
+#define WINMAINT_APP "winmaint"
 static void winmaint_vm_row(void)
 {
-    winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+    char why[160] = "";
+    winmaint_reclaim_asked = winmaint_boot_once_asked = winmaint_default_asked = winmaint_reboot_asked = 0;
     if (winmaint_job) {
         snprintf(notice, sizeof notice, "%s", _("Wait: a Maintenance Windows job is still running."));
         return;
@@ -6240,16 +6466,12 @@ static void winmaint_vm_row(void)
         snprintf(notice, sizeof notice, "%s", _("Maintenance Windows is not created yet."));
         return;
     }
-    char *const cmd[] = {
-        "/bin/sh", "-c",
-        "/usr/bin/sudo " LOCACHY_WINMAINT " vm; s=$?; "
-        "if [ $s -ne 0 ]; then printf '\\nEnter: back to settings. '; read -r _; fi; exit $s",
-        NULL
-    };
-    int status = in_term(cmd);
-    load_winmaint_status();
-    snprintf(notice, sizeof notice, "%s", status == 0 ?
-             _("Windows virtual machine closed.") : _("Windows virtual machine did not finish."));
+    if (base_app_action && base_app_action("start", WINMAINT_APP, why, sizeof why) == 0) {
+        snprintf(notice, sizeof notice, "%s", _("Opening Maintenance Windows on the desktop (also available from Home)."));
+    } else {
+        snprintf(notice, sizeof notice, _("Cannot open Maintenance Windows on the desktop: %.100s"),
+                 why[0] ? why : _("desktop session unavailable"));
+    }
 }
 
 static void winmaint_check(void)
@@ -6261,6 +6483,7 @@ static void winmaint_check(void)
     }
     winmaint_job = 0;
     load_winmaint_status();
+    winmaint_load_targets();
     entries_dirty = 1;
     full_redraw = 1;
     if (strcmp(r.state, "done") == 0) {
@@ -6271,10 +6494,17 @@ static void winmaint_check(void)
         } else if (strcmp(winmaint_what, "reclaim") == 0) {
             snprintf(notice, sizeof notice, "%s", _("Maintenance Windows partition reclaimed."));
         } else if (strcmp(winmaint_what, "boot-once") == 0) {
-            snprintf(notice, sizeof notice, "%s",
+            snprintf(notice, sizeof notice, "%s", winmaint_windows_first ?
+                     _("Windows already starts first until switched back; nothing was armed.") :
                      _("One-shot Windows boot armed; LOCachy stays default on the following restart."));
+        } else if (strcmp(winmaint_what, "boot-default") == 0) {
+            snprintf(notice, sizeof notice, "%s", winmaint_windows_first ?
+                     _("Windows starts first until switched back; LOCachy stays in the firmware boot menu.") :
+                     _("LOCachy starts first again."));
         } else if (strcmp(winmaint_what, "heal-boot") == 0) {
-            snprintf(notice, sizeof notice, "%s", _("UEFI boot order healed; LOCachy is first."));
+            snprintf(notice, sizeof notice, "%s", winmaint_windows_first ?
+                     _("UEFI boot order healed; Windows stays first until switched back.") :
+                     _("UEFI boot order healed; LOCachy is first."));
         } else {
             snprintf(notice, sizeof notice, "%s", _("Maintenance Windows job finished."));
         }
@@ -6398,6 +6628,716 @@ static void gpu_unlock_remove_row(void)
     snprintf(notice, sizeof notice, "%s", _("Removing NVIDIA GPU unlock and rebuilding the boot image..."));
 }
 
+/* Storage Volumes (locachy-storage): defensive parser for `locachy-storage status --json`
+ * and queued job actions (mount, umount, set-role, set-auto, set-compute, remove). */
+static void json_skip_ws(const char **p)
+{
+    while (**p == ' ' || **p == '\t' || **p == '\r' || **p == '\n') (*p)++;
+}
+
+static int json_parse_string(const char **p, char *out, size_t size)
+{
+    json_skip_ws(p);
+    if (**p != '"') return 0;
+    (*p)++;
+    size_t n = 0;
+    while (**p && **p != '"') {
+        char c = *(*p)++;
+        if (c == '\\' && **p) {
+            char e = *(*p)++;
+            c = e == 'n' ? '\n' : e == 'r' ? '\r' : e == 't' ? '\t' : e;
+        }
+        if (out && size > 1 && n < size - 1) out[n++] = c;
+    }
+    if (out && size > 0) out[n] = '\0';
+    if (**p != '"') return 0;
+    (*p)++;
+    return 1;
+}
+
+static int json_parse_u64(const char **p, unsigned long long *out)
+{
+    json_skip_ws(p);
+    if (!isdigit((unsigned char)**p)) return 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(*p, &end, 10);
+    if (!end || end == *p) return 0;
+    *p = end;
+    if (out) *out = v;
+    return 1;
+}
+
+static int json_parse_bool(const char **p, int *out)
+{
+    json_skip_ws(p);
+    if (strncmp(*p, "true", 4) == 0 && !isalnum((unsigned char)(*p)[4])) {
+        *p += 4;
+        if (out) *out = 1;
+        return 1;
+    }
+    if (strncmp(*p, "false", 5) == 0 && !isalnum((unsigned char)(*p)[5])) {
+        *p += 5;
+        if (out) *out = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int json_skip_value(const char **p, int depth)
+{
+    if (depth > 16) return 0;
+    json_skip_ws(p);
+    char c = **p;
+    if (c == '"') return json_parse_string(p, NULL, 0);
+    if (c == '{') {
+        (*p)++;
+        json_skip_ws(p);
+        if (**p == '}') { (*p)++; return 1; }
+        for (;;) {
+            if (!json_parse_string(p, NULL, 0)) return 0;
+            json_skip_ws(p);
+            if (**p != ':') return 0;
+            (*p)++;
+            if (!json_skip_value(p, depth + 1)) return 0;
+            json_skip_ws(p);
+            if (**p == ',') { (*p)++; continue; }
+            if (**p == '}') { (*p)++; return 1; }
+            return 0;
+        }
+    }
+    if (c == '[') {
+        (*p)++;
+        json_skip_ws(p);
+        if (**p == ']') { (*p)++; return 1; }
+        for (;;) {
+            if (!json_skip_value(p, depth + 1)) return 0;
+            json_skip_ws(p);
+            if (**p == ',') { (*p)++; continue; }
+            if (**p == ']') { (*p)++; return 1; }
+            return 0;
+        }
+    }
+    if (strncmp(*p, "true", 4) == 0) { *p += 4; return 1; }
+    if (strncmp(*p, "false", 5) == 0) { *p += 5; return 1; }
+    if (strncmp(*p, "null", 4) == 0) { *p += 4; return 1; }
+    if (c == '-' || isdigit((unsigned char)c)) {
+        if (**p == '-') (*p)++;
+        if (!isdigit((unsigned char)**p)) return 0;
+        while (isdigit((unsigned char)**p)) (*p)++;
+        if (**p == '.') {
+            (*p)++;
+            while (isdigit((unsigned char)**p)) (*p)++;
+        }
+        if (**p == 'e' || **p == 'E') {
+            (*p)++;
+            if (**p == '+' || **p == '-') (*p)++;
+            while (isdigit((unsigned char)**p)) (*p)++;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int json_parse_string_or_null(const char **p, char *out, size_t size)
+{
+    json_skip_ws(p);
+    if (strncmp(*p, "null", 4) == 0 && !isalnum((unsigned char)(*p)[4])) {
+        *p += 4;
+        if (out && size > 0) out[0] = '\0';
+        return 1;
+    }
+    return json_parse_string(p, out, size);
+}
+
+static int parse_storage_usage_obj(const char **p, struct storage_vol *v)
+{
+    json_skip_ws(p);
+    if (strncmp(*p, "null", 4) == 0 && !isalnum((unsigned char)(*p)[4])) {
+        *p += 4;
+        return 1;
+    }
+    if (**p != '{') return 0;
+    (*p)++;
+    json_skip_ws(p);
+    if (**p == '}') { (*p)++; return 1; }
+    for (;;) {
+        char key[32];
+        if (!json_parse_string(p, key, sizeof key)) return 0;
+        json_skip_ws(p);
+        if (**p != ':') return 0;
+        (*p)++;
+        json_skip_ws(p);
+        int ok;
+        if (strcmp(key, "total_bytes") == 0) ok = json_parse_u64(p, &v->total_bytes);
+        else if (strcmp(key, "used_bytes") == 0) ok = json_parse_u64(p, &v->used_bytes);
+        else ok = json_skip_value(p, 3);
+        if (!ok) return 0;
+        json_skip_ws(p);
+        if (**p == ',') { (*p)++; continue; }
+        if (**p == '}') { (*p)++; return 1; }
+        return 0;
+    }
+}
+
+static int parse_storage_vol_obj(const char **p, struct storage_vol *v)
+{
+    memset(v, 0, sizeof *v);
+    json_skip_ws(p);
+    if (**p != '{') return 0;
+    (*p)++;
+    json_skip_ws(p);
+    if (**p == '}') { (*p)++; return 1; }
+    for (;;) {
+        char key[32];
+        if (!json_parse_string(p, key, sizeof key)) return 0;
+        json_skip_ws(p);
+        if (**p != ':') return 0;
+        (*p)++;
+        json_skip_ws(p);
+        int ok;
+        if (strcmp(key, "name") == 0) ok = json_parse_string_or_null(p, v->name, sizeof v->name);
+        else if (strcmp(key, "topology") == 0) ok = json_parse_string_or_null(p, v->topology, sizeof v->topology);
+        else if (strcmp(key, "fs") == 0) ok = json_parse_string_or_null(p, v->fs, sizeof v->fs);
+        else if (strcmp(key, "raid") == 0) ok = json_parse_string_or_null(p, v->raid, sizeof v->raid);
+        else if (strcmp(key, "role") == 0) ok = json_parse_string_or_null(p, v->role, sizeof v->role);
+        else if (strcmp(key, "encrypt") == 0) ok = json_parse_string_or_null(p, v->encrypt, sizeof v->encrypt);
+        else if (strcmp(key, "mount_path") == 0 || strcmp(key, "mountpoint") == 0)
+            ok = json_parse_string_or_null(p, v->mount_path, sizeof v->mount_path);
+        else if (strcmp(key, "drives_path") == 0) ok = json_parse_string_or_null(p, v->drives_path, sizeof v->drives_path);
+        else if (strcmp(key, "health") == 0) ok = json_parse_string_or_null(p, v->health, sizeof v->health);
+        else if (strcmp(key, "auto_mount") == 0) ok = json_parse_bool(p, &v->auto_mount);
+        else if (strcmp(key, "mounted") == 0) ok = json_parse_bool(p, &v->mounted);
+        else if (strcmp(key, "total_bytes") == 0) ok = json_parse_u64(p, &v->total_bytes);
+        else if (strcmp(key, "used_bytes") == 0) ok = json_parse_u64(p, &v->used_bytes);
+        else if (strcmp(key, "usage") == 0) ok = parse_storage_usage_obj(p, v);
+        else ok = json_skip_value(p, 2);
+        if (!ok) return 0;
+        json_skip_ws(p);
+        if (**p == ',') { (*p)++; continue; }
+        if (**p == '}') { (*p)++; return 1; }
+        return 0;
+    }
+}
+
+static int parse_storage_disk_obj(const char **p, struct storage_disk *d)
+{
+    memset(d, 0, sizeof *d);
+    json_skip_ws(p);
+    if (**p != '{') return 0;
+    (*p)++;
+    json_skip_ws(p);
+    if (**p == '}') { (*p)++; return 1; }
+    for (;;) {
+        char key[32];
+        if (!json_parse_string(p, key, sizeof key)) return 0;
+        json_skip_ws(p);
+        if (**p != ':') return 0;
+        (*p)++;
+        json_skip_ws(p);
+        int ok = 1;
+        if (strcmp(key, "path") == 0) ok = json_parse_string_or_null(p, d->path, sizeof d->path);
+        else if (strcmp(key, "model") == 0) ok = json_parse_string_or_null(p, d->model, sizeof d->model);
+        else if (strcmp(key, "tran") == 0) ok = json_parse_string_or_null(p, d->tran, sizeof d->tran);
+        else if (strcmp(key, "size") == 0 || strcmp(key, "size_bytes") == 0) ok = json_parse_u64(p, &d->size);
+        else if (strcmp(key, "in_use") == 0) ok = json_parse_bool(p, &d->in_use);
+        else if (strcmp(key, "is_root") == 0) ok = json_parse_bool(p, &d->is_root);
+        else if (strcmp(key, "partitions") == 0 && **p == '[') {
+            (*p)++;
+            json_skip_ws(p);
+            if (**p == ']') {
+                (*p)++;
+            } else {
+                for (;;) {
+                    json_skip_ws(p);
+                    if (**p == '{') {
+                        (*p)++;
+                        char ppath[64] = "", pfstype[24] = "";
+                        json_skip_ws(p);
+                        if (**p != '}') {
+                            for (;;) {
+                                char pkey[32];
+                                if (!json_parse_string(p, pkey, sizeof pkey)) return 0;
+                                json_skip_ws(p);
+                                if (**p != ':') return 0;
+                                (*p)++;
+                                json_skip_ws(p);
+                                int pok;
+                                if (strcmp(pkey, "path") == 0) pok = json_parse_string_or_null(p, ppath, sizeof ppath);
+                                else if (strcmp(pkey, "fstype") == 0) pok = json_parse_string_or_null(p, pfstype, sizeof pfstype);
+                                else pok = json_skip_value(p, 4);
+                                if (!pok) return 0;
+                                json_skip_ws(p);
+                                if (**p == ',') { (*p)++; continue; }
+                                if (**p == '}') break;
+                                return 0;
+                            }
+                        }
+                        if (**p != '}') return 0;
+                        (*p)++;
+                        if (d->nparts == 0 && ppath[0]) {
+                            snprintf(d->first_part, sizeof d->first_part, "%s", ppath);
+                            snprintf(d->first_fstype, sizeof d->first_fstype, "%s", pfstype);
+                        }
+                        d->nparts++;
+                    } else if (!json_skip_value(p, 3)) {
+                        return 0;
+                    }
+                    json_skip_ws(p);
+                    if (**p == ',') { (*p)++; continue; }
+                    if (**p == ']') { (*p)++; break; }
+                    return 0;
+                }
+            }
+        } else {
+            ok = json_skip_value(p, 2);
+        }
+        if (!ok) return 0;
+        json_skip_ws(p);
+        if (**p == ',') { (*p)++; continue; }
+        if (**p == '}') { (*p)++; return 1; }
+        return 0;
+    }
+}
+
+static int parse_storage_status(const char *text)
+{
+    nstorage_vols = 0;
+    nstorage_disks = 0;
+    if (!text) return 0;
+    const char *p = text;
+    json_skip_ws(&p);
+    if (*p != '{') return 0;
+    p++;
+    json_skip_ws(&p);
+    if (*p == '}') return 1;
+    for (;;) {
+        char key[32];
+        if (!json_parse_string(&p, key, sizeof key)) goto fail;
+        json_skip_ws(&p);
+        if (*p != ':') goto fail;
+        p++;
+        json_skip_ws(&p);
+        if (strcmp(key, "compute_storage") == 0) {
+            char cs[40] = "";
+            if (!json_parse_string_or_null(&p, cs, sizeof cs)) goto fail;
+            snprintf(compute_storage_cfg, sizeof compute_storage_cfg, "%s",
+                     strcmp(cs, "none") == 0 ? "" : cs);
+        } else if (strcmp(key, "volumes") == 0 && *p == '[') {
+            p++;
+            json_skip_ws(&p);
+            if (*p == ']') {
+                p++;
+            } else {
+                for (;;) {
+                    struct storage_vol v;
+                    if (!parse_storage_vol_obj(&p, &v)) goto fail;
+                    if (v.name[0] && nstorage_vols < MAX_STORAGE_VOLS) {
+                        storage_vols[nstorage_vols++] = v;
+                    }
+                    json_skip_ws(&p);
+                    if (*p == ',') { p++; continue; }
+                    if (*p == ']') { p++; break; }
+                    goto fail;
+                }
+            }
+        } else if (strcmp(key, "available_disks") == 0 && *p == '[') {
+            p++;
+            json_skip_ws(&p);
+            if (*p == ']') {
+                p++;
+            } else {
+                for (;;) {
+                    struct storage_disk d;
+                    if (!parse_storage_disk_obj(&p, &d)) goto fail;
+                    if (strncmp(d.path, "/dev/", 5) == 0 && !d.in_use && nstorage_disks < MAX_STORAGE_DISKS) {
+                        storage_disks[nstorage_disks++] = d;
+                    }
+                    json_skip_ws(&p);
+                    if (*p == ',') { p++; continue; }
+                    if (*p == ']') { p++; break; }
+                    goto fail;
+                }
+            }
+        } else if (!json_skip_value(&p, 1)) {
+            goto fail;
+        }
+        json_skip_ws(&p);
+        if (*p == ',') { p++; continue; }
+        if (*p == '}') return 1;
+        goto fail;
+    }
+fail:
+    nstorage_vols = 0;
+    nstorage_disks = 0;
+    return 0;
+}
+
+static void format_bytes_iec(unsigned long long bytes, char *out, size_t size)
+{
+    if (bytes >= (1ULL << 40)) {
+        snprintf(out, size, "%.1f TiB", (double)bytes / (double)(1ULL << 40));
+    } else if (bytes >= (100ULL << 30)) {
+        snprintf(out, size, "%.0f GiB", (double)bytes / (double)(1ULL << 30));
+    } else if (bytes >= (1ULL << 30)) {
+        snprintf(out, size, "%.1f GiB", (double)bytes / (double)(1ULL << 30));
+    } else if (bytes >= (1ULL << 20)) {
+        snprintf(out, size, "%.0f MiB", (double)bytes / (double)(1ULL << 20));
+    } else {
+        snprintf(out, size, "%llu KiB", bytes >> 10);
+    }
+}
+
+static void load_storage_status(void)
+{
+    static char buf[32768];
+    nstorage_vols = 0;
+    nstorage_disks = 0;
+    if (access(LOCACHY_STORAGE, X_OK) != 0) {
+        return;
+    }
+    buf[0] = '\0';
+    char *const argv[] = { LOCACHY_STORAGE, "status", "--json", NULL };
+    command_output(argv, buf, sizeof buf);
+    if (buf[0]) {
+        parse_storage_status(buf);
+    }
+}
+
+static void storage_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!storage_job || !job_ended(storage_job, &r, log, sizeof log)) {
+        return;
+    }
+    storage_job = 0;
+    storage_remove_asked = -1;
+    compute_storage_cfg[0] = '\0';
+    rc_read(on_rc, NULL);
+    load_storage_status();
+    entries_dirty = 1;
+    full_redraw = 1;
+    if (strcmp(r.state, "done") == 0) {
+        if (strcmp(storage_what, "mount") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("Storage volume mounted."));
+        } else if (strcmp(storage_what, "umount") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("Storage volume unmounted."));
+        } else if (strcmp(storage_what, "set-role") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("Storage volume role updated."));
+        } else if (strcmp(storage_what, "set-auto") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("Storage volume auto-mount updated."));
+        } else if (strcmp(storage_what, "set-compute") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("Default compute storage updated."));
+        } else if (strcmp(storage_what, "remove") == 0) {
+            snprintf(notice, sizeof notice, "%s", _("Storage volume detached from LOCachy (disk data kept)."));
+        } else {
+            snprintf(notice, sizeof notice, "%s", _("Storage operation finished."));
+        }
+    } else {
+        snprintf(notice, sizeof notice, _("Storage operation failed: %s"), r.last[0] ? r.last : log);
+    }
+    storage_what[0] = '\0';
+}
+
+/* The Maintenance Windows target disk as its row names it: where the partition
+ * is once created, else the disk the next create takes (the system disk when none is chosen). */
+static void winmaint_disk_text(char *out, size_t size)
+{
+    if (winmaint_created) {
+        snprintf(out, size, "%s", winmaint_resolved[0] ? winmaint_resolved : _("the system disk"));
+        return;
+    }
+    if (!winmaint_disk_cfg[0]) {
+        snprintf(out, size, "%s", _("System disk (auto)"));
+        return;
+    }
+    for (int i = 0; i < nwinmaint_cands; i++) {
+        if (strcmp(winmaint_cands[i].path, winmaint_disk_cfg) == 0) {
+            char sz[24];
+            format_bytes_iec(winmaint_cands[i].size, sz, sizeof sz);
+            snprintf(out, size, "%s (%.40s, %s)", winmaint_disk_cfg, winmaint_cands[i].model, sz);
+            return;
+        }
+    }
+    snprintf(out, size, "%s", winmaint_disk_cfg);
+}
+
+/* Left/Right on the target disk row, before the partition exists: the system
+ * disk, then each disk locachy-winmaint offers other than the system disk. */
+static void winmaint_cycle_disk(int dir)
+{
+    const char *choices[MAX_STORAGE_DISKS + 1];
+    int n = 0;
+    if (winmaint_created) {
+        snprintf(notice, sizeof notice, "%s", _("The disk is fixed once Maintenance Windows exists."));
+        return;
+    }
+    choices[n++] = "";
+    for (int i = 0; i < nwinmaint_cands; i++) {
+        if (!winmaint_cands[i].is_root) choices[n++] = winmaint_cands[i].path;
+    }
+    if (n == 1) {
+        winmaint_disk_cfg[0] = '\0';
+        snprintf(notice, sizeof notice, "%s",
+                 _("No other internal disk can host Maintenance Windows: the system disk is used."));
+        return;
+    }
+    int cur = 0;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(choices[i], winmaint_disk_cfg) == 0) {
+            cur = i;
+            break;
+        }
+    }
+    int next = (cur + (dir > 0 ? 1 : n - 1)) % n;
+    snprintf(winmaint_disk_cfg, sizeof winmaint_disk_cfg, "%s", choices[next]);
+    char text[160];
+    winmaint_disk_text(text, sizeof text);
+    snprintf(notice, sizeof notice, _("Maintenance Windows goes on %s."), text);
+}
+
+/* locachy-winmaint status --json: the disks it offers (candidate_disks) and the
+ * disk Maintenance Windows is on (resolved_disk). Read when settings opens; an
+ * unreadable answer offers the system disk only. */
+static void winmaint_load_targets(void)
+{
+    static char buf[16384];
+    nwinmaint_cands = 0;
+    winmaint_resolved[0] = '\0';
+    winmaint_first_pending = winmaint_first_overridden = 0;
+    if (access(LOCACHY_WINMAINT, X_OK) != 0) return;
+    buf[0] = '\0';
+    char *const argv[] = { LOCACHY_WINMAINT, "status", "--json", NULL };
+    command_output(argv, buf, sizeof buf);
+    const char *p = buf;
+    int ok = 0;
+    json_skip_ws(&p);
+    if (*p == '{') {
+        p++;
+        ok = 1;
+        json_skip_ws(&p);
+        while (ok && *p && *p != '}') {
+            char key[32];
+            ok = json_parse_string(&p, key, sizeof key);
+            json_skip_ws(&p);
+            ok = ok && *p == ':';
+            if (!ok) break;
+            p++;
+            json_skip_ws(&p);
+            if (strcmp(key, "resolved_disk") == 0) {
+                ok = json_parse_string_or_null(&p, winmaint_resolved, sizeof winmaint_resolved);
+            } else if (strcmp(key, "boot_default_pending_reboot") == 0) {
+                ok = json_parse_bool(&p, &winmaint_first_pending);
+            } else if (strcmp(key, "boot_default_overridden") == 0) {
+                ok = json_parse_bool(&p, &winmaint_first_overridden);
+            } else if (strcmp(key, "candidate_disks") == 0 && *p == '[') {
+                p++;
+                json_skip_ws(&p);
+                while (ok && *p && *p != ']') {
+                    struct storage_disk d;
+                    ok = parse_storage_disk_obj(&p, &d);
+                    if (ok && strncmp(d.path, "/dev/", 5) == 0 && nwinmaint_cands < MAX_STORAGE_DISKS) {
+                        winmaint_cands[nwinmaint_cands++] = d;
+                    }
+                    json_skip_ws(&p);
+                    if (*p == ',') {
+                        p++;
+                        json_skip_ws(&p);
+                    } else if (*p != ']') {
+                        ok = 0;
+                    }
+                }
+                ok = ok && *p == ']';
+                if (ok) p++;
+            } else {
+                ok = json_skip_value(&p, 1);
+            }
+            json_skip_ws(&p);
+            if (*p == ',') {
+                p++;
+                json_skip_ws(&p);
+            } else if (*p != '}') {
+                ok = 0;
+            }
+        }
+    }
+    if (!ok) {
+        nwinmaint_cands = 0;
+        winmaint_resolved[0] = '\0';
+        winmaint_first_pending = winmaint_first_overridden = 0;
+    }
+}
+
+static void storage_cycle_compute(int dir)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    storage_remove_asked = -1;
+    if (storage_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a storage job is still running."));
+        return;
+    }
+    const char *choices[MAX_STORAGE_VOLS + 1];
+    int n = 0;
+    choices[n++] = "";
+    for (int i = 0; i < nstorage_vols; i++) {
+        if (strcmp(storage_vols[i].role, "shared") == 0 || strcmp(storage_vols[i].role, "compute") == 0) {
+            choices[n++] = storage_vols[i].name;
+        }
+    }
+    if (n == 1 && !compute_storage_cfg[0]) {
+        snprintf(notice, sizeof notice, "%s",
+                 _("No storage volume has role shared or compute; add one or change a volume role first."));
+        return;
+    }
+    int cur = -1;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(choices[i], compute_storage_cfg) == 0) {
+            cur = i;
+            break;
+        }
+    }
+    int next = cur < 0 ? 0 : (cur + (dir > 0 ? 1 : n - 1)) % n;
+    const char *target = choices[next][0] ? choices[next] : "none";
+    const char *args[] = { target, NULL };
+    if (jobs_submit("storage-set-compute", args, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not change compute storage: %s"), why);
+        return;
+    }
+    storage_job = id;
+    snprintf(storage_what, sizeof storage_what, "set-compute");
+    snprintf(notice, sizeof notice, choices[next][0] ?
+             _("Setting default compute storage to %.32s...") : _("Clearing default compute storage..."), target);
+}
+
+static void storage_cycle_role(int vol_idx, int dir)
+{
+    static const char *const roles[] = { "shared", "data", "compute" };
+    char why[160] = "";
+    int id = 0, pos = 0;
+    storage_remove_asked = -1;
+    if (vol_idx < 0 || vol_idx >= nstorage_vols) return;
+    if (storage_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a storage job is still running."));
+        return;
+    }
+    const struct storage_vol *v = &storage_vols[vol_idx];
+    int cur = 0;
+    for (int i = 0; i < 3; i++) {
+        if (strcmp(v->role, roles[i]) == 0) { cur = i; break; }
+    }
+    const char *next = roles[(cur + (dir > 0 ? 1 : 2)) % 3];
+    const char *args[] = { v->name, next, NULL };
+    if (jobs_submit("storage-set-role", args, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not change volume role: %s"), why);
+        return;
+    }
+    storage_job = id;
+    snprintf(storage_what, sizeof storage_what, "set-role");
+    snprintf(notice, sizeof notice, _("Setting role of %.32s to %s..."), v->name, next);
+}
+
+static void storage_toggle_mount(int vol_idx)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    storage_remove_asked = -1;
+    if (vol_idx < 0 || vol_idx >= nstorage_vols) return;
+    if (storage_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a storage job is still running."));
+        return;
+    }
+    const struct storage_vol *v = &storage_vols[vol_idx];
+    const char *kind = v->mounted ? "storage-umount" : "storage-mount";
+    const char *args[] = { v->name, NULL };
+    if (jobs_submit(kind, args, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not %s %.32s: %s"),
+                 v->mounted ? _("unmount") : _("mount"), v->name, why);
+        return;
+    }
+    storage_job = id;
+    snprintf(storage_what, sizeof storage_what, "%s", v->mounted ? "umount" : "mount");
+    snprintf(notice, sizeof notice, v->mounted ? _("Unmounting %.32s...") : _("Mounting %.32s..."), v->name);
+}
+
+static void storage_toggle_auto(int vol_idx)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    storage_remove_asked = -1;
+    if (vol_idx < 0 || vol_idx >= nstorage_vols) return;
+    if (storage_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a storage job is still running."));
+        return;
+    }
+    const struct storage_vol *v = &storage_vols[vol_idx];
+    const char *next = v->auto_mount ? "off" : "on";
+    const char *args[] = { v->name, next, NULL };
+    if (jobs_submit("storage-set-auto", args, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not change auto-mount for %.32s: %s"), v->name, why);
+        return;
+    }
+    storage_job = id;
+    snprintf(storage_what, sizeof storage_what, "set-auto");
+    snprintf(notice, sizeof notice, v->auto_mount ?
+             _("Disabling auto-mount for %.32s...") : _("Enabling auto-mount for %.32s..."), v->name);
+}
+
+static void storage_remove_row(int vol_idx)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    if (vol_idx < 0 || vol_idx >= nstorage_vols) return;
+    if (storage_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a storage job is still running."));
+        return;
+    }
+    const struct storage_vol *v = &storage_vols[vol_idx];
+    if (storage_remove_asked != vol_idx) {
+        storage_remove_asked = vol_idx;
+        /* TRANSLATORS: Delete is the Delete key; keep it. */
+        snprintf(notice, sizeof notice,
+                 _("Delete again: detach volume %.32s from LOCachy (disk data is NOT wiped)."), v->name);
+        return;
+    }
+    storage_remove_asked = -1;
+    const char *args[] = { v->name, NULL };
+    if (jobs_submit("storage-remove", args, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not detach %.32s: %s"), v->name, why);
+        return;
+    }
+    storage_job = id;
+    snprintf(storage_what, sizeof storage_what, "remove");
+    snprintf(notice, sizeof notice, _("Detaching volume %.32s from LOCachy..."), v->name);
+}
+
+static void storage_manage_disks_row(void)
+{
+    storage_remove_asked = -1;
+    if (storage_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: a storage job is still running."));
+        return;
+    }
+    if (access(LOCACHY_STORAGE, X_OK) != 0) {
+        snprintf(notice, sizeof notice, _("%s is not installed."), "locachy-storage");
+        return;
+    }
+    char *const cmd[] = {
+        "/bin/sh", "-c",
+        "/usr/bin/sudo " LOCACHY_STORAGE " status; s=$?; "
+        "printf '\\nAttach: sudo " LOCACHY_STORAGE " create --mode attach --name NAME --dev /dev/DEV --role shared\\n"
+        "Format: sudo " LOCACHY_STORAGE " create --mode format --name NAME --dev /dev/DEV --fs ext4 --role shared --encrypt luks\\n"
+        "Array:  sudo " LOCACHY_STORAGE " create --mode array --name NAME --devs /dev/D1,/dev/D2 --raid raid1 --role shared --encrypt luks\\n"
+        "Enter: back to settings. '; read -r _; exit $s",
+        NULL
+    };
+    int status = in_term(cmd);
+    load_storage_status();
+    entries_dirty = 1;
+    snprintf(notice, sizeof notice, "%s", status == 0 ?
+             _("Storage manager closed.") : _("Storage manager did not finish."));
+}
+
 /* Reopened or polled: the active system jobs (including ones started from
  * packages or firmware, or another settings window), followed while they run
  * or wait. A slot already tracking a job keeps it; otherwise a running job
@@ -6408,7 +7348,7 @@ static void adopt_jobs(void)
     int n = jobs_mine(rows, JOBS_ROWS_MAX);
     int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0, have_tpm = tpm_job != 0;
     int have_security = security_job != 0, have_winmaint = winmaint_job != 0, have_tb = tb_sync_job != 0;
-    int have_gpu_unlock = gpu_unlock_job != 0, have_gpu_power = gpu_power_job != 0;
+    int have_gpu_unlock = gpu_unlock_job != 0, have_gpu_power = gpu_power_job != 0, have_storage = storage_job != 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n; i++) {
             const struct jobs_row *r = &rows[i];
@@ -6442,6 +7382,10 @@ static void adopt_jobs(void)
             } else if (!have_gpu_power && strncmp(r->kind, "gpu-power", 9) == 0) {
                 gpu_power_job = r->id;
                 have_gpu_power = 1;
+            } else if (!have_storage && strncmp(r->kind, "storage-", 8) == 0) {
+                storage_job = r->id;
+                have_storage = 1;
+                snprintf(storage_what, sizeof storage_what, "%s", r->kind + 8);
             } else if (!have_pkg && strncmp(r->kind, "kernel-", 7) == 0) {
                 pkg_job = r->id;
                 have_pkg = 1;
@@ -6683,9 +7627,11 @@ static int enter_row(int idx)
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
            idx == paired_devices_index() ||
            (idx >= winmaint_index() + 1 && idx < winmaint_index() + 5) ||
+           idx == winmaint_mode_index() || idx == winmaint_mode_index() + 1 ||
            (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
-           idx == bat_page_index() || idx == hwinfo_index() || idx == hwcopy_index() || idx == nmtui_index() || idx == ts_index() + 2 ||
-           idx == gpu_unlock_index();
+           idx == bat_page_index() || idx == bat_full_index() ||
+           idx == hwinfo_index() || idx == hwcopy_index() || idx == nmtui_index() || idx == ts_index() + 2 ||
+           idx == gpu_unlock_index() || idx == storage_disks_index();
 }
 
 /* An optional component's line, its packages installed or not: Enter
@@ -6730,7 +7676,8 @@ static int picker_row(int idx)
 static int info_row(int idx)
 {
     return idx == cl_index() + 3 || idx == tr_index() + 3 || idx == fc_index() + 3 || idx == fp_index() + 2 ||
-           idx == upd_index() + 4;
+           idx == upd_index() + 4 ||
+           (idx >= bat_thresh_index() && idx < bat_thresh_index() + power_thresh_count() && power_charge_managed());
 }
 
 static void row_hint(void);
@@ -6986,7 +7933,8 @@ static void item_text(int idx, char *line, size_t size)
             read_one_line("/usr/local/lib/locachy/level", cpu_lvl_text, sizeof cpu_lvl_text);
         } else if (idx == display_card_index() || idx == extd_card_index()) {
             load_drm_cards();
-        } else if (idx >= winmaint_index() + 1 && idx < winmaint_index() + 5) {
+        } else if ((idx >= winmaint_index() + 1 && idx < winmaint_index() + 5) ||
+                   idx == winmaint_mode_index() || idx == winmaint_mode_index() + 1) {
             load_winmaint_status();
         }
     }
@@ -7024,7 +7972,7 @@ static void item_text(int idx, char *line, size_t size)
         }
         return;
     }
-    if ((i = idx - ts_index()) >= 0 && i < 3) {
+    if ((i = idx - ts_index()) >= 0 && i < 4) {
         if (i == 0) {
             snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Tailscale installed"), 32),
                      tailscale_installed() ? _("YES") : _("NO "));
@@ -7033,9 +7981,13 @@ static void item_text(int idx, char *line, size_t size)
                      tailscale_enabled ? _("ON ") : _("OFF"),
                      !tailscale_installed() ? _("  (not installed)") :
                      tor_on ? _("  (Tor is on: no way around it, its UDP is dropped)") : "");
-        } else {
+        } else if (i == 2) {
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("Tailscale account"), 30),
                      tailscale_row_text());
+        } else {
+            snprintf(line, size, "  %.95s [%s]%s", ui_pad(label, sizeof label, _("SSH over Tailscale"), 30),
+                     tailnet_ssh_on ? _("ON ") : _("OFF"),
+                     tailnet_ssh_on && !tailscale_enabled ? _("  (Tailscale is off)") : "");
         }
         return;
     }
@@ -7236,11 +8188,11 @@ static void item_text(int idx, char *line, size_t size)
     }
     if ((i = idx - compute_index()) >= 0 && i < 3) {
         if (i == 0) {
-            snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Compute node service"), 32),
+            snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Compute HTTPS API (optional)"), 32),
                      compute_on ? _("ON ") : _("OFF"));
         } else if (i == 1) {
             snprintf(line, size, "  %.95s [%s]%s%s",
-                     ui_pad(label, sizeof label, _("Bind compute on Thunderbolt"), 30),
+                     ui_pad(label, sizeof label, _("Compute API over Thunderbolt"), 30),
                      compute_bind_tb ? _("ON ") : _("OFF"),
                      tb_sync_job ? "  " : "", tb_sync_job ? _("working...") : "");
         } else {
@@ -7250,7 +8202,34 @@ static void item_text(int idx, char *line, size_t size)
         }
         return;
     }
-    if ((i = idx - winmaint_index()) >= 0 && i < 5) {
+    if ((i = idx - winmaint_mode_index()) >= 0 && i < 2) {
+        int busy = winmaint_job && strcmp(winmaint_what, "boot-default") == 0;
+        if (i == 0) {
+            const char *v = busy ? _("working...") :
+                            !winmaint_created ? _("not created") :
+                            !winmaint_windows_first ? _("[OFF] LOCachy starts first") :
+                            winmaint_first_pending ? _("[ON] Windows from the next restart") :
+                            /* TRANSLATORS: Enter is the Enter key; keep it. */
+                            winmaint_first_overridden ? _("[ON] LOCachy was picked in the firmware menu; Enter: switch back") :
+                            _("[ON] Windows starts first");
+            snprintf(line, size, "%.95s %s",
+                     ui_pad(label, sizeof label, _("Start in Windows by default (until switched back)"), 32), v);
+        } else {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Reboot into Windows now"), 32),
+                     busy ? _("working...") : !winmaint_created ? _("not created") :
+                     _("Enter, twice: restart into Windows"));
+        }
+        return;
+    }
+    if ((i = idx - winmaint_index()) >= 0 && i < 6) {
+        if (i == 5) {
+            char target[160];
+            winmaint_disk_text(target, sizeof target);
+            snprintf(line, size, "%.95s < %.120s >",
+                     ui_pad(label, sizeof label, _("Windows target disk"), 32), target);
+            return;
+        }
         if (i == 0) {
             snprintf(line, size, "%.95s < %d GiB >",
                      ui_pad(label, sizeof label, _("Windows partition size"), 32), winmaint_size_gib);
@@ -7281,7 +8260,7 @@ static void item_text(int idx, char *line, size_t size)
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(line, size, "%.95s %s",
                      ui_pad(label, sizeof label, _("Windows virtual machine"), 32),
-                     !winmaint_created ? _("not created") : _("Enter: launch in terminal"));
+                     !winmaint_created ? _("not created") : _("Enter: open on the desktop"));
         }
         return;
     }
@@ -7386,6 +8365,67 @@ static void item_text(int idx, char *line, size_t size)
     if (idx == nvidia_powerd_index()) {
         snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("NVIDIA Dynamic Boost (nvidia-powerd)"), 32),
                  gpu_power_job ? _("working...") : nvidia_powerd_on ? _("ON ") : _("OFF"));
+        return;
+    }
+    if (idx == storage_compute_index()) {
+        snprintf(line, size, "%.95s < %s >",
+                 ui_pad(label, sizeof label, _("Compute default storage"), 32),
+                 storage_job && strcmp(storage_what, "set-compute") == 0 ? _("working...") :
+                 compute_storage_cfg[0] ? compute_storage_cfg : _("none"));
+        return;
+    }
+    if ((i = idx - storage_vols_index()) >= 0 && i < nstorage_vols) {
+        const struct storage_vol *v = &storage_vols[i];
+        char vlabel[96], spec[48], state[64], health[40] = "";
+        snprintf(vlabel, sizeof vlabel, "Volume: %.32s", v->name);
+        if (v->raid[0] && strcmp(v->raid, "single") != 0) {
+            snprintf(spec, sizeof spec, "%.15s %.15s", v->fs[0] ? v->fs : "btrfs", v->raid);
+        } else {
+            snprintf(spec, sizeof spec, "%.15s", v->fs[0] ? v->fs : "auto");
+        }
+        if (storage_job) {
+            snprintf(state, sizeof state, "%s", _("working..."));
+        } else if (v->mounted && v->total_bytes > 0) {
+            char used_s[24], tot_s[24];
+            format_bytes_iec(v->used_bytes, used_s, sizeof used_s);
+            format_bytes_iec(v->total_bytes, tot_s, sizeof tot_s);
+            snprintf(state, sizeof state, "%s / %s", used_s, tot_s);
+        } else if (v->mounted) {
+            snprintf(state, sizeof state, "%s", _("mounted"));
+        } else {
+            snprintf(state, sizeof state, "%s", _("unmounted"));
+        }
+        if (v->health[0] && strcmp(v->health, "ok") != 0 && strcmp(v->health, "healthy") != 0) {
+            snprintf(health, sizeof health, " [!%.24s]", v->health);
+        }
+        snprintf(line, size, "%.95s < %.15s >  %s  %s  %s  %s%s",
+                 ui_pad(label, sizeof label, vlabel, 32),
+                 v->role[0] ? v->role : "data",
+                 spec,
+                 strcmp(v->encrypt, "luks") == 0 ? "LUKS" : _("plain"),
+                 v->auto_mount ? _("auto") : _("manual"),
+                 state,
+                 health);
+        return;
+    }
+    if (idx == storage_disks_index()) {
+        if (access(LOCACHY_STORAGE, X_OK) != 0 && nstorage_disks == 0) {
+            snprintf(vbuf, sizeof vbuf, "%s", _("not installed"));
+        } else if (nstorage_disks == 0) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(vbuf, sizeof vbuf, "%s", _("none  (Enter: manage via CLI)"));
+        } else {
+            char sz[24];
+            format_bytes_iec(storage_disks[0].size, sz, sizeof sz);
+            if (nstorage_disks == 1) {
+                snprintf(vbuf, sizeof vbuf, _("1 unmanaged disk: %.40s (%s)  (Enter: manage)"),
+                         storage_disks[0].path, sz);
+            } else {
+                snprintf(vbuf, sizeof vbuf, _("%d unmanaged disks: %.32s (%s), ...  (Enter: manage)"),
+                         nstorage_disks, storage_disks[0].path, sz);
+            }
+        }
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Unmanaged disks"), 32), vbuf);
         return;
     }
     if ((i = idx - fp_index()) >= 0 && i < 4) {
@@ -7705,16 +8745,34 @@ static void item_text(int idx, char *line, size_t size)
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Battery curves & health"), 32), vbuf);
         return;
     }
+    if (idx == bat_adaptive_index()) {
+        const char *state = !power_can_manage_charge() ? _("Charging control unsupported") :
+                            power_charge_known && power_charge.adaptive != rc_bat_adaptive ? _("Waiting for battery service") : "";
+        snprintf(line, size, "%.95s < %s > %s", ui_pad(label, sizeof label, _("Adaptive Charging"), 32),
+                 rc_bat_adaptive ? _("on") : _("off"), state);
+        return;
+    }
+    if (idx == bat_full_index()) {
+        const char *why = power_full_unavailable();
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Charge to Full Now"), 32),
+                 why ? why : power_full_active() ? _("Full charge override active") :
+                 power_full_pending ? _("Waiting for battery service") : _("Enter: request full charge"));
+        return;
+    }
     if ((i = idx - bat_thresh_index()) >= 0 && i < power_thresh_count()) {
         int bi = power_thresh_bat_index();
-        const struct bat_device *b = bi >= 0 ? &power_devs[bi] : NULL;
-        int is_end = (i == 1) || (b && !b->has_start_thresh && b->has_end_thresh);
-        if (!is_end) {
-            snprintf(line, size, "%.95s < %d%% >",
-                     ui_pad(label, sizeof label, _("Charge start threshold"), 32), b ? b->start_thresh : 0);
+        const struct bat_device *b = &power_devs[bi];
+        int is_end = i == 1 || !b->has_start_thresh;
+        const char *name = is_end ? _("Charge stop threshold") : _("Charge start threshold");
+        if (power_charge_managed()) {
+            int saved = is_end ? rc_bat_end : rc_bat_start;
+            if (saved < 0) snprintf(vbuf, sizeof vbuf, "%s", _("not set for manual charging"));
+            else snprintf(vbuf, sizeof vbuf, _("%d%% saved for manual charging"), saved);
+            snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, name, 32), vbuf);
         } else {
-            snprintf(line, size, "%.95s < %d%% >",
-                     ui_pad(label, sizeof label, _("Charge stop threshold"), 32), b ? b->end_thresh : 100);
+            snprintf(line, size, "%.95s < %d%% >", ui_pad(label, sizeof label, name, 32),
+                     is_end ? b->end_thresh : b->start_thresh);
         }
         return;
     }
@@ -7875,7 +8933,7 @@ static void draw(void)
     static char last_notice[sizeof notice];
     int sw = sidebar_width(), cols = screen_cols(), rows = screen_rows();
     int jobs_active = pkg_job || repos_job || boot_job || tpm_job || security_job || winmaint_job || tb_sync_job ||
-                      gpu_unlock_job || gpu_power_job;
+                      gpu_unlock_job || gpu_power_job || storage_job;
     flush_ui_caches();
     if (!in_ui_loop) {
         /* Tests set state directly before draw(): keep every map and paint fresh. */
@@ -8034,6 +9092,24 @@ static void adjust(int dir)
         } else {
             snprintf(notice, sizeof notice, _("Tailscale: %.140s."), state);
         }
+        return;
+    }
+
+    if (selected == ts_idx + 3) {
+        int next = !tailnet_ssh_on;
+        if (next && !tailscale_enabled) {
+            snprintf(notice, sizeof notice, "%s", _("Turn on Tailscale before enabling SSH over it."));
+            return;
+        }
+        if (rc_set("service_tailnet_ssh", next ? TAILNET_SSH_SERVICE : NULL) < 0) {
+            snprintf(notice, sizeof notice, _("Cannot write %s."), RC_CONF);
+            return;
+        }
+        tailnet_ssh_on = next;
+        kill(1, SIGHUP);
+        snprintf(notice, sizeof notice, "%s", next ?
+                 _("SSH over Tailscale enabled; login requires an authorized public key.") :
+                 _("SSH over Tailscale disabled."));
         return;
     }
 
@@ -8263,7 +9339,7 @@ static void adjust(int dir)
         compute_on = next;
         kill(1, SIGHUP);
         snprintf(notice, sizeof notice, "%s", compute_on ?
-                 _("Compute node service on.") : _("Compute node service off."));
+                 _("Compute HTTPS API enabled.") : _("Compute HTTPS API disabled."));
         return;
     }
     if (selected == compute_index() + 1) {
@@ -8290,6 +9366,10 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", compute_gpu ?
                  _("Compute GPU passthrough on; applies to new compute jobs.") :
                  _("Compute GPU passthrough off; applies to new compute jobs."));
+        return;
+    }
+    if (selected == winmaint_index() + 5) {
+        winmaint_cycle_disk(dir);
         return;
     }
     if (selected == winmaint_index()) {
@@ -8333,7 +9413,11 @@ static void adjust(int dir)
     if (selected == winmaint_index() + 4) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(notice, sizeof notice, "%s",
-                 _("Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, or VNC)."));
+                 _("Enter: open Maintenance Windows on the desktop (also available from Home)."));
+        return;
+    }
+    if (selected == winmaint_mode_index() || selected == winmaint_mode_index() + 1) {
+        winmaint_mode_hint(selected, notice, sizeof notice);
         return;
     }
     if (selected == sec_index()) {
@@ -8959,6 +10043,20 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", _("Saving the NVIDIA Dynamic Boost setting..."));
         return;
     }
+    if (selected == storage_compute_index()) {
+        storage_cycle_compute(dir);
+        return;
+    }
+    if (selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {
+        storage_cycle_role(selected - storage_vols_index(), dir);
+        return;
+    }
+    if (selected == storage_disks_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter: open storage manager in a terminal (attach, format, or create btrfs array)."));
+        return;
+    }
     if (selected == power_profile_index()) {
         int next = (power_profile + (dir < 0 ? NPPROFS - 1 : 1)) % NPPROFS;
         if (rc_set("power_profile", power_profile_values[next]) < 0) {
@@ -9106,6 +10204,10 @@ static void adjust(int dir)
     if (selected == bat_page_index()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(notice, sizeof notice, "%s", _("Enter: open battery curves, health and handoff history."));
+        return;
+    }
+    if (selected == bat_adaptive_index()) {
+        adjust_adaptive_charging();
         return;
     }
     if (selected >= bat_thresh_index() && selected < bat_thresh_index() + power_thresh_count()) {
@@ -9327,6 +10429,13 @@ static void row_hint_text(int idx, char *out, size_t size)
     } else if (idx == bat_page_index()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: open battery curves, health and handoff history."));
+    } else if (idx == bat_full_index()) {
+        const char *why = power_full_unavailable();
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", why ? why :
+                 _("Enter: allow a full charge until unplugged or for up to 24 hours."));
+    } else if (idx >= bat_thresh_index() && idx < bat_thresh_index() + power_thresh_count() && power_charge_managed()) {
+        snprintf(out, size, "%s", _("Manual thresholds are saved but not applied while charging is managed."));
     } else if (idx == paired_devices_index()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s",
@@ -9346,7 +10455,13 @@ static void row_hint_text(int idx, char *out, size_t size)
     } else if (idx == winmaint_index() + 4) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s",
-                 _("Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, or VNC)."));
+                 _("Enter: open Maintenance Windows on the desktop (also available from Home)."));
+    } else if (idx == winmaint_mode_index() || idx == winmaint_mode_index() + 1) {
+        winmaint_mode_hint(idx, out, size);
+    } else if (idx == storage_disks_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s",
+                 _("Enter: open storage manager in a terminal (attach, format, or create btrfs array)."));
     } else if (idx == num_hw_items()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: arrange the screens with the direction buttons."));
@@ -9381,6 +10496,10 @@ static void row_hint(void)
             snprintf(hint, sizeof hint, "%s", _("Enter: open it"));
         }
         snprintf(notice, sizeof notice, "%s", hint);
+    } else if (selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {
+        /* TRANSLATORS: Enter, Left/Right, m, a and Delete are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter+Left/Right: role   m: mount/unmount   a: auto-mount   Delete, twice: detach"));
     } else {
         /* TRANSLATORS: Enter and Left/Right are key names; keep them. */
         snprintf(notice, sizeof notice, "%s", _("Enter, then Left/Right: change it   Enter again: done"));
@@ -9672,6 +10791,8 @@ int main(int argc, char **argv)
     load_drm_cards();
     load_paired_peers();
     load_winmaint_status();
+    winmaint_load_targets();
+    load_storage_status();
     refresh_static_text();
     refresh_brightness();
     refresh_opt_cache();
@@ -9692,13 +10813,24 @@ int main(int argc, char **argv)
     net_due = 1;
 
     static double last_job_poll = -10.0;
+    int charge_watch = key_poll_many ? power_charge_watch_open() : -1;
     for (;;) {
         if (close_due()) {
             return 0; /* the window's close, read in a question or list */
         }
-        int key = key_poll_timeout(request_fd,
-                                   pkg_job || repos_job || boot_job || tpm_job || security_job ||
-                                   winmaint_job || tb_sync_job ? 500 : net_due ? 150 : 2000);
+        int timeout = pkg_job || repos_job || boot_job || tpm_job || security_job ||
+                      winmaint_job || tb_sync_job || gpu_unlock_job || gpu_power_job ||
+                      storage_job ? 500 : net_due ? 150 : 2000;
+        int key;
+        if (charge_watch >= 0) {
+            struct pollfd extra[] = { { .fd = request_fd, .events = POLLIN },
+                                      { .fd = charge_watch, .events = POLLIN } };
+            key = key_poll_many(extra, 2, timeout);
+            if ((extra[1].revents & POLLIN) && power_charge_watch_changed(charge_watch) &&
+                (category == CAT_POWER || search[0])) power_refresh_devices();
+        } else {
+            key = key_poll_timeout(request_fd, timeout);
+        }
         if (key == K_REPAINT) {
             full_redraw = 1;
             draw();
@@ -9723,7 +10855,9 @@ int main(int argc, char **argv)
         if (key == 0 || key == K_SHOWN || uptime() - last_job_poll >= 0.5) {
             int jobs_before = (pkg_job != 0) | ((repos_job != 0) << 1) | ((boot_job != 0) << 2) |
                               ((tpm_job != 0) << 3) | ((security_job != 0) << 4) |
-                              ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6);
+                              ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6) |
+                              ((gpu_unlock_job != 0) << 7) | ((gpu_power_job != 0) << 8) |
+                              ((storage_job != 0) << 9);
             last_job_poll = uptime();
             adopt_jobs();
             pkg_check();
@@ -9733,6 +10867,7 @@ int main(int argc, char **argv)
             winmaint_check();
             gpu_unlock_check();
             gpu_power_check();
+            storage_check();
             tb_sync_check();
             if (tpm_job) {
                 struct jobs_row r;
@@ -9748,7 +10883,9 @@ int main(int argc, char **argv)
             }
             int jobs_after = (pkg_job != 0) | ((repos_job != 0) << 1) | ((boot_job != 0) << 2) |
                              ((tpm_job != 0) << 3) | ((security_job != 0) << 4) |
-                             ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6);
+                             ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6) |
+                             ((gpu_unlock_job != 0) << 7) | ((gpu_power_job != 0) << 8) |
+                             ((storage_job != 0) << 9);
             if (jobs_after != jobs_before) {
                 entries_dirty = 1;
                 full_redraw = 1;
@@ -9762,8 +10899,9 @@ int main(int argc, char **argv)
             key = settings_pointer();
             mods = 0;
             if (selected != prev_sel) {
-                winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+                winmaint_reclaim_asked = winmaint_boot_once_asked = winmaint_default_asked = winmaint_reboot_asked = 0;
                 gpu_unlock_remove_asked = 0;
+                storage_remove_asked = -1;
             }
             if (key == 0) continue;
             if (key == -1) {
@@ -9772,15 +10910,22 @@ int main(int argc, char **argv)
             }
         }
         if (key != 0 && key != '\n' && key != K_ACT_HOME && key != K_SHOWN) {
-            winmaint_reclaim_asked = winmaint_boot_once_asked = 0;
+            winmaint_reclaim_asked = winmaint_boot_once_asked = winmaint_default_asked = winmaint_reboot_asked = 0;
         } else if (key == '\n') {
             if (selected != winmaint_index() + 1) winmaint_reclaim_asked = 0;
             if (selected != winmaint_index() + 2) winmaint_boot_once_asked = 0;
+            if (selected != winmaint_mode_index()) winmaint_default_asked = 0;
+            if (selected != winmaint_mode_index() + 1) winmaint_reboot_asked = 0;
         }
         if (key != 0 && key != K_DEL && key != K_ACT_HOME && key != K_SHOWN) {
             gpu_unlock_remove_asked = 0;
-        } else if (key == K_DEL && selected != gpu_unlock_index()) {
-            gpu_unlock_remove_asked = 0;
+            storage_remove_asked = -1;
+        } else if (key == K_DEL) {
+            if (selected != gpu_unlock_index()) gpu_unlock_remove_asked = 0;
+            if (selected < storage_vols_index() || selected >= storage_vols_index() + nstorage_vols ||
+                selected - storage_vols_index() != storage_remove_asked) {
+                storage_remove_asked = -1;
+            }
         }
         if (key == K_ACT_HOME) {
             continue; /* process 1's: an open setting stays open */
@@ -9813,7 +10958,8 @@ int main(int argc, char **argv)
         }
         if (key == 0 || key == K_SHOWN) {
             int settled_only = key == 0 && net_due && !(pkg_job || repos_job || boot_job || tpm_job || security_job ||
-                                                        winmaint_job || tb_sync_job);
+                                                        winmaint_job || tb_sync_job || gpu_unlock_job ||
+                                                        gpu_power_job || storage_job);
             if (!settled_only) {
                 load_monitors();
                 keyboards_dirty = 1;
@@ -9821,6 +10967,7 @@ int main(int argc, char **argv)
                 static_text_dirty = 0;
                 refresh_brightness();
                 if (key == K_SHOWN) {
+                    if (category == CAT_POWER || search[0]) power_refresh_devices();
                     nrules = open_rules(rule_types, rule_values, MAX_RULES);
                     refresh_rule_labels();
                     rule_labels_dirty = 0;
@@ -9829,6 +10976,8 @@ int main(int argc, char **argv)
                     load_drm_cards();
                     load_paired_peers();
                     load_winmaint_status();
+                    winmaint_load_targets();
+                    load_storage_status();
                     refresh_opt_cache();
                     opt_cache_dirty = 0;
                 }
@@ -9955,6 +11104,9 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == host_index()) {
             change_hostname();
+            draw();
+        } else if (key == '\n' && selected == bat_full_index()) {
+            charge_to_full_now();
             draw();
         } else if (key == '\n' && selected == bat_page_index()) {
             power_curves_page();
@@ -10200,6 +11352,27 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == winmaint_index() + 4) {
             winmaint_vm_row();
+            draw();
+        } else if (key == '\n' && selected == winmaint_mode_index()) {
+            winmaint_default_row();
+            draw();
+        } else if (key == '\n' && selected == winmaint_mode_index() + 1) {
+            winmaint_reboot_row();
+            draw();
+        } else if (key == '\n' && selected == storage_disks_index()) {
+            storage_manage_disks_row();
+            draw();
+        } else if ((key == 'm' || key == 'M') &&
+                   selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {
+            storage_toggle_mount(selected - storage_vols_index());
+            draw();
+        } else if ((key == 'a' || key == 'A') &&
+                   selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {
+            storage_toggle_auto(selected - storage_vols_index());
+            draw();
+        } else if (key == K_DEL &&
+                   selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {
+            storage_remove_row(selected - storage_vols_index());
             draw();
         }
         if (!nav_key && key != 0 && key != K_SHOWN && category == CAT_NETWORK) {

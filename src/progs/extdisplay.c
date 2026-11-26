@@ -35,15 +35,8 @@ static volatile sig_atomic_t stop;
 static int ipc = -1, active, outside_cancelled;
 static struct extdisplay_setup setup = { .fd = -1, .stream = -1 };
 static pid_t broker = -1;
-static int leaving, selected, diagnostics, auto_pair = 1;
-static struct extdisplay_iface selection, suppressed;
-static int suppress_auto;
-
-static int same_interface(const struct extdisplay_iface *a, const struct extdisplay_iface *b)
-{
-    return a->ifindex == b->ifindex && !strcmp(a->address, b->address);
-}
-static int unplugged;
+static int leaving, diagnostics;
+static struct extdisplay_auto auto_state = { .enabled = 1 };
 static uint32_t *frame;
 static size_t frame_bytes;
 static uint32_t frame_w, frame_h;
@@ -826,7 +819,6 @@ static void session_run(int transport)
             enum extdisplay_setup_event ev = extdisplay_setup_read(&setup);
             if (ev == EXTDISPLAY_SETUP_EV_ENDED || ev == EXTDISPLAY_SETUP_EV_BROKEN) {
                 say("extdisplay: broker ended (%s)", setup.reason[0] ? setup.reason : "broken");
-                if (ev == EXTDISPLAY_SETUP_EV_ENDED && strcmp(setup.reason, "carrier-lost") == 0) unplugged = 1;
                 set_state(N_("Disconnected"), extdisplay_setup_reason_text(setup.reason));
                 break;
             }
@@ -943,13 +935,13 @@ static void setup_draw(void)
     screen_fill_px(0, 0, panel_w, panel_h, BG);
     screen_bar(_("Extended display"), NULL);
     int rows = screen_rows(), cols = screen_cols();
-    if (selected >= setup.count) selected = setup.count ? setup.count - 1 : 0;
+    if (auto_state.selected >= setup.count) auto_state.selected = setup.count ? setup.count - 1 : 0;
     screen_text(1, 2, _("Connect a Thunderbolt/USB4 link to the Mac."), ACCENT_TEXT, BG);
     if (setup.state == EXTDISPLAY_SETUP_LIST && setup.count > 0 && !diagnostics) {
         for (int i = 0; i < setup.count && i < 8; i++) {
-            snprintf(text, sizeof text, "%s %s  %s", i == selected ? ">" : " ", setup.ifaces[i].name,
+            snprintf(text, sizeof text, "%s %s  %s", i == auto_state.selected ? ">" : " ", setup.ifaces[i].name,
                      setup.ifaces[i].carrier ? _("link ready") : _("waiting for link"));
-            screen_text(1, 4 + i, text, i == selected ? ACCENT_TEXT : FG, BG);
+            screen_text(1, 4 + i, text, i == auto_state.selected ? ACCENT_TEXT : FG, BG);
         }
     }
     if (setup.count == 0) {
@@ -987,10 +979,6 @@ static void setup_draw(void)
     } else if (setup.reason[0]) {
         screen_text(1, rows - 2, _(extdisplay_setup_reason_text(setup.reason)), FG, PANEL);
     }
-    if (unplugged) {
-        screen_fill(0, rows - 2, cols, 1, PANEL);
-        screen_text(1, rows - 2, _("The cable was unplugged. Press any key to close."), WARN, PANEL);
-    }
     screen_text(1, rows - 1, _("Enter connect   Esc cancel   F2 details   F1 help   Ctrl+Q quit"), FG, PANEL);
     screen_flush();
 }
@@ -1010,6 +998,7 @@ static const struct ui_help_line setup_keys[] = {
 static void setup_loop(void)
 {
     int quit_ticks = 0;
+    extdisplay_auto_init(&auto_state);
     setup_draw();
     while (!stop && setup.state != EXTDISPLAY_SETUP_RELEASED && setup.state != EXTDISPLAY_SETUP_BROKEN) {
         struct pollfd p[1] = { { setup.fd, POLLIN, 0 } };
@@ -1018,70 +1007,20 @@ static void setup_loop(void)
         if (leaving && ++quit_ticks > 30) break;
         if (raw_input() < 0) break;
         if (p[0].revents) {
-            switch (extdisplay_setup_read(&setup)) {
-            case EXTDISPLAY_SETUP_EV_NONE:
-                break;
-            case EXTDISPLAY_SETUP_EV_CHANGED:
-                if (!unplugged && (setup.state == EXTDISPLAY_SETUP_LIST || setup.state == EXTDISPLAY_SETUP_SCANNING)) auto_pair = 1;
-                redraw = 1;
-                break;
-            case EXTDISPLAY_SETUP_EV_LIST: {
-                int blocked_present = 0;
-                for (int i = 0; i < setup.count; i++) {
-                    if (same_interface(&selection, &setup.ifaces[i])) selected = i;
-                    if (same_interface(&suppressed, &setup.ifaces[i])) {
-                        blocked_present = 1;
-                        if (setup.ifaces[i].carrier != suppressed.carrier) {
-                            suppressed.carrier = setup.ifaces[i].carrier;
-                            if (suppressed.carrier) suppress_auto = 0;
-                        }
-                    }
-                }
-                if (!blocked_present) suppress_auto = 0;
-                redraw = 1;
-                break;
-            }
-            case EXTDISPLAY_SETUP_EV_ERROR:
-                auto_pair = 0;
-                suppress_auto = 1;
-                suppressed = selection;
-                if (setup.state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(&setup);
-                redraw = 1;
-                break;
-            case EXTDISPLAY_SETUP_EV_CODE:
-                redraw = 1;
-                break;
-            case EXTDISPLAY_SETUP_EV_PAIRED: {
-                auto_pair = 0;
+            enum extdisplay_setup_event ev = extdisplay_setup_read(&setup);
+            if (ev == EXTDISPLAY_SETUP_EV_PAIRED) {
+                auto_state.enabled = 0;
                 int stream = setup.stream;
                 setup.stream = -1;
                 session_run(stream);
-                /* After a session ends without unplugging, immediately re-arm
-                 * so a reconnected sender can attach again without user action. */
-                auto_pair = !unplugged;
-                suppress_auto = unplugged;
-                suppressed = selection;
-                if (setup.state == EXTDISPLAY_SETUP_IDLE || setup.state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(&setup);
+                /* After a session ends (sender restart or cable unplug), return
+                 * to waiting and re-arm automatic pairing for the next link. */
+                extdisplay_auto_after_session(&auto_state, &setup);
                 redraw = 1;
-                break;
+            } else if (ev != EXTDISPLAY_SETUP_EV_NONE) {
+                extdisplay_auto_on_event(&auto_state, &setup, ev);
+                redraw = 1;
             }
-            case EXTDISPLAY_SETUP_EV_ENDED:
-                if (strcmp(setup.reason, "cancelled") != 0) {
-                    suppress_auto = unplugged;
-                }
-                auto_pair = !suppress_auto;
-                suppressed = selection;
-                if (setup.state == EXTDISPLAY_SETUP_IDLE || setup.state == EXTDISPLAY_SETUP_LIST) extdisplay_setup_scan(&setup);
-                redraw = 1;
-                break;
-            default:
-                redraw = 1;
-                break;
-            }
-            if (setup.state == EXTDISPLAY_SETUP_LIST && setup.count && selected >= setup.count) selected = 0;
-        }
-        if (unplugged && key && key != K_SHOWN && key != K_POINTER) {
-            key = K_CLOSE;
         }
         int act = key_action(key, keys_modifiers());
         if (act == ACT_HELP) {
@@ -1098,53 +1037,38 @@ static void setup_loop(void)
         } else if (key == K_F1 + 1) {
             diagnostics = !diagnostics;
             redraw = 1;
-        } else if (key == K_UP && selected > 0) {
-            auto_pair = 0;
-            suppress_auto = 0;
-            selected--;
-            selection = setup.ifaces[selected];
+        } else if (key == K_UP && auto_state.selected > 0) {
+            auto_state.enabled = 0;
+            auto_state.suppressed = 0;
+            auto_state.selected--;
+            auto_state.selection = setup.ifaces[auto_state.selected];
             redraw = 1;
-        } else if (key == K_DOWN && selected + 1 < setup.count) {
-            auto_pair = 0;
-            suppress_auto = 0;
-            selected++;
-            selection = setup.ifaces[selected];
+        } else if (key == K_DOWN && auto_state.selected + 1 < setup.count) {
+            auto_state.enabled = 0;
+            auto_state.suppressed = 0;
+            auto_state.selected++;
+            auto_state.selection = setup.ifaces[auto_state.selected];
             redraw = 1;
         } else if (key == '\n' && setup.state == EXTDISPLAY_SETUP_LIST && setup.count > 0) {
             setup.error[0] = setup.reason[0] = '\0';
-            auto_pair = 0;
-            selection = setup.ifaces[selected];
-            extdisplay_setup_pair(&setup, setup.ifaces[selected].name);
+            auto_state.enabled = 0;
+            auto_state.selection = setup.ifaces[auto_state.selected];
+            extdisplay_setup_pair(&setup, setup.ifaces[auto_state.selected].name);
             redraw = 1;
         } else if (key == 27 && (setup.state == EXTDISPLAY_SETUP_PAIRING || setup.state == EXTDISPLAY_SETUP_WAITING)) {
-            auto_pair = 0;
-            suppress_auto = 1;
-            suppressed = selection;
+            auto_state.enabled = 0;
+            auto_state.suppressed = 1;
+            auto_state.suppressed_iface = auto_state.selection;
             extdisplay_setup_cancel(&setup);
             redraw = 1;
         } else if (key == K_F1 + 4 && (setup.state == EXTDISPLAY_SETUP_LIST || setup.state == EXTDISPLAY_SETUP_IDLE)) {
-            auto_pair = 0;
-            suppress_auto = 1;
-            suppressed = selection;
+            auto_state.enabled = 0;
+            auto_state.suppressed = 1;
+            auto_state.suppressed_iface = auto_state.selection;
             extdisplay_setup_scan(&setup);
             redraw = 1;
         }
-        if (!leaving && !unplugged && setup.state == EXTDISPLAY_SETUP_LIST) {
-            if (setup.changed) {
-                extdisplay_setup_scan(&setup);
-                redraw = 1;
-            } else if (auto_pair && !suppress_auto) {
-                int choice = extdisplay_setup_automatic(&setup);
-                if (choice >= 0) {
-                    selected = choice;
-                    selection = setup.ifaces[selected];
-                    setup.error[0] = setup.reason[0] = '\0';
-                    auto_pair = 0;
-                    extdisplay_setup_pair(&setup, selection.name);
-                    redraw = 1;
-                }
-            }
-        }
+        if (!leaving && extdisplay_auto_step(&auto_state, &setup)) redraw = 1;
         if (redraw) setup_draw();
     }
     if (setup.state == EXTDISPLAY_SETUP_BROKEN) {

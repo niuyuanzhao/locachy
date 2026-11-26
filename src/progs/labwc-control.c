@@ -98,6 +98,7 @@ struct window {
     struct zwlr_foreign_toplevel_handle_v1 *handle;
     struct zwlr_foreign_toplevel_handle_v1 *parent; /* the window it is a dialog of */
     char app_id[128];
+    char title[256];
     int minimized, activated, announced;
     struct window *next;
 };
@@ -106,9 +107,9 @@ static struct window *windows;
 
 static void window_title(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *title)
 {
-    (void)data;
+    struct window *w = data;
     (void)h;
-    (void)title;
+    snprintf(w->title, sizeof w->title, "%s", title ? title : "");
 }
 
 static void window_app_id(void *data, struct zwlr_foreign_toplevel_handle_v1 *h, const char *id)
@@ -188,17 +189,10 @@ static const struct window *parent_of(const struct window *w)
     return NULL;
 }
 
-/* Does an app id of container name (open_window_ids) name window w's? */
+/* Does container or VM app name match window w (by app_id or VM window title)? */
 static int named_by(const struct window *w, const char *name)
 {
-    char ids[MAX_IDS][OPEN_WINDOW_ID];
-    int nids = open_window_ids(name, ids, MAX_IDS);
-    for (int i = 0; i < nids; i++) {
-        if (strcasecmp(w->app_id, ids[i]) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return open_window_matches(name, w->app_id, w->title);
 }
 
 /* The container of window w: the first whose app ids name its own, else its
@@ -326,7 +320,8 @@ static void show(const char *name, char *reply, size_t size, int bar)
     /* A managed host window (process 1's window-PROGRAM-N) has its own name
      * as app id and no .desktop file of a container. */
     int native = strncmp(name, "window-", 7) == 0;
-    int nids = native ? 1 : open_window_ids(name, ids, MAX_IDS);
+    int vm = !native && open_vm(name);
+    int nids = (native || vm) ? 1 : open_window_ids(name, ids, MAX_IDS);
     int shown = 0;
     for (struct window *w = windows; w; w = w->next) {
         if (native ? strcmp(w->app_id, name) == 0 : window_of(w, name)) {

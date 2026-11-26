@@ -2,10 +2,10 @@
 # make-installer.sh [--profile-only] WORK_DIRECTORY OUTPUT_DIRECTORY
 # One generic x86-64 installation medium, composed from packaged archiso.
 # Target CPU/repository choices belong to locachy-install, never this image.
-# Its app presets: a catalog made from a checkout of their repository,
-# LOCACHY_APPS_SRC (locachy-apps; LOCACHY_APPS_REPO, LOCACHY_APPS_BRANCH and
-# LOCACHY_APPS_COMMIT say where it is from, else its git does), validated by
-# link/locachy_apps.py: without a valid one there is no medium.
+# Its app presets come from LOCACHY_APPS_SRC (a checkout or export of
+# locachy-apps), validated by link/locachy_apps.py. LOCACHY_APPS_REPO and
+# LOCACHY_APPS_BRANCH override the update source, LOCACHY_APPS_COMMIT names
+# the checkout's expected HEAD or the export's declared base.
 set -euo pipefail
 export LC_ALL=C.UTF-8
 
@@ -18,10 +18,9 @@ fi
     echo "usage: make-installer.sh [--profile-only] WORK_DIRECTORY OUTPUT_DIRECTORY" >&2
     exit 2
 }
-src=$(cd "$(dirname "$0")" && pwd)
+src=$(cd "$(dirname "$0")" && pwd -P)
 baseline=${ARCHISO_BASELINE:-/usr/share/archiso/configs/baseline}
 mkarchiso=${MKARCHISO:-mkarchiso}
-live_build=${LIVE_BUILD:-$src/installer/make-live.sh}
 
 die() {
     echo "make-installer: $*" >&2
@@ -50,14 +49,23 @@ case "$work/" in "$out/"*) die "work must not be inside output" ;; esac
 [ -f "$src/link/locachy-install" ] || die "source installer entry is missing: $src/link/locachy-install"
 apps_src=${LOCACHY_APPS_SRC:-}
 [ -n "$apps_src" ] && [ -d "$apps_src" ] ||
-    die "the app presets are missing: LOCACHY_APPS_SRC must be a checkout of their repository (locachy-apps)"
+    die "the app presets are missing: LOCACHY_APPS_SRC must be a checkout or export of their repository (locachy-apps)"
 why=$(python3 -I "$src/link/locachy_apps.py" validate "$apps_src" 2>&1) || die "the app presets in $apps_src: $why"
-apps_repo=${LOCACHY_APPS_REPO:-} apps_branch=${LOCACHY_APPS_BRANCH:-} apps_commit=${LOCACHY_APPS_COMMIT:-}
-if [ -e "$apps_src/.git" ]; then
+apps_repo=${LOCACHY_APPS_REPO:-} apps_branch=${LOCACHY_APPS_BRANCH:-}
+apps_base_commit=${LOCACHY_APPS_COMMIT:-}
+apps_source_kind=export
+if [ -e "$apps_src/.git" ] || [ -L "$apps_src/.git" ]; then
+    prefix=$(git -C "$apps_src" rev-parse --show-prefix 2>/dev/null) && [ -z "$prefix" ] ||
+        die "invalid app presets checkout: $apps_src"
+    apps_source_kind=checkout
     apps_repo=${apps_repo:-$(git -C "$apps_src" remote get-url origin 2>/dev/null || true)}
     apps_branch=${apps_branch:-$(git -C "$apps_src" symbolic-ref --short HEAD 2>/dev/null || true)}
-    apps_commit=${apps_commit:-$(git -C "$apps_src" rev-parse HEAD 2>/dev/null || true)}
+    head=$(git -C "$apps_src" rev-parse --verify HEAD 2>/dev/null || true)
+    [ -z "$apps_base_commit" ] || [ "$apps_base_commit" = "$head" ] ||
+        die "LOCACHY_APPS_COMMIT does not match the app presets checkout HEAD"
+    apps_base_commit=$head
 fi
+[[ -z "$apps_base_commit" || "$apps_base_commit" =~ ^[0-9a-f]{40}$ ]] || die "invalid app presets commit"
 apps_branch=${apps_branch:-main}
 if [ "$profile_only" = 0 ]; then
     command -v "$mkarchiso" >/dev/null || die "mkarchiso is not available"
@@ -70,22 +78,9 @@ cache=${PACMAN_CACHE:-$work/cache}
 profile=$work/profile
 mkdir "$profile"
 cp -a "$baseline/." "$profile/"
-# The upstream profile remains the template. These are only image metadata
-# overrides, not a copied archiso implementation or a replacement initramfs.
-cat "$src/installer/profiledef.append" >>"$profile/profiledef.sh"
-python3 -I "$src/installer/rescue-boot-entries.py" "$profile"
-# archiso honors a nondefault profile CacheDir. Do not reuse a host cache
-# which may contain a differently built package with the same name/version.
-awk -v cache="$cache" '{print; if ($0 == "[options]") print "CacheDir = " cache}' \
-    "$src/installer/pacman.conf" >"$profile/pacman.conf"
-{ cat "$baseline/packages.x86_64"; printf '\n'; cat "$src/installer/packages.x86_64"; } |
-    awk 'NF && $1 !~ /^#/ && !seen[$1]++ {print $1}' >"$profile/packages.x86_64"
-
 root=$profile/airootfs
 payload=$root/usr/local/src/locachy
 mkdir -p "$payload" "$root/usr/local/bin" "$root/etc/locachy" "$root/etc/pacman.d" "$root/etc/NetworkManager/conf.d" "$root/etc/systemd/system/multi-user.target.wants"
-install -m 644 "$src/installer/pacman.conf" "$root/etc/pacman.conf"
-install -m 644 "$src/installer/mirrorlist" "$root/etc/pacman.d/mirrorlist"
 for dir in base init progs edit link tools pkgbuilds aur-patches containers installer; do
     cp -a "$src/$dir" "$payload/$dir"
 done
@@ -94,44 +89,106 @@ done
 for file in make-root.sh make.sh make-installer.sh packages rc.conf; do
     cp -a "$src/$file" "$payload/$file"
 done
-python3 -I - "$src" "$root/etc/locachy/source-origin.json" "$apps_repo" "$apps_branch" "$apps_commit" <<'PY'
-import json, os, subprocess, sys
-src, dest, apps_repo, apps_branch, apps_commit = sys.argv[1:6]
+# The upstream profile remains the template. These are only image metadata
+# overrides, not a copied archiso implementation or a replacement initramfs.
+cat "$payload/installer/profiledef.append" >>"$profile/profiledef.sh"
+python3 -I "$payload/installer/rescue-boot-entries.py" "$profile"
+# archiso honors a nondefault profile CacheDir. Do not reuse a host cache
+# which may contain a differently built package with the same name/version.
+awk -v cache="$cache" '{print; if ($0 == "[options]") print "CacheDir = " cache}' \
+    "$payload/installer/pacman.conf" >"$profile/pacman.conf"
+{ cat "$baseline/packages.x86_64"; printf '\n'; cat "$payload/installer/packages.x86_64"; } |
+    awk 'NF && $1 !~ /^#/ && !seen[$1]++ {print $1}' >"$profile/packages.x86_64"
+install -m 644 "$payload/installer/pacman.conf" "$root/etc/pacman.conf"
+install -m 644 "$payload/installer/mirrorlist" "$root/etc/pacman.d/mirrorlist"
+
+# Populate the catalog from one validated read and label those same bytes.
+catalog=$root/usr/local/share/locachy/apps-catalog
+origin=$root/etc/locachy/source-origin.json
+mkdir -p "$(dirname "$catalog")"
+why=$(python3 -IB - "$payload/link/locachy_apps.py" "$apps_src" "$catalog" "$apps_repo" \
+      "$apps_branch" "$apps_base_commit" "$apps_source_kind" "$src" "$origin" 2>&1 <<'PY'
+import importlib.util, json, os, subprocess, sys
+helper, source, catalog, apps_repo, apps_branch, base, kind, src, origin = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("locachy_apps", helper)
+apps = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(apps)
+
+
+def git(directory, *args):
+    return subprocess.check_output(["git", "--no-replace-objects", "-C", directory, *args],
+                                   stderr=subprocess.DEVNULL, timeout=5)
+
+
+def matches_commit(fmt, presets):
+    # git status is not evidence of which bytes are in this snapshot (e.g.
+    # ignored or assume-unchanged files). Compare with the commit's blobs.
+    expected = {b"FORMAT": fmt.encode(),
+                **{f"apps/{name}.conf".encode(): data for name, data in presets.items()}}
+    for entry in git(source, "ls-tree", "-rz", base, "--", "FORMAT", "apps").split(b"\0"):
+        if not entry:
+            continue
+        header, path = entry.split(b"\t", 1)
+        mode, _, oid = header.split()
+        data = expected.pop(path, None)
+        if data is None or mode not in (b"100644", b"100755"):
+            return False
+        blob = git(source, "cat-file", "blob", oid.decode())
+        if (blob.removesuffix(b"\n") if path == b"FORMAT" else blob) != data:
+            return False
+    return not expected
+
+
+try:
+    fmt, presets = apps.validate_tree(source)
+    apps_commit = ""
+    if kind == "checkout":
+        dirty = bool(git(source, "status", "--porcelain", "--untracked-files=all"))
+        if base and matches_commit(fmt, presets) and not dirty:
+            apps_commit = base
+        else:
+            kind = "dirty-checkout" if base else "uncommitted-checkout"
+    # A false match on commit would make the normal catalog updater skip it.
+    apps.write_catalog(presets, catalog, apps.new_meta(fmt, "medium", apps_repo, apps_branch, apps_commit))
+except (apps.CatalogError, OSError, subprocess.SubprocessError) as error:
+    sys.exit(str(error))
+
+
 def git_out(*args):
     try:
-        return subprocess.check_output(["git", "-C", src, *args], stderr=subprocess.DEVNULL, text=True, timeout=5).strip()
-    except Exception:
+        return git(src, *args).decode(errors="replace").strip()
+    except (OSError, subprocess.SubprocessError):
         return ""
+
+
 repo = os.environ.get("LOCACHY_REPO") or git_out("remote", "get-url", "origin")
 branch = os.environ.get("LOCACHY_BRANCH") or git_out("symbolic-ref", "--short", "HEAD")
 commit = os.environ.get("LOCACHY_COMMIT") or git_out("rev-parse", "HEAD")
 # Exported build snapshots can declare the same fact without carrying .git.
 changed = os.environ.get("LOCACHY_SOURCE_CHANGED") == "1" or bool(git_out("status", "--porcelain", "--", src))
-with open(dest, "w", encoding="utf-8") as f:
+with open(origin, "w", encoding="utf-8") as f:
     json.dump({"repo": repo, "branch": branch or "main", "commit": commit, "source_changed": changed,
-               "apps_repo": apps_repo, "apps_branch": apps_branch, "apps_commit": apps_commit}, f)
+               "apps_repo": apps_repo, "apps_branch": apps_branch, "apps_commit": apps_commit,
+               "apps_base_commit": base, "apps_source_kind": kind}, f)
     f.write("\n")
 PY
-# The app presets the medium installs when newer ones cannot be fetched.
-mkdir -p "$root/usr/local/share/locachy"
-why=$(python3 -I "$src/link/locachy_apps.py" catalog "$apps_src" "$root/usr/local/share/locachy/apps-catalog" \
-      medium "$apps_repo" "$apps_branch" "$apps_commit" 2>&1) || die "the app presets in $apps_src: $why"
+) || die "the app presets in $apps_src: $why"
 mkdir -p "$root/usr/local/lib/locachy"
-install -m 755 "$src/installer/locachy-install" "$root/usr/local/bin/locachy-install"
-install -m 755 "$src/installer/locachy-rescue" "$root/usr/local/bin/locachy-rescue"
-install -m 755 "$src/installer/locachy-rescue-storage" "$root/usr/local/lib/locachy/rescue-storage"
-install -m 755 "$src/installer/rescue-link.py" "$root/usr/local/lib/locachy/rescue-link.py"
-install -m 644 "$src/installer/locachy-rescue.service" "$root/etc/systemd/system/locachy-rescue.service"
-install -m 644 "$src/installer/locachy-rescue-link.service" "$root/etc/systemd/system/locachy-rescue-link.service"
-install -m 644 "$src/installer/issue" "$root/etc/issue"
-install -m 644 "$src/installer/NetworkManager.conf" "$root/etc/NetworkManager/conf.d/20-locachy-installer.conf"
-# The full-screen installer on tty1 (root logged in there, as archiso's
-# releng does it; the serial console asks as before), and its terminal.
-sh "$live_build" "$src" "$root"
+install -m 755 "$payload/installer/locachy-install" "$root/usr/local/bin/locachy-install"
+install -m 755 "$payload/installer/locachy-rescue" "$root/usr/local/bin/locachy-rescue"
+install -m 755 "$payload/installer/locachy-rescue-storage" "$root/usr/local/lib/locachy/rescue-storage"
+install -m 755 "$payload/installer/rescue-link.py" "$root/usr/local/lib/locachy/rescue-link.py"
+install -m 644 "$payload/installer/locachy-rescue.service" "$root/etc/systemd/system/locachy-rescue.service"
+install -m 644 "$payload/installer/locachy-rescue-link.service" "$root/etc/systemd/system/locachy-rescue-link.service"
+install -m 644 "$payload/installer/issue" "$root/etc/issue"
+install -m 644 "$payload/installer/NetworkManager.conf" "$root/etc/NetworkManager/conf.d/20-locachy-installer.conf"
+# Build the live programs from the same sources the ISO carries. Compile
+# with relative include paths so absolute work paths may contain spaces.
+(cd "$payload" && sh installer/make-live.sh . "$root")
 mkdir -p "$root/etc/systemd/system/getty@tty1.service.d" "$root/root"
-install -m 644 "$src/installer/autologin.conf" "$root/etc/systemd/system/getty@tty1.service.d/autologin.conf"
-install -m 644 "$src/installer/bash_profile" "$root/root/.bash_profile"
-install -m 644 "$src/installer/locachy-clipboard.service" "$root/etc/systemd/system/locachy-clipboard.service"
+install -m 644 "$payload/installer/autologin.conf" "$root/etc/systemd/system/getty@tty1.service.d/autologin.conf"
+install -m 644 "$payload/installer/bash_profile" "$root/root/.bash_profile"
+install -m 644 "$payload/installer/locachy-clipboard.service" "$root/etc/systemd/system/locachy-clipboard.service"
 mkdir -p "$root/etc/systemd/system/multi-user.target.wants"
 ln -sfn ../locachy-clipboard.service "$root/etc/systemd/system/multi-user.target.wants/locachy-clipboard.service"
 ln -sfn ../locachy-rescue.service "$root/etc/systemd/system/multi-user.target.wants/locachy-rescue.service"
@@ -184,11 +241,11 @@ fi
 # Keep the packaged builder intact. This small tracked patch only prevents
 # random-seed writes on read-only optical media; drift in upstream stops here.
 cp "$(command -v "$mkarchiso")" "$work/mkarchiso"
-patch --batch --fuzz=0 -p1 -d "$work" <"$src/installer/archiso-readonly-seed.patch"
+patch --batch --fuzz=0 -p1 -d "$work" <"$payload/installer/archiso-readonly-seed.patch"
 "$work/mkarchiso" -w "$work/build" -o "$out" "$profile"
-python3 -I - "$profile" "$out" <<'PY'
+python3 -I - "$profile" "$out" "$payload" "$catalog" "$origin" <<'PY'
 import hashlib, json, pathlib, sys, time
-profile, out = map(pathlib.Path, sys.argv[1:])
+profile, out, payload, catalog, origin = map(pathlib.Path, sys.argv[1:])
 images = sorted(out.glob('*.iso'))
 if len(images) != 1:
     raise RuntimeError('expected exactly one generic installer ISO')
@@ -198,13 +255,12 @@ def digest(path):
 image = images[0]
 checksum = digest(image)
 (out / 'SHA256SUMS').write_text(checksum + '  ' + image.name + '\n')
-inputs = {}
-for path in sorted((profile / 'airootfs/usr/local/src/locachy').rglob('*')):
-    if path.is_file():
-        inputs[str(path.relative_to(profile / 'airootfs/usr/local/src/locachy'))] = digest(path)
+inputs = {str(path.relative_to(payload)): digest(path) for path in sorted(payload.rglob('*')) if path.is_file()}
+catalog_inputs = {path.name: digest(path) for path in sorted(catalog.iterdir())}
 record = {'cpu_baseline': 'x86-64', 'target_built_on_install': True, 'iso': image.name,
           'sha256': checksum, 'created': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-          'packages': (profile / 'packages.x86_64').read_text().splitlines(), 'source_sha256': inputs}
+          'packages': (profile / 'packages.x86_64').read_text().splitlines(), 'source_sha256': inputs,
+          'source_origin': json.loads(origin.read_text(encoding='utf-8')), 'apps_catalog_sha256': catalog_inputs}
 (out / 'build.json').write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
 PY
 printf 'make-installer: ISO output: %s\n' "$out"

@@ -31,11 +31,22 @@ int settings_kill(pid_t pid, int sig);
 #include "i18n-stub.h"
 #include "jobs-double.h"
 
+/* A managed desktop app (base_app_action, process 1's control channel): the test's answer. */
+static int fake_winmaint_app;
+static char app_last[64];
+int base_app_action(const char *action, const char *name, char *why, size_t size)
+{
+    snprintf(app_last, sizeof app_last, "%s %s", action, name);
+    snprintf(why, size, "%s", "no desktop session in tests");
+    return fake_winmaint_app ? 0 : -1;
+}
+
 static int reloads, fail_rc;
 static char rc_name[32][64], rc_value[32][256];
 static int rc_count;
 static int fake_pair_installed, fake_winmaint_installed, fake_gpu_unlock_installed;
 static const char *fake_pair_output = "";
+static const char *fake_winmaint_status = "";
 static int term_calls, term_status;
 static char term_last[512];
 static struct screen_card_info fake_cards[4];
@@ -58,6 +69,10 @@ static void command_output(char *const argv[], char *buf, size_t size)
     if (argv[0] && strcmp(argv[0], LOCACHY_PAIR) == 0 && argv[1] && strcmp(argv[1], "list") == 0 &&
         argv[2] && strcmp(argv[2], "--machine") == 0 && argv[3] == NULL) {
         snprintf(buf, size, "%s", fake_pair_output);
+    }
+    if (argv[0] && strcmp(argv[0], LOCACHY_WINMAINT) == 0 && argv[1] && strcmp(argv[1], "status") == 0 &&
+        argv[2] && strcmp(argv[2], "--json") == 0 && argv[3] == NULL) {
+        snprintf(buf, size, "%s", fake_winmaint_status);
     }
 }
 
@@ -294,6 +309,33 @@ int main(void)
     assert(!strstr(term_last, "psk") && !strstr(notice, "psk"));
     puts("PASS paired devices parses list --machine count and opens terminal with sudo locachy-pair list");
 
+    /* SSH is opt-in, independent of the compute API and the Tailscale switch. */
+    selected = ts_index() + 3;
+    reloads = 0;
+    tailscale_enabled = 0;
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "SSH over Tailscale") && strstr(line, "[OFF]"));
+    adjust(+1);
+    assert(!tailnet_ssh_on && !test_rc("service_tailnet_ssh") && reloads == 0);
+    tailscale_enabled = 1;
+    fail_rc = 1;
+    adjust(+1);
+    assert(!tailnet_ssh_on && !test_rc("service_tailnet_ssh") && reloads == 0);
+    fail_rc = 0;
+    adjust(+1);
+    assert(tailnet_ssh_on && !strcmp(test_rc("service_tailnet_ssh"), TAILNET_SSH_SERVICE));
+    assert(!test_rc("service_compute") && reloads == 1);
+    tailscale_enabled = 0;
+    item_text(selected, line, sizeof line);
+    assert(strstr(line, "[ON ") && strstr(line, "Tailscale is off"));
+    adjust(-1);
+    assert(!tailnet_ssh_on && !test_rc("service_tailnet_ssh") && reloads == 2);
+    on_rc("service_tailnet_ssh", TAILNET_SSH_SERVICE, NULL);
+    assert(tailnet_ssh_on);
+    on_rc("service_tailnet_ssh", "", NULL);
+    assert(!tailnet_ssh_on);
+    puts("PASS tailnet SSH is opt-in and does not enable the compute API");
+
     /* 5. Compute node rows: service_compute (SIGHUP), compute_bind_tb (tb-sync), compute_gpu. */
     reloads = 0;
     selected = compute_index();
@@ -403,15 +445,138 @@ int main(void)
     winmaint_check();
     assert(winmaint_job == 0);
 
-    /* Windows VM opens terminal with sudo /usr/local/bin/locachy-winmaint vm. */
+    /* The Windows VM is a managed desktop app (start winmaint), never a terminal. */
     fake_winmaint_installed = 1;
     term_last[0] = '\0';
+    int vm_calls_before = term_calls;
+    fake_winmaint_app = 1;
     winmaint_vm_row();
-    assert(term_calls == 2 && strstr(term_last, "/usr/bin/sudo " LOCACHY_WINMAINT " vm"));
+    assert(term_calls == vm_calls_before && term_last[0] == '\0' && !strcmp(app_last, "start winmaint") &&
+           strstr(notice, "Opening Maintenance Windows on the desktop"));
+    fake_winmaint_app = 0;
+    winmaint_vm_row();
+    assert(strstr(notice, "Cannot open Maintenance Windows on the desktop"));
     char hint[256];
     row_hint_text(winmaint_index() + 4, hint, sizeof hint);
-    assert(strstr(hint, "graphical session"));
+    assert(strstr(hint, "on the desktop") && !strstr(hint, "sudo") && !strstr(hint, "terminal"));
     puts("PASS Maintenance Windows size, state.json, create, two-step reclaim/boot-once, heal-boot, and VM");
+
+    /* 6b. Start in Windows by default (boot-default) and Reboot into Windows now: in the
+     * Maintenance Windows group after "Boot Windows once", routed as boot-once is (a
+     * winmaint-* job); state.json gives the mode, status --json pending/overridden. */
+    static const char created_state[] =
+        "{\n  \"disk\": \"/dev/nvme0n1\",\n  \"partitions\": {\n    \"c\": { \"sectors\": 100663296 }\n  },\n"
+        "  \"schema\": 1\n}\n";
+    static const char windows_state[] =
+        "{\n  \"boot_default\": \"windows\",\n  \"boot_default_boot_id\": \"b0\",\n  \"disk\": \"/dev/nvme0n1\",\n"
+        "  \"partitions\": {\n    \"c\": { \"sectors\": 100663296 }\n  },\n  \"schema\": 1\n}\n";
+    assert(category_of(winmaint_mode_index()) == CAT_SYSTEM && category_of(winmaint_mode_index() + 1) == CAT_SYSTEM);
+    nentries = 0;
+    category_entries(CAT_SYSTEM);
+    int k_once = entry_of(winmaint_index() + 2), k_mode = entry_of(winmaint_mode_index());
+    int k_reboot = entry_of(winmaint_mode_index() + 1), k_heal = entry_of(winmaint_index() + 3);
+    assert(k_once >= 0 && k_mode == k_once + 1 && k_reboot == k_mode + 1 && k_heal == k_reboot + 1);
+    build_entries();
+    assert(enter_row(winmaint_mode_index()) && enter_row(winmaint_mode_index() + 1));
+
+    write_state(created_state);
+    fake_winmaint_status = "{\"boot_default\": \"locachy\", \"boot_default_overridden\": false, "
+                           "\"boot_default_pending_reboot\": false, \"candidate_disks\": [], \"resolved_disk\": null}";
+    winmaint_load_targets();
+    item_text(winmaint_mode_index(), line, sizeof line);
+    assert(strstr(line, "Start in Windows by default (until switched back)") && strstr(line, "[OFF]"));
+    item_text(winmaint_mode_index() + 1, line, sizeof line);
+    assert(strstr(line, "Reboot into Windows now") && strstr(line, "Enter, twice"));
+    row_hint_text(winmaint_mode_index(), hint, sizeof hint);
+    assert(strstr(hint, "Enter, twice") && strstr(hint, "until switched back"));
+    selected = winmaint_mode_index();
+    jobs_double_last[0] = '\0';
+    adjust(+1); /* Left/Right only say what Enter does */
+    assert(jobs_double_last[0] == '\0' && winmaint_job == 0 && strstr(notice, "Enter, twice"));
+
+    /* Off -> on takes two Enters. */
+    jobs_double_ended = 0;
+    winmaint_default_row();
+    assert(winmaint_default_asked == 1 && winmaint_job == 0 && jobs_double_last[0] == '\0');
+    winmaint_default_row();
+    assert(winmaint_default_asked == 0 && winmaint_job != 0 && !strcmp(jobs_double_last, "winmaint-boot-default windows"));
+    item_text(winmaint_mode_index(), line, sizeof line);
+    assert(strstr(line, "working..."));
+    write_state(windows_state);
+    fake_winmaint_status = "{\"boot_default\": \"windows\", \"boot_default_overridden\": false, "
+                           "\"boot_default_pending_reboot\": true, \"candidate_disks\": [], \"resolved_disk\": null}";
+    jobs_double_ended = 1;
+    winmaint_check();
+    assert(winmaint_job == 0 && winmaint_windows_first == 1 && winmaint_first_pending == 1);
+    assert(strstr(notice, "Windows starts first until switched back"));
+    item_text(winmaint_mode_index(), line, sizeof line);
+    assert(strstr(line, "[ON] Windows from the next restart"));
+
+    /* LOCachy picked in the firmware menu: shown, and one Enter switches back. */
+    fake_winmaint_status = "{\"boot_default\": \"windows\", \"boot_default_overridden\": true, "
+                           "\"boot_default_pending_reboot\": false, \"candidate_disks\": [], \"resolved_disk\": null}";
+    winmaint_load_targets();
+    item_text(winmaint_mode_index(), line, sizeof line);
+    assert(strstr(line, "[ON] LOCachy was picked in the firmware menu") && strstr(line, "switch back"));
+    row_hint_text(winmaint_mode_index(), hint, sizeof hint);
+    assert(strstr(hint, "LOCachy starts first again"));
+    jobs_double_ended = 0;
+    jobs_double_last[0] = '\0';
+    winmaint_default_row();
+    assert(winmaint_job != 0 && !strcmp(jobs_double_last, "winmaint-boot-default locachy"));
+    write_state(created_state);
+    fake_winmaint_status = "{\"boot_default\": \"locachy\", \"boot_default_overridden\": false, "
+                           "\"boot_default_pending_reboot\": false, \"candidate_disks\": [], \"resolved_disk\": null}";
+    jobs_double_ended = 1;
+    winmaint_check();
+    assert(winmaint_job == 0 && winmaint_windows_first == 0 && winmaint_first_overridden == 0);
+    assert(!strcmp(notice, "LOCachy starts first again."));
+
+    /* Reboot into Windows now: two Enters, then boot-default windows --reboot. */
+    jobs_double_ended = 0;
+    jobs_double_last[0] = '\0';
+    winmaint_reboot_row();
+    assert(winmaint_reboot_asked == 1 && winmaint_job == 0 && jobs_double_last[0] == '\0' &&
+           strstr(notice, "restarts now"));
+    winmaint_reboot_row();
+    assert(winmaint_reboot_asked == 0 && winmaint_job != 0 &&
+           !strcmp(jobs_double_last, "winmaint-boot-default windows --reboot"));
+    item_text(winmaint_mode_index() + 1, line, sizeof line);
+    assert(strstr(line, "working..."));
+    jobs_double_ended = 1;
+    winmaint_check();
+    assert(winmaint_job == 0);
+
+    /* A pending confirmation is dropped by another row's Enter; not created refuses. */
+    winmaint_default_row();
+    assert(winmaint_default_asked == 1);
+    winmaint_reboot_row();
+    assert(winmaint_default_asked == 0 && winmaint_reboot_asked == 1);
+    winmaint_heal_boot_row();
+    assert(winmaint_reboot_asked == 0);
+    jobs_double_ended = 1;
+    winmaint_check();
+    unlink(fake_winmaint_state);
+    jobs_double_last[0] = '\0';
+    winmaint_default_row();
+    winmaint_reboot_row();
+    assert(jobs_double_last[0] == '\0' && strstr(notice, "not created"));
+    item_text(winmaint_mode_index(), line, sizeof line);
+    assert(strstr(line, "not created"));
+
+    /* An adopted winmaint-boot-default job shows working... on the mode rows. */
+    winmaint_job = 0;
+    jobs_double_mine[0] = (struct jobs_row){ .id = 7301, .kind = "winmaint-boot-default", .state = "running", .position = 0 };
+    jobs_double_nmine = 1;
+    adopt_jobs();
+    assert(winmaint_job == 7301 && !strcmp(winmaint_what, "boot-default"));
+    item_text(winmaint_mode_index(), line, sizeof line);
+    assert(strstr(line, "working..."));
+    winmaint_job = 0;
+    winmaint_what[0] = '\0';
+    jobs_double_nmine = 0;
+    fake_winmaint_status = "";
+    puts("PASS Maintenance Windows start mode: two-step on, one-step back, pending/overridden shown, reboot now");
 
     /* 7. Job adoption for winmaint-*, tb-sync, gpu-unlock-*, and gpu-power*. */
     winmaint_job = tb_sync_job = gpu_unlock_job = gpu_power_job = 0;

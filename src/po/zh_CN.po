@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-23 23:13-0500\n"
+"POT-Creation-Date: 2026-11-24 22:24+0800\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -1865,7 +1865,10 @@ msgid_plural ""
 "Open documents become unsaved undoable edits. Other files are saved "
 "atomically, preserving encoding and line endings. Changed snapshots are "
 "refused."
-msgstr[0] "替换 %zu 处已勾选的匹配？\n已打开的文档会变为未保存的可撤销编辑。其他文件将原子保存，保留编码和换行符。查找后内容已变化的文件会被拒绝。"
+msgstr[0] ""
+"替换 %zu 处已勾选的匹配？\n"
+"已打开的文档会变为未保存的可撤销编辑。其他文件将原子保存，保留编码和换行符。"
+"查找后内容已变化的文件会被拒绝。"
 
 #: progs/edit-filesearch-ui.inc progs/edit-language.inc
 #: progs/edit-session-ui.inc progs/edit.c
@@ -3686,8 +3689,8 @@ msgid "The sender did not answer in time."
 msgstr "发送端未及时响应。"
 
 #: progs/extdisplay-setup.c
-msgid "The cable link went down."
-msgstr "线缆链路已断开。"
+msgid "The cable was unplugged. Waiting for the cable."
+msgstr "线缆已拔出。正在等待重新接上线缆。"
 
 #: progs/extdisplay-setup.c
 msgid "Disconnected."
@@ -3891,10 +3894,6 @@ msgstr "状态：%s"
 #: progs/extdisplay.c
 msgid "The broker is busy: a pairing is still active."
 msgstr "中转进程忙：配对仍在进行中。"
-
-#: progs/extdisplay.c
-msgid "The cable was unplugged. Press any key to close."
-msgstr "线缆已拔出。按任意键关闭。"
 
 #: progs/extdisplay.c
 msgid "Enter connect   Esc cancel   F2 details   F1 help   Ctrl+Q quit"
@@ -6181,7 +6180,9 @@ msgid ""
 msgid_plural ""
 "%s refused: %d system jobs run or wait (job %d, %s). Wait for them, or stop "
 "them in the system jobs (J)."
-msgstr[0] "%s 已拒绝：%d 个系统任务正在运行或等待（任务 %d，%s）。请等待，或在系统任务（J）中停止它。"
+msgstr[0] ""
+"%s 已拒绝：%d 个系统任务正在运行或等待（任务 %d，%s）。请等待，或在系统任务"
+"（J）中停止它。"
 
 #: progs/home.c
 msgid "Move the selection"
@@ -6369,6 +6370,18 @@ msgid "The updated installer could not start. The choices are kept; try again."
 msgstr "更新后的安装器无法启动。已保留所选设置，请重试。"
 
 #: progs/installer.c
+msgid "LUKS2"
+msgstr "LUKS2"
+
+#: progs/installer.c
+msgid "auto (follow system)"
+msgstr "自动（跟随系统）"
+
+#: progs/installer.c progs/packages.c progs/settings.c
+msgid "none"
+msgstr "无"
+
+#: progs/installer.c
 msgid "(no model name)"
 msgstr "（无型号名）"
 
@@ -6406,8 +6419,124 @@ msgid "Summary"
 msgstr "摘要"
 
 #: progs/installer.c
+msgid "Btrfs array needs at least 2 disks."
+msgstr "Btrfs 阵列至少需要 2 块磁盘。"
+
+#: progs/installer.c
+msgid "The Btrfs array name must use lowercase letters, digits, ., _ or -."
+msgstr "Btrfs 阵列名只能使用小写字母、数字、.、_ 或 -。"
+
+#: progs/installer.c
+msgid "Btrfs RAID10 requires at least 4 disks."
+msgstr "Btrfs RAID10 至少需要 4 块磁盘。"
+
+#: progs/installer.c
+msgid "Default Compute storage needs role shared or compute."
+msgstr "默认计算存储的角色必须是 shared 或 compute。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s is no longer available as an additional disk."
+msgstr "%s 已不能再用作额外磁盘。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s holds Maintenance Windows partitions and cannot be formatted."
+msgstr "%s 上有维护用 Windows 分区，不能格式化。"
+
+#: progs/installer.c
+#, c-format
+msgid "Invalid volume name for %s."
+msgstr "%s 的卷名无效。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s cannot be attached (choose a supported partition)."
+msgstr "无法附加 %s（请选择受支持的分区）。"
+
+#: progs/installer.c
+#, c-format
+msgid "Volume %s: default Compute storage needs role shared or compute."
+msgstr "卷 %s：默认计算存储的角色必须是 shared 或 compute。"
+
+#: progs/installer.c
+#, c-format
+msgid "Duplicate volume name: %s."
+msgstr "卷名重复：%s。"
+
+#: progs/installer.c
+msgid "Only one volume may be the default Compute storage."
+msgstr "只能有一个卷作为默认计算存储。"
+
+#: progs/installer.c
+#, c-format
+msgid "Maintenance Windows disk %s is not present."
+msgstr "找不到维护用 Windows 的磁盘 %s。"
+
+#: progs/installer.c
+#, c-format
+msgid "Windows C: size must be between %d and %d GiB."
+msgstr "Windows C 盘大小必须在 %d 到 %d GiB 之间。"
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"%s uses %d-byte sectors; Maintenance Windows needs a disk with 512-byte "
+"sectors."
+msgstr "%s 使用 %d 字节扇区；维护用 Windows 需要 512 字节扇区的磁盘。"
+
+#: progs/installer.c
+msgid ""
+"Maintenance Windows on the system disk requires whole-disk installation."
+msgstr "维护用 Windows 放在系统盘上时，必须安装到整块磁盘。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s cannot host both Maintenance Windows and a Btrfs array."
+msgstr "%s 不能同时容纳维护用 Windows 和 Btrfs 阵列。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s needs at least %s for the formatted volume and Maintenance Windows."
+msgstr "%s 至少需要 %s，才能同时放下格式化的卷和维护用 Windows。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s already holds Maintenance Windows partitions."
+msgstr "%s 上已有维护用 Windows 分区。"
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"%s has a whole-disk filesystem (%s); Maintenance Windows would overwrite it."
+msgstr "%s 上是整盘文件系统（%s）；维护用 Windows 会覆盖它。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s has a partition table of type %s; Maintenance Windows needs GPT."
+msgstr "%s 的分区表类型为 %s；维护用 Windows 需要 GPT。"
+
+#: progs/installer.c
+#, c-format
+msgid "The unallocated space at the end of %s cannot be measured."
+msgstr "无法测出 %s 末尾的未分配空间。"
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"%s needs at least %s unallocated after its last partition for Maintenance "
+"Windows (%s there)."
+msgstr "%s 在最后一个分区之后至少需要 %s 未分配空间才能放下维护用 Windows（当前有 %s）。"
+
+#: progs/installer.c
 msgid "Choose the disk to install on."
 msgstr "选择要安装到的磁盘。"
+
+#: progs/installer.c
+#, c-format
+msgid ""
+"%s holds Maintenance Windows partitions; installing here would erase them."
+msgstr "%s 上有维护用 Windows 分区；安装到这里会将它们抹掉。"
 
 #: progs/installer.c
 #, c-format
@@ -6421,6 +6550,11 @@ msgstr "选择 EFI 系统分区和根分区。"
 #: progs/installer.c
 msgid "The partitions must be different ones."
 msgstr "这几个分区必须各不相同。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s is a Maintenance Windows partition; installing here would erase it."
+msgstr "%s 是维护用 Windows 分区；安装到这里会将它抹掉。"
 
 #: progs/installer.c
 msgid "Set the disk passphrase."
@@ -6505,6 +6639,44 @@ msgid "Saved networks for the system"
 msgstr "把保存的网络带到新系统"
 
 #: progs/installer.c
+msgid "leave untouched"
+msgstr "不做改动"
+
+#: progs/installer.c
+#, c-format
+msgid "attach %s (%s) as %s [%s]%s"
+msgstr "附加 %s（%s）为卷 %s [%s]%s"
+
+#: progs/installer.c
+msgid " *compute"
+msgstr " *计算存储"
+
+#: progs/installer.c
+#, c-format
+msgid "format (%s, %s) as %s [%s]%s"
+msgstr "格式化（%s，%s）为卷 %s [%s]%s"
+
+#: progs/installer.c
+#, c-format
+msgid "array (%s, %s) as %s [%s]%s"
+msgstr "作为阵列成员（%s，%s）加入 %s [%s]%s"
+
+#: progs/installer.c
+#, c-format
+msgid "on system disk (%s)"
+msgstr "系统盘（%s）"
+
+#: progs/installer.c
+#, c-format
+msgid "on %s (reserved tail)"
+msgstr "%s（预留末尾空间）"
+
+#: progs/installer.c
+#, c-format
+msgid "on %s"
+msgstr "%s"
+
+#: progs/installer.c
 msgid "partitions chosen here"
 msgstr "这里选定的分区"
 
@@ -6574,10 +6746,6 @@ msgstr "根分区"
 msgid "Swap partition"
 msgstr "交换分区"
 
-#: progs/installer.c progs/packages.c progs/settings.c
-msgid "none"
-msgstr "无"
-
 #: progs/installer.c
 msgid "Each of them is formatted: what is on it is lost."
 msgstr "它们都会被格式化：上面的内容会丢失。"
@@ -6598,6 +6766,47 @@ msgstr "Enter：打开"
 #: progs/installer.c progs/settings.c
 msgid "Terminal"
 msgstr "终端"
+
+#: progs/installer.c
+msgid "Additional disks & arrays"
+msgstr "额外的磁盘与阵列"
+
+#: progs/installer.c
+msgid "Btrfs array name"
+msgstr "Btrfs 阵列名"
+
+#: progs/installer.c
+msgid "Array RAID mode"
+msgstr "阵列 RAID 模式"
+
+#: progs/installer.c
+msgid "Array role"
+msgstr "阵列角色"
+
+#: progs/installer.c
+msgid "Array encryption"
+msgstr "阵列加密"
+
+#: progs/installer.c
+msgid "Array as Compute storage"
+msgstr "阵列用作计算存储"
+
+#: progs/installer.c progs/settings.c
+msgid "Maintenance Windows"
+msgstr "维护用 Windows"
+
+#: progs/installer.c
+msgid "Hosted on"
+msgstr "所在磁盘"
+
+#: progs/installer.c
+msgid "Windows C: size"
+msgstr "Windows C 盘大小"
+
+#: progs/installer.c
+#, c-format
+msgid "Formatting %s reserves the tail for Maintenance Windows."
+msgstr "格式化 %s 时会在磁盘末尾为维护用 Windows 预留空间。"
 
 #: progs/installer.c
 msgid "Disks changed"
@@ -6761,6 +6970,26 @@ msgid "    formatted: %s"
 msgstr "    将格式化：%s"
 
 #: progs/installer.c
+#, c-format
+msgid "    attached (keep data, volume %s): %s"
+msgstr "    将附加（保留数据，卷 %s）：%s"
+
+#: progs/installer.c
+#, c-format
+msgid "    erased (volume %s, Maintenance Windows tail): %s"
+msgstr "    将抹掉（卷 %s，末尾留给维护用 Windows）：%s"
+
+#: progs/installer.c
+#, c-format
+msgid "    erased (volume %s): %s"
+msgstr "    将抹掉（卷 %s）：%s"
+
+#: progs/installer.c
+#, c-format
+msgid "      erased (volume %s): %s"
+msgstr "      将抹掉（卷 %s）：%s"
+
+#: progs/installer.c
 msgid "Nothing is missing. Install asks once more before it writes anything."
 msgstr "各项都已就绪。点“安装”后，写入任何东西之前还会再问一次。"
 
@@ -6782,6 +7011,28 @@ msgstr "EFI %s，根 %s，交换 %s"
 #: progs/installer.c
 msgid "the filesystems mounted at /mnt and /mnt/efi"
 msgstr "挂载在 /mnt 和 /mnt/efi 的文件系统"
+
+#: progs/installer.c
+msgid "Storage volume"
+msgstr "存储卷"
+
+#: progs/installer.c
+#, c-format
+msgid "%s (%s, %s, %s) on %s%s"
+msgstr "%s（%s，%s，%s）位于 %s%s"
+
+#: progs/installer.c
+msgid " [Compute storage]"
+msgstr " [计算存储]"
+
+#: progs/installer.c
+msgid "Btrfs array"
+msgstr "Btrfs 阵列"
+
+#: progs/installer.c
+#, c-format
+msgid "%s, Windows C: %d GiB"
+msgstr "%s，Windows C 盘 %d GiB"
 
 #: progs/installer.c progs/settings.c
 msgid "Secure Boot"
@@ -6904,6 +7155,10 @@ msgstr "筛选：%s_   （输入即筛选；Enter：选择；Esc：返回）"
 #: progs/installer.c
 msgid "No partitions were found: make them in the terminal, then look again."
 msgstr "没有找到分区：先在终端里分好区，再重新查看。"
+
+#: progs/installer.c
+msgid "Too many choices to pass to locachy-install; nothing was started."
+msgstr "选项太多，无法全部传给 locachy-install；没有开始任何操作。"
 
 #: progs/installer.c
 msgid "Download and install the packages"
@@ -7196,6 +7451,101 @@ msgid "A nonempty password and disk passphrase are needed to continue."
 msgstr "继续需要非空的用户密码和磁盘口令。"
 
 #: progs/installer.c
+msgid "Leave untouched"
+msgstr "不做改动"
+
+#: progs/installer.c
+msgid "Attach existing partition (keep data)"
+msgstr "附加现有分区（保留数据）"
+
+#: progs/installer.c
+msgid "Format whole disk (ext4)"
+msgstr "格式化整块磁盘（ext4）"
+
+#: progs/installer.c
+msgid "Format whole disk (btrfs)"
+msgstr "格式化整块磁盘（btrfs）"
+
+#: progs/installer.c
+msgid "Add to Btrfs array"
+msgstr "加入 Btrfs 阵列"
+
+#: progs/installer.c
+#, c-format
+msgid "Additional disk %s"
+msgstr "额外磁盘 %s"
+
+#: progs/installer.c
+#, c-format
+msgid "%s left untouched."
+msgstr "%s 不做改动。"
+
+#: progs/installer.c
+#, c-format
+msgid "%s added to Btrfs array %s."
+msgstr "%s 已加入 Btrfs 阵列 %s。"
+
+#: progs/installer.c
+#, c-format
+msgid "No supported unmounted partitions on %s."
+msgstr "%s 上没有受支持且未挂载的分区。"
+
+#: progs/installer.c
+msgid "Partition to attach (existing data is kept)"
+msgstr "要附加的分区（保留现有数据）"
+
+#: progs/installer.c
+msgid "Volume name:"
+msgstr "卷名："
+
+#: progs/installer.c
+msgid ""
+"Volume name: lowercase letters, digits, ., _ or - (start with letter or "
+"digit)."
+msgstr "卷名：只能用小写字母、数字、.、_ 或 -（须以字母或数字开头）。"
+
+#: progs/installer.c
+#, c-format
+msgid "Volume name %s is already used."
+msgstr "卷名 %s 已被使用。"
+
+#: progs/installer.c
+msgid "shared (System Drives + Compute)"
+msgstr "shared（~/Drives + 计算节点）"
+
+#: progs/installer.c
+msgid "data (System Drives only)"
+msgstr "data（仅 ~/Drives）"
+
+#: progs/installer.c
+msgid "compute (Compute only)"
+msgstr "compute（仅计算节点）"
+
+#: progs/installer.c
+msgid "Volume role"
+msgstr "卷角色"
+
+#: progs/installer.c
+msgid "Follow system disk (auto)"
+msgstr "跟随系统盘（自动）"
+
+#: progs/installer.c
+msgid "None"
+msgstr "不加密"
+
+#: progs/installer.c
+msgid "Volume encryption"
+msgstr "卷加密"
+
+#: progs/installer.c
+msgid "Use as default Compute storage?"
+msgstr "用作默认计算存储？"
+
+#: progs/installer.c
+msgid "Windows C: size in GiB:"
+msgstr "Windows C 盘大小（GiB）："
+
+#: progs/installer.c
 msgid "Reboot now?"
 msgstr "现在重启？"
 
@@ -7218,6 +7568,10 @@ msgstr "根分区（格式化为 ext4）"
 #: progs/installer.c
 msgid "The swap partition (formatted)"
 msgstr "交换分区（会格式化）"
+
+#: progs/installer.c
+msgid "Btrfs array name:"
+msgstr "Btrfs 阵列名："
 
 #: progs/installer.c
 msgid "The same again:"
@@ -7441,7 +7795,9 @@ msgid ""
 msgid_plural ""
 "Installed: %lld packages, %s   %d declared, %s with what they need, %lld "
 "foreign (AUR, LOCachy)   drift %d, missing %d"
-msgstr[0] "已安装：%lld 个软件包，%s   声明 %d 个，连同依赖共 %s，外来包 %lld 个（AUR、LOCachy）   偏离 %d 个，缺失 %d 个"
+msgstr[0] ""
+"已安装：%lld 个软件包，%s   声明 %d 个，连同依赖共 %s，外来包 %lld 个（AUR、"
+"LOCachy）   偏离 %d 个，缺失 %d 个"
 
 #: progs/packages.c
 #, c-format
@@ -9956,6 +10312,85 @@ msgid "No system battery is reported in /sys/class/power_supply."
 msgstr "/sys/class/power_supply 中未报告系统电池。"
 
 #: progs/settings-power.inc
+msgid "Manual charging"
+msgstr "手动充电"
+
+#: progs/settings-power.inc
+msgid "Running on battery"
+msgstr "正在使用电池供电"
+
+#: progs/settings-power.inc
+msgid "Learning usage"
+msgstr "正在学习使用习惯"
+
+#: progs/settings-power.inc
+msgid "Mostly plugged in"
+msgstr "长时间接电"
+
+#: progs/settings-power.inc
+msgid "Ready for portable use"
+msgstr "为移动使用充电"
+
+#: progs/settings-power.inc
+msgid "Holding charge"
+msgstr "暂缓充满"
+
+#: progs/settings-power.inc
+msgid "Topping up before unplugging"
+msgstr "在预计拔掉电源前充满"
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Full charge override active"
+msgstr "临时充满模式已生效"
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Charging control unsupported"
+msgstr "设备不支持充电控制"
+
+#: progs/settings-power.inc
+msgid "Could not apply charging limits"
+msgstr "无法应用充电限制"
+
+#: progs/settings-power.inc
+msgid "Charging status unavailable"
+msgstr "无法获取充电控制状态"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "Expected to resume charging to full at %s"
+msgstr "预计于 %s 恢复充电至满电"
+
+#: progs/settings-power.inc
+msgid "Plug in AC power first"
+msgstr "请先接上电源"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s: %s (limit %d%%, requested %d%%)"
+msgstr "%s：%s（当前上限 %d%%，目标 %d%%）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%s: %s (limit %d%%)"
+msgstr "%s：%s（上限 %d%%）"
+
+#: progs/settings-power.inc
+msgid "Saved, but could not notify the battery service."
+msgstr "已保存，但无法通知电池服务。"
+
+#: progs/settings-power.inc
+msgid "Adaptive charging setting saved."
+msgstr "已保存自适应充电设置。"
+
+#: progs/settings-power.inc
+msgid "Full charge requested until unplugged or for up to 24 hours."
+msgstr "已请求临时充满，拔掉电源或 24 小时后结束。"
+
+#: progs/settings-power.inc progs/settings.c
+msgid "Manual thresholds are saved but not applied while charging is managed."
+msgstr "手动阈值仍保留，自动控制充电时不使用。"
+
+#: progs/settings-power.inc
 #, c-format
 msgid "Cannot write charge start threshold for %s."
 msgstr "无法写入 %s 的充电起始阈值。"
@@ -11140,8 +11575,13 @@ msgid "The next or previous setting found"
 msgstr "下一个或上一个找到的设置项"
 
 #: progs/settings.c
-msgid "Secure Boot: enroll with Microsoft's keys too"
-msgstr "安全启动：同时写入微软的密钥"
+msgid ""
+"Secure Boot: enroll with Microsoft's keys too; Storage: mount/unmount volume"
+msgstr "安全启动：同时写入微软的密钥；存储卷：挂载/卸载"
+
+#: progs/settings.c
+msgid "Storage volume: toggle auto-mount at boot"
+msgstr "存储卷：开关开机自动挂载"
 
 #: progs/settings.c
 msgid "Screens: a screen's exact X,Y; move it (Ctrl+Shift: by 1 pixel)"
@@ -11615,6 +12055,11 @@ msgid "Compute Node"
 msgstr "计算节点"
 
 #: progs/settings.c
+#, c-format
+msgid "Default compute storage: %.40s (change under System > Storage Volumes)."
+msgstr "默认计算存储：%.40s（在“系统 > 存储卷”中更改）。"
+
+#: progs/settings.c
 msgid "Colors"
 msgstr "颜色"
 
@@ -11709,12 +12154,16 @@ msgid "Optional Components"
 msgstr "可选组件"
 
 #: progs/settings.c
-msgid "Debug Cable"
-msgstr "调试线缆"
+msgid "Storage Volumes"
+msgstr "存储卷"
 
 #: progs/settings.c
-msgid "Maintenance Windows"
-msgstr "维护用 Windows"
+msgid "No extra storage volumes configured."
+msgstr "尚未配置额外的存储卷。"
+
+#: progs/settings.c
+msgid "Debug Cable"
+msgstr "调试线缆"
 
 #: progs/settings.c
 msgid "Hostname (letters, digits, hyphens): "
@@ -11950,6 +12399,57 @@ msgid "Arming one-shot Windows boot..."
 msgstr "正在设置单次启动 Windows..."
 
 #: progs/settings.c
+msgid ""
+"Enter again: Windows starts first on every restart until switched back "
+"(LOCachy stays second)."
+msgstr "再按一次 Enter：在切回之前每次重启都优先启动 Windows（LOCachy 排在第二）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change which system starts first: %s"
+msgstr "无法更改优先启动的系统：%s"
+
+#: progs/settings.c
+msgid "Setting LOCachy to start first again..."
+msgstr "正在将 LOCachy 重新设为优先启动..."
+
+#: progs/settings.c
+msgid "Setting Windows to start first..."
+msgstr "正在将 Windows 设为优先启动..."
+
+#: progs/settings.c
+msgid ""
+"Enter: LOCachy starts first again (Windows stays in the firmware boot menu)."
+msgstr "Enter：让 LOCachy 重新优先启动（Windows 仍保留在固件启动菜单中）。"
+
+#: progs/settings.c
+msgid ""
+"Enter, twice: Windows starts first on every restart until switched back "
+"(LOCachy stays second)."
+msgstr "连续按两次 Enter：在切回之前每次重启都优先启动 Windows（LOCachy 排在第二）。"
+
+#: progs/settings.c
+msgid ""
+"Enter, twice: Windows starts first until switched back, and the computer "
+"restarts now."
+msgstr "连续按两次 Enter：在切回之前默认优先启动 Windows，并立即重启电脑。"
+
+#: progs/settings.c
+msgid ""
+"Enter again: Windows starts first until switched back, and the computer "
+"restarts now."
+msgstr "再按一次 Enter：在切回之前默认优先启动 Windows，并立即重启电脑。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not restart into Windows: %s"
+msgstr "无法重启进入 Windows：%s"
+
+#: progs/settings.c
+msgid "Restarting into Windows..."
+msgstr "正在重启进入 Windows..."
+
+#: progs/settings.c
 #, c-format
 msgid "Could not heal UEFI boot order: %s"
 msgstr "无法修复 UEFI 启动顺序：%s"
@@ -11959,12 +12459,17 @@ msgid "Restoring LOCachy first in UEFI boot order..."
 msgstr "正在将 LOCachy 恢复到 UEFI 启动顺序首位..."
 
 #: progs/settings.c
-msgid "Windows virtual machine closed."
-msgstr "Windows 虚拟机已关闭。"
+msgid "Opening Maintenance Windows on the desktop (also available from Home)."
+msgstr "正在桌面上打开维护用 Windows（也可从主页打开）。"
 
 #: progs/settings.c
-msgid "Windows virtual machine did not finish."
-msgstr "Windows 虚拟机未能正常结束。"
+#, c-format
+msgid "Cannot open Maintenance Windows on the desktop: %.100s"
+msgstr "无法在桌面上打开维护用 Windows：%.100s"
+
+#: progs/settings.c
+msgid "desktop session unavailable"
+msgstr "桌面会话不可用"
 
 #: progs/settings.c
 msgid "Maintenance Windows partition created."
@@ -11979,9 +12484,27 @@ msgid "Maintenance Windows partition reclaimed."
 msgstr "维护用 Windows 分区已回收。"
 
 #: progs/settings.c
+msgid "Windows already starts first until switched back; nothing was armed."
+msgstr "在切回之前 Windows 已经优先启动，未做任何设置。"
+
+#: progs/settings.c
 msgid ""
 "One-shot Windows boot armed; LOCachy stays default on the following restart."
 msgstr "已设置单次启动 Windows；之后再次重启将自动回到 LOCachy。"
+
+#: progs/settings.c
+msgid ""
+"Windows starts first until switched back; LOCachy stays in the firmware boot "
+"menu."
+msgstr "在切回之前默认优先启动 Windows；LOCachy 仍保留在固件启动菜单中。"
+
+#: progs/settings.c
+msgid "LOCachy starts first again."
+msgstr "已恢复默认优先启动 LOCachy。"
+
+#: progs/settings.c
+msgid "UEFI boot order healed; Windows stays first until switched back."
+msgstr "UEFI 启动顺序已修复，在切回之前保持 Windows 优先。"
 
 #: progs/settings.c
 msgid "UEFI boot order healed; LOCachy is first."
@@ -12052,6 +12575,159 @@ msgstr "无法卸载 NVIDIA 独显解锁：%s"
 #: progs/settings.c
 msgid "Removing NVIDIA GPU unlock and rebuilding the boot image..."
 msgstr "正在卸载 NVIDIA 独显解锁并重建启动镜像……"
+
+#: progs/settings.c
+msgid "Storage volume mounted."
+msgstr "存储卷已挂载。"
+
+#: progs/settings.c
+msgid "Storage volume unmounted."
+msgstr "存储卷已卸载。"
+
+#: progs/settings.c
+msgid "Storage volume role updated."
+msgstr "存储卷角色已更新。"
+
+#: progs/settings.c
+msgid "Storage volume auto-mount updated."
+msgstr "存储卷自动挂载设置已更新。"
+
+#: progs/settings.c
+msgid "Default compute storage updated."
+msgstr "默认计算存储已更新。"
+
+#: progs/settings.c
+msgid "Storage volume detached from LOCachy (disk data kept)."
+msgstr "存储卷已从 LOCachy 解绑（磁盘数据保留）。"
+
+#: progs/settings.c
+msgid "Storage operation finished."
+msgstr "存储操作已完成。"
+
+#: progs/settings.c
+#, c-format
+msgid "Storage operation failed: %s"
+msgstr "存储操作失败：%s"
+
+#: progs/settings.c
+msgid "the system disk"
+msgstr "系统盘"
+
+#: progs/settings.c
+msgid "System disk (auto)"
+msgstr "系统盘（自动）"
+
+#: progs/settings.c
+msgid "The disk is fixed once Maintenance Windows exists."
+msgstr "维护用 Windows 创建后，所在磁盘就不能再更改。"
+
+#: progs/settings.c
+msgid ""
+"No other internal disk can host Maintenance Windows: the system disk is used."
+msgstr "没有其他内置磁盘能放下维护用 Windows：将使用系统盘。"
+
+#: progs/settings.c
+#, c-format
+msgid "Maintenance Windows goes on %s."
+msgstr "维护用 Windows 位置：%s。"
+
+#: progs/settings.c
+msgid "Wait: a storage job is still running."
+msgstr "请稍候：存储任务仍在运行。"
+
+#: progs/settings.c
+msgid ""
+"No storage volume has role shared or compute; add one or change a volume "
+"role first."
+msgstr ""
+"没有角色为 shared 或 compute 的存储卷；请先添加一个，或更改某个卷的角色。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change compute storage: %s"
+msgstr "无法更改计算存储：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Clearing default compute storage..."
+msgstr "正在清除默认计算存储..."
+
+#: progs/settings.c
+#, c-format
+msgid "Setting default compute storage to %.32s..."
+msgstr "正在将默认计算存储设为 %.32s..."
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change volume role: %s"
+msgstr "无法更改卷角色：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Setting role of %.32s to %s..."
+msgstr "正在将 %.32s 的角色设为 %s..."
+
+#: progs/settings.c
+#, c-format
+msgid "Could not %s %.32s: %s"
+msgstr "无法%s %.32s：%s"
+
+#: progs/settings.c
+msgid "mount"
+msgstr "挂载"
+
+#: progs/settings.c
+msgid "unmount"
+msgstr "卸载"
+
+#: progs/settings.c
+#, c-format
+msgid "Mounting %.32s..."
+msgstr "正在挂载 %.32s..."
+
+#: progs/settings.c
+#, c-format
+msgid "Unmounting %.32s..."
+msgstr "正在卸载 %.32s..."
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change auto-mount for %.32s: %s"
+msgstr "无法更改 %.32s 的自动挂载设置：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Disabling auto-mount for %.32s..."
+msgstr "正在关闭 %.32s 的自动挂载..."
+
+#: progs/settings.c
+#, c-format
+msgid "Enabling auto-mount for %.32s..."
+msgstr "正在开启 %.32s 的自动挂载..."
+
+#: progs/settings.c
+#, c-format
+msgid ""
+"Delete again: detach volume %.32s from LOCachy (disk data is NOT wiped)."
+msgstr "再按一次 Delete：将卷 %.32s 从 LOCachy 解绑（不会抹掉磁盘数据）。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not detach %.32s: %s"
+msgstr "无法解绑 %.32s：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Detaching volume %.32s from LOCachy..."
+msgstr "正在将卷 %.32s 从 LOCachy 解绑..."
+
+#: progs/settings.c
+msgid "Storage manager closed."
+msgstr "存储管理器已关闭。"
+
+#: progs/settings.c
+msgid "Storage manager did not finish."
+msgstr "存储管理器未正常结束。"
 
 #: progs/settings.c
 msgid "Kernel options (added to the command line; empty: none): "
@@ -12175,6 +12851,14 @@ msgstr "  （Tor 已开启：无法绕过，其 UDP 已丢弃）"
 #: progs/settings.c
 msgid "Tailscale account"
 msgstr "Tailscale 账号"
+
+#: progs/settings.c
+msgid "SSH over Tailscale"
+msgstr "通过 Tailscale 使用 SSH"
+
+#: progs/settings.c
+msgid "  (Tailscale is off)"
+msgstr "  （Tailscale 已关闭）"
 
 #: progs/settings.c
 msgid "Clash (mihomo) installed"
@@ -12385,24 +13069,58 @@ msgid "Paired devices"
 msgstr "已配对设备"
 
 #: progs/settings.c
-msgid "Compute node service"
-msgstr "计算节点服务"
+msgid "Compute HTTPS API (optional)"
+msgstr "计算服务 HTTPS API（可选）"
 
 #: progs/settings.c
-msgid "Bind compute on Thunderbolt"
-msgstr "在雷电接口上监听计算服务"
+msgid "Compute API over Thunderbolt"
+msgstr "通过雷电接口访问计算 API"
 
 #: progs/settings.c
 msgid "Compute GPU passthrough"
 msgstr "计算容器直通 GPU"
 
 #: progs/settings.c
-msgid "Windows partition size"
-msgstr "Windows 分区大小"
-
-#: progs/settings.c
 msgid "not created"
 msgstr "未创建"
+
+#: progs/settings.c
+msgid "[OFF] LOCachy starts first"
+msgstr "[关] LOCachy 优先启动"
+
+#: progs/settings.c
+msgid "[ON] Windows from the next restart"
+msgstr "[开] 下次重启起优先启动 Windows"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "[ON] LOCachy was picked in the firmware menu; Enter: switch back"
+msgstr "[开] 本次开机在固件菜单中选择了 LOCachy；Enter：切回"
+
+#: progs/settings.c
+msgid "[ON] Windows starts first"
+msgstr "[开] Windows 优先启动"
+
+#: progs/settings.c
+msgid "Start in Windows by default (until switched back)"
+msgstr "默认启动 Windows（直到切回）"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Reboot into Windows now"
+msgstr "立即重启进入 Windows"
+
+#: progs/settings.c
+msgid "Enter, twice: restart into Windows"
+msgstr "连续按两次 Enter：重启进入 Windows"
+
+#: progs/settings.c
+msgid "Windows target disk"
+msgstr "Windows 目标磁盘"
+
+#: progs/settings.c
+msgid "Windows partition size"
+msgstr "Windows 分区大小"
 
 #: progs/settings.c
 #, c-format
@@ -12434,8 +13152,8 @@ msgid "Windows virtual machine"
 msgstr "Windows 虚拟机"
 
 #: progs/settings.c
-msgid "Enter: launch in terminal"
-msgstr "Enter：在终端中启动"
+msgid "Enter: open on the desktop"
+msgstr "Enter：在桌面上打开"
 
 #: progs/settings.c
 msgid "[Enter: change]"
@@ -12532,6 +13250,41 @@ msgstr "此机型不支持"
 #: progs/settings.c
 msgid "NVIDIA Dynamic Boost (nvidia-powerd)"
 msgstr "NVIDIA Dynamic Boost（nvidia-powerd）"
+
+#: progs/settings.c
+msgid "Compute default storage"
+msgstr "默认计算存储"
+
+#: progs/settings.c
+msgid "mounted"
+msgstr "已挂载"
+
+#: progs/settings.c
+msgid "plain"
+msgstr "未加密"
+
+#: progs/settings.c
+msgid "manual"
+msgstr "手动"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "none  (Enter: manage via CLI)"
+msgstr "无  （Enter：在命令行中管理）"
+
+#: progs/settings.c
+#, c-format
+msgid "1 unmanaged disk: %.40s (%s)  (Enter: manage)"
+msgstr "1 块未管理的磁盘：%.40s（%s）  （Enter：管理）"
+
+#: progs/settings.c
+#, c-format
+msgid "%d unmanaged disks: %.32s (%s), ...  (Enter: manage)"
+msgstr "%d 块未管理的磁盘：%.32s（%s）等  （Enter：管理）"
+
+#: progs/settings.c
+msgid "Unmanaged disks"
+msgstr "未管理的磁盘"
 
 #: progs/settings.c
 msgid "Unlock with a fingerprint"
@@ -12833,6 +13586,37 @@ msgid "Battery curves & health"
 msgstr "电池曲线与健康度"
 
 #: progs/settings.c
+msgid "Adaptive Charging"
+msgstr "自适应充电"
+
+#: progs/settings.c
+msgid "Waiting for battery service"
+msgstr "等待电池服务处理"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Charge to Full Now"
+msgstr "立即充满"
+
+#: progs/settings.c
+msgid "Enter: request full charge"
+msgstr "Enter：请求临时充满"
+
+#: progs/settings.c
+msgid "not set for manual charging"
+msgstr "未设置手动充电阈值"
+
+#: progs/settings.c
+#, c-format
+msgid "%d%% saved for manual charging"
+msgstr "已保存手动充电阈值 %d%%"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: allow a full charge until unplugged or for up to 24 hours."
+msgstr "Enter：临时允许充满，拔掉电源或 24 小时后结束。"
+
+#: progs/settings.c
 msgid "Charge start threshold"
 msgstr "充电起始阈值"
 
@@ -12964,6 +13748,18 @@ msgstr "Tailscale 已开启。"
 #, c-format
 msgid "Tailscale: %.140s."
 msgstr "Tailscale：%.140s。"
+
+#: progs/settings.c
+msgid "Turn on Tailscale before enabling SSH over it."
+msgstr "请先开启 Tailscale，再启用 SSH。"
+
+#: progs/settings.c
+msgid "SSH over Tailscale enabled; login requires an authorized public key."
+msgstr "已启用通过 Tailscale 的 SSH 访问；登录需要已授权的公钥。"
+
+#: progs/settings.c
+msgid "SSH over Tailscale disabled."
+msgstr "已关闭通过 Tailscale 的 SSH 访问。"
 
 #: progs/settings.c
 msgid "Clash is Tor's front: put Tor through bridges or off first."
@@ -13138,12 +13934,12 @@ msgid ""
 msgstr "Enter：在终端中列出已配对设备（可用 locachy-pair 配对或撤销）。"
 
 #: progs/settings.c
-msgid "Compute node service off."
-msgstr "计算节点服务已关闭。"
+msgid "Compute HTTPS API disabled."
+msgstr "计算服务 HTTPS API 已关闭。"
 
 #: progs/settings.c
-msgid "Compute node service on."
-msgstr "计算节点服务已开启。"
+msgid "Compute HTTPS API enabled."
+msgstr "计算服务 HTTPS API 已开启。"
 
 #: progs/settings.c
 msgid "Compute binds on Thunderbolt too; updating firewall..."
@@ -13186,9 +13982,8 @@ msgstr "Enter：将 LOCachy 恢复为 UEFI 首选启动项。"
 
 #: progs/settings.c
 msgid ""
-"Enter: launch QEMU/KVM in a terminal (needs a graphical session for display, "
-"or VNC)."
-msgstr "Enter：在终端中启动 QEMU/KVM（显示画面需要图形会话或 VNC）。"
+"Enter: open Maintenance Windows on the desktop (also available from Home)."
+msgstr "Enter：在桌面上打开维护用 Windows（也可从主页打开）。"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -13684,6 +14479,12 @@ msgid "Saving the NVIDIA Dynamic Boost setting..."
 msgstr "正在保存 NVIDIA Dynamic Boost 设置……"
 
 #: progs/settings.c
+msgid ""
+"Enter: open storage manager in a terminal (attach, format, or create btrfs "
+"array)."
+msgstr "Enter：在终端中打开存储管理器（附加、格式化或创建 Btrfs 阵列）。"
+
+#: progs/settings.c
 #, c-format
 msgid "Power profile: %s."
 msgstr "电源模式：%s。"
@@ -13729,7 +14530,9 @@ msgid ""
 msgid_plural ""
 "After an idle lock, a key or the pointer within %d seconds unlocks it "
 "without the password. The lock key, the lid and sleep always ask."
-msgstr[0] "空闲锁屏后，%d 秒内按任意键或移动指针可无需密码解锁。锁屏键、合盖和休眠始终需要密码。"
+msgstr[0] ""
+"空闲锁屏后，%d 秒内按任意键或移动指针可无需密码解锁。锁屏键、合盖和休眠始终需"
+"要密码。"
 
 #: progs/settings.c
 msgid "Every lock asks for the password at once."
@@ -13849,6 +14652,13 @@ msgstr "Enter: 安装缺少的部分   连按两次 Delete: 卸载"
 #: progs/settings.c
 msgid "Enter, then Left/Right: choose   Enter again: do it"
 msgstr "Enter 后用 Left/Right 选择   再按 Enter: 执行"
+
+#: progs/settings.c
+msgid ""
+"Enter+Left/Right: role   m: mount/unmount   a: auto-mount   Delete, twice: "
+"detach"
+msgstr ""
+"Enter+Left/Right: 角色   m: 挂载/卸载   a: 自动挂载   连按两次 Delete: 解绑"
 
 #. TRANSLATORS: Enter and Left/Right are key names; keep them.
 #: progs/settings.c
@@ -15685,6 +16495,23 @@ msgstr "显示较少详情"
 #: progs/view.c
 msgid "Show more details..."
 msgstr "显示更多详情..."
+
+#~ msgid "The cable link went down."
+#~ msgstr "线缆链路已断开。"
+
+#~ msgid "Windows virtual machine closed."
+#~ msgstr "Windows 虚拟机已关闭。"
+
+#~ msgid "Windows virtual machine did not finish."
+#~ msgstr "Windows 虚拟机未能正常结束。"
+
+#~ msgid "Enter: launch in terminal"
+#~ msgstr "Enter：在终端中启动"
+
+#~ msgid ""
+#~ "Enter: launch QEMU/KVM in a terminal (needs a graphical session for "
+#~ "display, or VNC)."
+#~ msgstr "Enter：在终端中启动 QEMU/KVM（显示画面需要图形会话或 VNC）。"
 
 #, c-format
 #~ msgid "%s [y/N]"

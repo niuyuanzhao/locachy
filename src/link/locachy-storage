@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""locachy-storage: CLI for LOCachy native multi-disk storage volumes.
+
+Commands:
+  locachy-storage list-disks [--json] [--include-system] [--root TARGET_ROOT]
+  locachy-storage status [--json] [--root TARGET_ROOT]
+  locachy-storage create --name NAME --mode format|attach|array --role data|shared|compute
+                         [--dev DEV | --devs DEV1,DEV2,...] [--fs ext4|btrfs]
+                         [--raid single|raid0|raid1|raid10] [--encrypt auto|none|luks]
+                         [--passphrase-file PATH] [--keyfile PATH] [--mount-options OPTS]
+                         [--root TARGET_ROOT] [--no-mount] [--no-auto-mount] [--reserve-tail-mib N]
+  locachy-storage set-role NAME data|shared|compute [--root TARGET_ROOT]
+  locachy-storage set-auto NAME on|off [--root TARGET_ROOT]
+  locachy-storage mount NAME [--degraded] [--passphrase-file PATH]
+  locachy-storage umount NAME [--keep-luks]
+  locachy-storage mount-all
+  locachy-storage umount-all
+  locachy-storage remove NAME [--wipe] [--delete-key] [--root TARGET_ROOT]
+  locachy-storage set-compute-storage NAME|none [--root TARGET_ROOT]
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+
+
+def _load_storage_module():
+    here = Path(__file__).resolve().parent
+    for directory in (here, Path("/usr/local/lib/locachy")):
+        candidate = directory / "locachy_storage.py"
+        if candidate.is_file():
+            spec = importlib.util.spec_from_file_location("locachy_storage", candidate)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+    sys.exit("locachy-storage: locachy_storage.py is not installed")
+
+
+st = _load_storage_module()
+
+
+def _fmt_bytes(num: int) -> str:
+    val = float(max(0, int(num)))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if val < 1024.0 or unit == "TiB":
+            if unit == "B":
+                return f"{int(val)} B"
+            return f"{val:.1f} {unit}"
+        val /= 1024.0
+    return f"{int(num)} B"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="locachy-storage",
+        description="Manage LOCachy secondary storage volumes and multi-disk Btrfs arrays.",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("list-disks", help="List available internal disks and partitions")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--include-system", action="store_true")
+    sp.add_argument("--root", default=None)
+
+    sp = sub.add_parser("status", help="Show registered volumes, health, usage, and available disks")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--root", default=None)
+
+    sp = sub.add_parser("create", help="Create (format/array) or attach an existing partition as a volume")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--mode", required=True, choices=st.VALID_MODES)
+    sp.add_argument("--role", required=True, choices=st.VALID_ROLES)
+    sp.add_argument("--dev", default="", help="Single target disk (format) or partition (attach)")
+    sp.add_argument("--devs", default="", help="Comma- or '+'-separated disk list (array)")
+    sp.add_argument("--fs", default="ext4", choices=st.VALID_FORMAT_FS)
+    sp.add_argument("--raid", default="raid1", choices=st.VALID_RAIDS)
+    sp.add_argument("--encrypt", default="auto", choices=("auto", "none", "luks"))
+    sp.add_argument("--passphrase-file", default="")
+    sp.add_argument("--keyfile", default="")
+    sp.add_argument("--mount-options", default="")
+    sp.add_argument("--root", default=None, help="Target root directory for offline/installer writes")
+    sp.add_argument("--no-mount", action="store_true", help="Do not mount after creating")
+    sp.add_argument("--no-auto-mount", action="store_true", help="Set auto_mount=false in volumes.json")
+    sp.add_argument(
+        "--reserve-tail-mib",
+        type=int,
+        default=0,
+        help="mode=format only: leave this many MiB unallocated at the end of the disk (Maintenance Windows tail); at least 1 GiB stays for the volume",
+    )
+
+    sp = sub.add_parser("set-role", help="Change volume access role (data, shared, or compute)")
+    sp.add_argument("name")
+    sp.add_argument("role", choices=st.VALID_ROLES)
+    sp.add_argument("--root", default=None)
+
+    sp = sub.add_parser("set-auto", help="Toggle automatic boot mounting for a volume")
+    sp.add_argument("name")
+    sp.add_argument("state", choices=("on", "off"))
+    sp.add_argument("--root", default=None)
+
+    sp = sub.add_parser("mount", help="Unlock (if LUKS), mount, and project a volume")
+    sp.add_argument("name")
+    sp.add_argument("--degraded", action="store_true", help="Explicitly allow degraded btrfs-array mount")
+    sp.add_argument("--passphrase-file", default="")
+
+    sp = sub.add_parser("umount", help="Unproject, unmount, and close LUKS mappers for a volume")
+    sp.add_argument("name")
+    sp.add_argument("--keep-luks", action="store_true", help="Leave LUKS mapper open after unmounting")
+
+    sub.add_parser("mount-all", help="Mount all auto_mount volumes (used by init at boot)")
+    sub.add_parser("umount-all", help="Unmount all managed volumes and close LUKS mappers (used at shutdown)")
+
+    sp = sub.add_parser("remove", help="Detach (or wipe) a registered volume")
+    sp.add_argument("name")
+    sp.add_argument("--wipe", action="store_true", help="Wipe member signatures and delete keyfiles")
+    sp.add_argument("--delete-key", action="store_true", help="Delete LUKS keyfile(s) when detaching")
+    sp.add_argument("--root", default=None)
+
+    sp = sub.add_parser("set-compute-storage", help="Set or clear rc.conf compute_storage volume")
+    sp.add_argument("name", help="Volume name (role compute or shared), or 'none' to clear")
+    sp.add_argument("--root", default=None)
+
+    return p
+
+
+def _print_disks_text(disks: list[dict]) -> None:
+    if not disks:
+        print("No internal non-system disks found.")
+        return
+    for d in disks:
+        state = "available" if d["available_for_format"] else f"in-use ({d['in_use_reason']})"
+        tail = d.get("free_tail_bytes")
+        tail_txt = _fmt_bytes(tail) if tail is not None else "unknown"
+        print(
+            f"{d['path']}\t{_fmt_bytes(d['size'])}\t{d.get('tran') or '-'}\t"
+            f"{d.get('model') or '-'}\tserial={d.get('serial') or '-'}\tfree_tail={tail_txt}\t{state}"
+        )
+        for p in d.get("partitions", []):
+            if p["managed_volume"]:
+                pstate = f"volume:{p['managed_volume']}"
+            elif p.get("maintenance_windows"):
+                pstate = f"{st.WINMAINT_REASON} (never attached)"
+            else:
+                pstate = "attachable" if p["attachable"] else "unattachable"
+            print(
+                f"  {p['path']}\t{_fmt_bytes(p['size'])}\t{p.get('fstype') or '-'}\t"
+                f"{p.get('label') or '-'}\t{pstate}"
+            )
+
+
+def _print_status_text(report: dict) -> None:
+    print(f"root_encrypted: {'yes' if report['root_encrypted'] else 'no'}")
+    print(f"compute_storage: {report['compute_storage'] or 'none (root)'}")
+    vols = report.get("volumes", [])
+    if not vols:
+        print("volumes: none")
+    else:
+        for v in vols:
+            topo = f"btrfs-{v['raid']}" if v["topology"] == "btrfs-array" else v["fs"]
+            mstate = "mounted" if v["mounted"] else "unmounted"
+            usage = v.get("usage") or {}
+            cap = (
+                f"{_fmt_bytes(usage['used_bytes'])} / {_fmt_bytes(usage['total_bytes'])}"
+                if v["mounted"] and usage.get("total_bytes")
+                else "-"
+            )
+            print(
+                f"{v['name']}\t{topo}\trole={v['role']}\tenc={v['encrypt']}\t"
+                f"{mstate}\thealth={v['health']}\tauto={'on' if v['auto_mount'] else 'off'}\t"
+                f"{cap}\t{v['mountpoint']}"
+            )
+            if v.get("error"):
+                print(f"  error: {v['error']}")
+            if v["encrypt"] == "luks" and v.get("keyfile_on_encrypted_root") is False:
+                print("  warning: LUKS keyfile stored on an unencrypted root filesystem")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.cmd == "list-disks":
+            disks = st.list_disks(root=args.root, include_system=args.include_system)
+            if args.json:
+                print(json.dumps(disks, indent=2, sort_keys=False))
+            else:
+                _print_disks_text(disks)
+            return 0
+
+        if args.cmd == "status":
+            report = st.status_report(root=args.root)
+            if args.json:
+                print(json.dumps(report, indent=2, sort_keys=False))
+            else:
+                _print_status_text(report)
+            return 0
+
+        if args.cmd == "create":
+            devs: list[str] = []
+            if args.dev and args.devs:
+                raise st.StorageError("specify either --dev or --devs, not both")
+            if args.dev:
+                devs = [args.dev.strip()]
+            elif args.devs:
+                sep = "+" if ("+" in args.devs and "," not in args.devs) else ","
+                devs = [d.strip() for d in args.devs.split(sep) if d.strip()]
+            else:
+                raise st.StorageError("--dev or --devs is required")
+            vol = st.create_volume(
+                name=args.name,
+                mode=args.mode,
+                role=args.role,
+                devs=devs,
+                fs=args.fs,
+                raid=args.raid,
+                encrypt=args.encrypt,
+                passphrase_file=args.passphrase_file,
+                keyfile=args.keyfile,
+                root=args.root,
+                no_mount=args.no_mount,
+                auto_mount=not args.no_auto_mount,
+                mount_options=args.mount_options,
+                reserve_tail_mib=args.reserve_tail_mib,
+            )
+            print(json.dumps(vol, sort_keys=False))
+            return 0
+
+        if args.cmd == "set-role":
+            vol = st.set_role(args.name, args.role, root=args.root)
+            print(json.dumps(vol, sort_keys=False))
+            return 0
+
+        if args.cmd == "set-auto":
+            vol = st.set_auto_mount(args.name, args.state == "on", root=args.root)
+            print(json.dumps(vol, sort_keys=False))
+            return 0
+
+        if args.cmd == "mount":
+            res = st.mount_volume(args.name, degraded=args.degraded, passphrase_file=args.passphrase_file)
+            print(json.dumps(res, sort_keys=False))
+            return 0
+
+        if args.cmd == "umount":
+            res = st.umount_volume(args.name, close_luks=not args.keep_luks)
+            print(json.dumps(res, sort_keys=False))
+            return 0
+
+        if args.cmd == "mount-all":
+            res = st.mount_all()
+            for vname, err in res["errors"].items():
+                print(f"locachy-storage: mount-all: {vname}: {err}", file=sys.stderr)
+            print(json.dumps(res, sort_keys=False))
+            return 0 if not res["errors"] else 1
+
+        if args.cmd == "umount-all":
+            res = st.umount_all()
+            for vname, err in res["errors"].items():
+                print(f"locachy-storage: umount-all: {vname}: {err}", file=sys.stderr)
+            print(json.dumps(res, sort_keys=False))
+            return 0 if not res["errors"] else 1
+
+        if args.cmd == "remove":
+            res = st.remove_volume(
+                args.name,
+                wipe=args.wipe,
+                delete_key=args.delete_key,
+                root=args.root,
+            )
+            if res.get("keys_kept"):
+                print(
+                    f"locachy-storage: preserved keyfile(s): {', '.join(res['keys_kept'])}",
+                    file=sys.stderr,
+                )
+            print(json.dumps(res, sort_keys=False))
+            return 0
+
+        if args.cmd == "set-compute-storage":
+            res = st.set_compute_storage(args.name, root=args.root)
+            print(json.dumps(res, sort_keys=False))
+            return 0
+
+    except (st.StorageError, OSError) as exc:
+        print(f"locachy-storage: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

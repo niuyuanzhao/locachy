@@ -86,11 +86,13 @@
 struct part {
     char path[64], fstype[32], label[64], type[64], mounts[128];
     long long size;
+    int winmaint; /* one of Maintenance Windows' partitions */
 };
 struct disk {
-    char path[64], model[64], tran[16], in_use[200];
+    char path[64], model[64], serial[64], tran[16], in_use[200], pttype[16], fstype[32];
     long long size;
-    int removable, nparts;
+    long long free_tail; /* unallocated after the last partition, as locachy-winmaint measures it; -1: unknown */
+    int removable, nparts, log_sec, winmaint;
     struct part parts[MAX_PARTS];
 };
 struct named {
@@ -105,6 +107,9 @@ static char keymaps[MAX_LIST][48], zones[MAX_LIST][48];
 static int nkeymaps, nzones;
 static char levels[8][16], level_auto[16], cpu_model[48], repo_names[4][16];
 static int nlevels, nrepos;
+static char storage_roles[8][16], storage_raids[8][16];
+static int nstorage_roles, nstorage_raids;
+static int winmaint_min_gib = 40, winmaint_default_gib = 48, winmaint_max_gib = 4096;
 static int tpm_usable, tpm_setup_mode, net_profiles;
 static char tpm_advice[512];
 /* fwupd's Host Security ID, and the checks it found failing (as it words
@@ -131,11 +136,23 @@ static char backend_revision[48];
 /* What is chosen. */
 enum { WHOLE, PARTS, MOUNTED };
 enum { ENC_OFF, ENC_PASS, ENC_TPM };
+enum { EXTRA_NONE, EXTRA_ATTACH, EXTRA_FMT_EXT4, EXTRA_FMT_BTRFS, EXTRA_ARRAY };
+enum { VENC_AUTO, VENC_LUKS, VENC_NONE };
+struct extra_disk {
+    char disk[64], part[64], name[36];
+    int action, role, encrypt, compute_storage;
+};
 static struct choices {
     int lang; /* 0 English, 1 Chinese: the system's */
     int disk_mode, swap_gib, encrypt, boot_lock, ntp, ime, machine, level, rank, copy_network, hibernate;
     int secure_boot, secure_boot_microsoft; /* own Secure Boot keys (firmware in setup mode) */
     char disk[64], esp[64], root[64], swap[64];
+    struct extra_disk extra[MAX_DISKS];
+    int nextra;
+    char array_name[36];
+    int array_raid, array_role, array_encrypt, array_compute_storage;
+    char winmaint_disk[64];
+    int winmaint_gib;
     char passphrase[256], password[256];
     char user[32], full_name[128], hostname[64], keymap[48], timezone[64], cpu[48];
     char update_repo[256], update_branch[128], apps_repo[256], apps_branch[128];
@@ -321,9 +338,16 @@ static void load_disks(struct json_object *a)
         struct disk *k = &disks[ndisks];
         copy(k->path, sizeof k->path, jstr(j, "path"));
         copy(k->model, sizeof k->model, jstr(j, "model"));
+        copy(k->serial, sizeof k->serial, jstr(j, "serial"));
         copy(k->tran, sizeof k->tran, jstr(j, "tran"));
         copy(k->in_use, sizeof k->in_use, jstr(j, "in_use"));
+        copy(k->pttype, sizeof k->pttype, jstr(j, "pttype"));
+        copy(k->fstype, sizeof k->fstype, jstr(j, "fstype"));
         k->size = jint(j, "size");
+        struct json_object *ft = jget(j, "free_tail");
+        k->free_tail = ft && json_object_is_type(ft, json_type_int) ? json_object_get_int64(ft) : -1;
+        k->log_sec = (int)jint(j, "log_sec");
+        k->winmaint = json_object_get_boolean(jget(j, "maintenance_windows"));
         k->removable = json_object_get_boolean(jget(j, "removable"));
         for (k->nparts = 0; k->nparts < jlen(kids) && k->nparts < MAX_PARTS; k->nparts++) {
             struct json_object *p = jat(kids, k->nparts), *m = jget(p, "mountpoints");
@@ -333,6 +357,7 @@ static void load_disks(struct json_object *a)
             copy(q->label, sizeof q->label, jstr(p, "label"));
             copy(q->type, sizeof q->type, jstr(p, "parttypename"));
             q->size = jint(p, "size");
+            q->winmaint = json_object_get_boolean(jget(p, "maintenance_windows"));
             q->mounts[0] = '\0';
             for (int i = 0; i < jlen(m); i++) {
                 size_t n = strlen(q->mounts);
@@ -372,6 +397,29 @@ static int load_description(void)
         copy(repo_names[nrepos], sizeof repo_names[0], jtext(a, nrepos));
         dflt.repos[nrepos] = (unsigned char)jhas(jget(def, "repos"), repo_names[nrepos]);
     }
+    a = jget(d, "storage_roles");
+    for (nstorage_roles = 0; nstorage_roles < jlen(a) && nstorage_roles < 8; nstorage_roles++) {
+        copy(storage_roles[nstorage_roles], sizeof storage_roles[0], jtext(a, nstorage_roles));
+    }
+    if (nstorage_roles == 0) {
+        static const char *const dr[] = { "shared", "data", "compute" };
+        for (int i = 0; i < 3; i++) copy(storage_roles[nstorage_roles++], sizeof storage_roles[0], dr[i]);
+    }
+    a = jget(d, "storage_raids");
+    for (nstorage_raids = 0; nstorage_raids < jlen(a) && nstorage_raids < 8; nstorage_raids++) {
+        copy(storage_raids[nstorage_raids], sizeof storage_raids[0], jtext(a, nstorage_raids));
+    }
+    if (nstorage_raids == 0) {
+        static const char *const dra[] = { "single", "raid0", "raid1", "raid10" };
+        for (int i = 0; i < 4; i++) copy(storage_raids[nstorage_raids++], sizeof storage_raids[0], dra[i]);
+    }
+    o = jget(d, "winmaint");
+    winmaint_min_gib = (int)jint(o, "min_gib");
+    winmaint_default_gib = (int)jint(o, "default_gib");
+    winmaint_max_gib = (int)jint(o, "max_gib");
+    if (winmaint_min_gib <= 0) winmaint_min_gib = 40;
+    if (winmaint_default_gib < winmaint_min_gib) winmaint_default_gib = 48;
+    if (winmaint_max_gib < winmaint_default_gib) winmaint_max_gib = 4096;
     o = jget(d, "levels");
     a = jget(o, "supported");
     for (nlevels = 0; nlevels < jlen(a) && nlevels < 8; nlevels++) {
@@ -477,6 +525,42 @@ static void follow_language(void)
     }
 }
 
+static int role_index(const char *name)
+{
+    for (int i = 0; i < nstorage_roles; i++) {
+        if (strcmp(storage_roles[i], name) == 0) return i;
+    }
+    return 0;
+}
+
+static const char *role_name(int idx)
+{
+    return idx >= 0 && idx < nstorage_roles ? storage_roles[idx] : "shared";
+}
+
+static int raid_index(const char *name)
+{
+    for (int i = 0; i < nstorage_raids; i++) {
+        if (strcmp(storage_raids[i], name) == 0) return i;
+    }
+    return 0;
+}
+
+static const char *raid_name(int idx)
+{
+    return idx >= 0 && idx < nstorage_raids ? storage_raids[idx] : "raid1";
+}
+
+static const char *venc_name(int enc)
+{
+    return enc == VENC_LUKS ? "luks" : enc == VENC_NONE ? "none" : "auto";
+}
+
+static const char *venc_label(int enc)
+{
+    return enc == VENC_LUKS ? _("LUKS2") : enc == VENC_NONE ? _("none") : _("auto (follow system)");
+}
+
 static void set_defaults(void)
 {
     c.lang = ui_lang;
@@ -487,6 +571,15 @@ static void set_defaults(void)
     c.boot_lock = c.ntp = c.rank = 1;
     c.copy_network = dflt.copy_network;
     c.hibernate = -1;
+    c.nextra = 0;
+    memset(c.extra, 0, sizeof c.extra);
+    copy(c.array_name, sizeof c.array_name, "pool");
+    c.array_raid = raid_index("raid1");
+    c.array_role = role_index("shared");
+    c.array_encrypt = VENC_AUTO;
+    c.array_compute_storage = 0;
+    c.winmaint_disk[0] = '\0';
+    c.winmaint_gib = winmaint_default_gib;
     copy(c.user, sizeof c.user, dflt.user);
     copy(c.hostname, sizeof c.hostname, dflt.hostname);
     copy(c.keymap, sizeof c.keymap, dflt.keymap);
@@ -531,8 +624,9 @@ static void disk_text(const struct disk *k, char *out, size_t size)
 {
     char sz[32];
     human_size(k->size, sz, sizeof sz);
-    snprintf(out, size, "%-14s %10s  %s%s%s%s", k->path, sz, k->model[0] ? k->model : _("(no model name)"),
-             k->tran[0] ? " (" : "", k->tran, k->tran[0] ? ")" : "");
+    snprintf(out, size, "%-14s %10s  %s%s%s%s%s%s%s", k->path, sz, k->model[0] ? k->model : _("(no model name)"),
+             k->tran[0] ? " (" : "", k->tran, k->tran[0] ? ")" : "",
+             k->serial[0] ? " [" : "", k->serial, k->serial[0] ? "]" : "");
 }
 
 static void part_text(const struct part *p, char *out, size_t size)
@@ -579,9 +673,246 @@ static int valid_hostname(const char *s)
     return 1;
 }
 
+static int valid_volume_name(const char *s)
+{
+    size_t n = strlen(s);
+    if (n < 1 || n > 32) return 0;
+    if (!((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= '0' && s[0] <= '9'))) return 0;
+    for (size_t i = 1; i < n; i++) {
+        char ch = s[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-')) return 0;
+    }
+    return 1;
+}
+
+static int extra_for_disk(const char *disk)
+{
+    for (int i = 0; i < c.nextra; i++) {
+        if (strcmp(c.extra[i].disk, disk) == 0) return i;
+    }
+    return -1;
+}
+
+static void extra_clear_disk(const char *disk)
+{
+    int idx = extra_for_disk(disk);
+    if (idx < 0) return;
+    memmove(&c.extra[idx], &c.extra[idx + 1], (size_t)(c.nextra - idx - 1) * sizeof c.extra[0]);
+    c.nextra--;
+    memset(&c.extra[c.nextra], 0, sizeof c.extra[0]);
+}
+
+static int array_member_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < c.nextra; i++) {
+        if (c.extra[i].action == EXTRA_ARRAY) n++;
+    }
+    return n;
+}
+
+static void clear_other_compute_storage(int keep_extra_idx, int keep_array)
+{
+    for (int i = 0; i < c.nextra; i++) {
+        if (i != keep_extra_idx) c.extra[i].compute_storage = 0;
+    }
+    if (!keep_array) c.array_compute_storage = 0;
+}
+
+static int is_secondary_disk(int i)
+{
+    if (i < 0 || i >= ndisks) return 0;
+    if (c.disk_mode == WHOLE && c.disk[0] && strcmp(disks[i].path, c.disk) == 0) return 0;
+    if (c.disk_mode == PARTS) {
+        for (int k = 0; k < disks[i].nparts; k++) {
+            const char *p = disks[i].parts[k].path;
+            if ((c.esp[0] && strcmp(p, c.esp) == 0) || (c.root[0] && strcmp(p, c.root) == 0) ||
+                (c.swap[0] && strcmp(p, c.swap) == 0)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int part_attachable(const struct part *p)
+{
+    if (!p || p->mounts[0] || p->winmaint) return 0;
+    if (strcasestr(p->type, "swap") || strcasestr(p->type, "efi system")) return 0;
+    return strcmp(p->fstype, "ext4") == 0 || strcmp(p->fstype, "btrfs") == 0 || strcmp(p->fstype, "xfs") == 0 ||
+           strcmp(p->fstype, "ntfs") == 0 || strcmp(p->fstype, "exfat") == 0 || strcmp(p->fstype, "vfat") == 0;
+}
+
+static int disk_has_extra_conflict_with_winmaint(const char *disk)
+{
+    int idx = extra_for_disk(disk);
+    if (idx < 0) return 0;
+    return c.extra[idx].action == EXTRA_ARRAY;
+}
+
+static int disk_has_extra_format(const char *disk)
+{
+    int idx = extra_for_disk(disk);
+    if (idx < 0) return 0;
+    return c.extra[idx].action == EXTRA_FMT_EXT4 || c.extra[idx].action == EXTRA_FMT_BTRFS;
+}
+
+static long long winmaint_tail_bytes(void)
+{
+    return (long long)c.winmaint_gib * (1LL << 30) + (256LL << 20);
+}
+
 static long long disk_needs(void)
 {
-    return esp_bytes + (long long)c.swap_gib * (1LL << 30) + min_root_bytes;
+    /* With what locachy-install's partitioning takes besides the partitions: the 1 MiB
+     * before the first one and the 2 MiB it keeps free at the end. */
+    long long need = (3LL << 20) + esp_bytes + (long long)c.swap_gib * (1LL << 30) + min_root_bytes;
+    if (c.disk_mode == WHOLE && c.winmaint_disk[0] && c.disk[0] && strcmp(c.winmaint_disk, c.disk) == 0) {
+        need += winmaint_tail_bytes();
+    }
+    return need;
+}
+
+static int problem_extra_storage(char *out, size_t size)
+{
+    int arr_count = array_member_count();
+    if (arr_count == 1) {
+        snprintf(out, size, "%s", _("Btrfs array needs at least 2 disks."));
+        return 1;
+    }
+    if (arr_count >= 2) {
+        if (!valid_volume_name(c.array_name)) {
+            snprintf(out, size, "%s", _("The Btrfs array name must use lowercase letters, digits, ., _ or -."));
+            return 1;
+        }
+        if (strcmp(raid_name(c.array_raid), "raid10") == 0 && arr_count < 4) {
+            snprintf(out, size, "%s", _("Btrfs RAID10 requires at least 4 disks."));
+            return 1;
+        }
+        if (c.array_compute_storage && strcmp(role_name(c.array_role), "data") == 0) {
+            snprintf(out, size, "%s", _("Default Compute storage needs role shared or compute."));
+            return 1;
+        }
+    }
+    int compute_count = (arr_count >= 2 && c.array_compute_storage) ? 1 : 0;
+    for (int i = 0; i < c.nextra; i++) {
+        const struct extra_disk *e = &c.extra[i];
+        int di = disk_index(e->disk);
+        if (di < 0 || !is_secondary_disk(di)) {
+            snprintf(out, size, _("%s is no longer available as an additional disk."), e->disk);
+            return 1;
+        }
+        if (disks[di].in_use[0]) {
+            snprintf(out, size, "%s", disks[di].in_use);
+            return 1;
+        }
+        if (e->action != EXTRA_ATTACH && disks[di].winmaint) {
+            snprintf(out, size, _("%s holds Maintenance Windows partitions and cannot be formatted."), e->disk);
+            return 1;
+        }
+        if (e->action == EXTRA_ARRAY) continue;
+        if (!valid_volume_name(e->name)) {
+            snprintf(out, size, _("Invalid volume name for %s."), e->disk);
+            return 1;
+        }
+        if (e->action == EXTRA_ATTACH) {
+            const struct part *p = find_part(e->part);
+            if (!p || !part_attachable(p)) {
+                snprintf(out, size, _("%s cannot be attached (choose a supported partition)."), e->part[0] ? e->part : e->disk);
+                return 1;
+            }
+        }
+        if (e->compute_storage) {
+            if (strcmp(role_name(e->role), "data") == 0) {
+                snprintf(out, size, _("Volume %s: default Compute storage needs role shared or compute."), e->name);
+                return 1;
+            }
+            compute_count++;
+        }
+        if (arr_count >= 2 && strcmp(e->name, c.array_name) == 0) {
+            snprintf(out, size, _("Duplicate volume name: %s."), e->name);
+            return 1;
+        }
+        for (int j = i + 1; j < c.nextra; j++) {
+            if (c.extra[j].action != EXTRA_ARRAY && strcmp(e->name, c.extra[j].name) == 0) {
+                snprintf(out, size, _("Duplicate volume name: %s."), e->name);
+                return 1;
+            }
+        }
+    }
+    if (compute_count > 1) {
+        snprintf(out, size, "%s", _("Only one volume may be the default Compute storage."));
+        return 1;
+    }
+    if (c.winmaint_disk[0]) {
+        int wi = disk_index(c.winmaint_disk);
+        if (wi < 0) {
+            snprintf(out, size, _("Maintenance Windows disk %s is not present."), c.winmaint_disk);
+            return 1;
+        }
+        if (c.winmaint_gib < winmaint_min_gib || c.winmaint_gib > winmaint_max_gib) {
+            snprintf(out, size, _("Windows C: size must be between %d and %d GiB."), winmaint_min_gib, winmaint_max_gib);
+            return 1;
+        }
+        if (disks[wi].log_sec > 0 && disks[wi].log_sec != 512) {
+            /* locachy-winmaint reads the GPT in 512-byte sectors. */
+            snprintf(out, size, _("%s uses %d-byte sectors; Maintenance Windows needs a disk with 512-byte sectors."),
+                     c.winmaint_disk, disks[wi].log_sec);
+            return 1;
+        }
+        int on_primary = c.disk_mode == WHOLE && c.disk[0] && strcmp(c.winmaint_disk, c.disk) == 0;
+        if (on_primary) {
+            /* Space check already included via disk_needs(). */
+        } else if (!is_secondary_disk(wi)) {
+            snprintf(out, size, "%s", _("Maintenance Windows on the system disk requires whole-disk installation."));
+            return 1;
+        } else if (disks[wi].in_use[0]) {
+            snprintf(out, size, "%s", disks[wi].in_use);
+            return 1;
+        } else if (disk_has_extra_conflict_with_winmaint(c.winmaint_disk)) {
+            snprintf(out, size, _("%s cannot host both Maintenance Windows and a Btrfs array."), c.winmaint_disk);
+            return 1;
+        } else if (disk_has_extra_format(c.winmaint_disk)) {
+            /* Formatting wipes the disk and reserves the tail; at least 1 GiB + GPT overhead stays for the volume. */
+            long long need = (1LL << 30) + winmaint_tail_bytes() + (4LL << 20);
+            if (disks[wi].size < need) {
+                char need_s[32];
+                human_size(need, need_s, sizeof need_s);
+                snprintf(out, size, _("%s needs at least %s for the formatted volume and Maintenance Windows."),
+                         c.winmaint_disk, need_s);
+                return 1;
+            }
+        } else {
+            /* locachy-winmaint create appends its partitions after the last one: only the
+             * unallocated space there counts (a disk without a partition table gets GPT). */
+            long long need = winmaint_tail_bytes();
+            const char *pt = disks[wi].pttype;
+            if (disks[wi].winmaint) {
+                snprintf(out, size, _("%s already holds Maintenance Windows partitions."), c.winmaint_disk);
+                return 1;
+            } else if (!pt[0] && disks[wi].nparts == 0 && disks[wi].fstype[0]) {
+                snprintf(out, size, _("%s has a whole-disk filesystem (%s); Maintenance Windows would overwrite it."),
+                         c.winmaint_disk, disks[wi].fstype);
+                return 1;
+            } else if (pt[0] && strcmp(pt, "gpt") != 0) {
+                snprintf(out, size, _("%s has a partition table of type %s; Maintenance Windows needs GPT."), c.winmaint_disk,
+                         strcmp(pt, "dos") == 0 ? "MBR (dos)" : pt);
+                return 1;
+            } else if (disks[wi].free_tail < 0) {
+                snprintf(out, size, _("The unallocated space at the end of %s cannot be measured."), c.winmaint_disk);
+                return 1;
+            } else if (disks[wi].free_tail < need) {
+                char need_s[32], have_s[32];
+                human_size(need, need_s, sizeof need_s);
+                human_size(disks[wi].free_tail, have_s, sizeof have_s);
+                snprintf(out, size,
+                         _("%s needs at least %s unallocated after its last partition for Maintenance Windows (%s there)."),
+                         c.winmaint_disk, need_s, have_s);
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 static int problem(int step, char *out, size_t size)
@@ -595,15 +926,33 @@ static int problem(int step, char *out, size_t size)
             snprintf(out, size, "%s", _("Choose the disk to install on."));
         } else if (disks[i].in_use[0]) {
             snprintf(out, size, "%s", disks[i].in_use);
+        } else if (disks[i].winmaint) {
+            snprintf(out, size, _("%s holds Maintenance Windows partitions; installing here would erase them."),
+                     disks[i].path);
         } else if (disks[i].size < disk_needs()) {
             snprintf(out, size, _("%s is too small: %s are needed."), disks[i].path, need);
+        } else {
+            problem_extra_storage(out, size);
         }
     } else if (step == S_DISK && c.disk_mode == PARTS) {
+        const char *chosen[3] = { c.esp, c.root, c.swap };
+        const char *winmaint_part = NULL;
+        for (int k = 0; k < 3 && !winmaint_part; k++) {
+            const struct part *p = chosen[k][0] ? find_part(chosen[k]) : NULL;
+            if (p && p->winmaint) winmaint_part = chosen[k];
+        }
         if (!c.esp[0] || !c.root[0]) {
             snprintf(out, size, "%s", _("Choose the EFI system partition and the root partition."));
         } else if (strcmp(c.esp, c.root) == 0 || (c.swap[0] && (strcmp(c.swap, c.root) == 0 || strcmp(c.swap, c.esp) == 0))) {
             snprintf(out, size, "%s", _("The partitions must be different ones."));
+        } else if (winmaint_part) {
+            snprintf(out, size, _("%s is a Maintenance Windows partition; installing here would erase it."),
+                     winmaint_part);
+        } else {
+            problem_extra_storage(out, size);
         }
+    } else if (step == S_DISK && c.disk_mode == MOUNTED) {
+        problem_extra_storage(out, size);
     } else if (step == S_ENCRYPTION && c.encrypt != ENC_OFF && !c.passphrase[0]) {
         snprintf(out, size, "%s", _("Set the disk passphrase."));
     } else if (step == S_USER) {
@@ -634,12 +983,14 @@ enum {
     R_START_LANG = 1, R_START_KEYMAP, R_START_INSTALL, R_START_TERM, R_START_RESCUE, R_START_REBOOT, R_START_OFF,
     R_NET_SETUP, R_NET_COPY, R_NEXT,
     R_DISK_MODE, R_SWAP, R_ESP, R_ROOT, R_SWAP_PART, R_TERMINAL, R_RESCAN,
+    R_ARR_NAME, R_ARR_RAID, R_ARR_ROLE, R_ARR_ENC, R_ARR_COMPUTE,
+    R_WINMAINT_DISK, R_WINMAINT_GIB,
     R_ENC, R_PASS, R_SB, R_SB_MICROSOFT,
     R_USER, R_FULL_NAME, R_PASSWORD, R_HOST, R_LOCK,
     R_LANG, R_TZ, R_NTP, R_IME,
     R_MACHINE, R_LEVEL, R_CPU, R_RANK, R_UPD_REPO, R_UPD_BRANCH, R_APPS_REPO, R_APPS_BRANCH, R_HIBERNATE,
     R_INSTALL,
-    R_DISK = 1000, R_MODULE = 2000, R_CONTAINER = 3000, R_REPO = 4000, R_PROBLEM = 5000,
+    R_DISK = 1000, R_EXTRA_DISK = 1500, R_MODULE = 2000, R_CONTAINER = 3000, R_REPO = 4000, R_PROBLEM = 5000,
 };
 struct entry {
     int id;
@@ -774,11 +1125,42 @@ static void build_network(int width)
     add_next(S_NETWORK);
 }
 
+static void extra_disk_summary(const struct extra_disk *e, char *out, size_t size)
+{
+    if (!e || e->action == EXTRA_NONE) {
+        snprintf(out, size, "%s", _("leave untouched"));
+    } else if (e->action == EXTRA_ATTACH) {
+        const struct part *p = find_part(e->part);
+        snprintf(out, size, _("attach %s (%s) as %s [%s]%s"), e->part, p && p->fstype[0] ? p->fstype : "?",
+                 e->name, role_name(e->role), e->compute_storage ? _(" *compute") : "");
+    } else if (e->action == EXTRA_FMT_EXT4 || e->action == EXTRA_FMT_BTRFS) {
+        const char *fs = e->action == EXTRA_FMT_BTRFS ? "btrfs" : "ext4";
+        snprintf(out, size, _("format (%s, %s) as %s [%s]%s"), fs, venc_name(e->encrypt), e->name,
+                 role_name(e->role), e->compute_storage ? _(" *compute") : "");
+    } else {
+        snprintf(out, size, _("array (%s, %s) as %s [%s]%s"), raid_name(c.array_raid), venc_name(c.array_encrypt),
+                 c.array_name, role_name(c.array_role), c.array_compute_storage ? _(" *compute") : "");
+    }
+}
+
+static void winmaint_label(char *out, size_t size)
+{
+    if (!c.winmaint_disk[0]) {
+        snprintf(out, size, "%s", _("off"));
+    } else if (c.disk_mode == WHOLE && c.disk[0] && strcmp(c.winmaint_disk, c.disk) == 0) {
+        snprintf(out, size, _("on system disk (%s)"), c.winmaint_disk);
+    } else if (disk_has_extra_format(c.winmaint_disk)) {
+        snprintf(out, size, _("on %s (reserved tail)"), c.winmaint_disk);
+    } else {
+        snprintf(out, size, _("on %s"), c.winmaint_disk);
+    }
+}
+
 static void build_disk(int width)
 {
     static const char *const modes[] = { N_("the whole of a disk"), N_("partitions chosen here"),
                                          N_("filesystems mounted at /mnt") };
-    char line[512], size[32];
+    char line[512], size[32], desc[256];
     add(E_TITLE, "%s", _("Disk"));
     add_item(R_DISK_MODE, _("Install on"), choice(_(modes[c.disk_mode])));
     if (c.disk_mode == WHOLE) {
@@ -812,6 +1194,52 @@ static void build_disk(int width)
                     width);
         add_item(R_TERMINAL, _("Terminal"), _("Enter: open it"));
     }
+    if (ndisks > 1) {
+        int any_secondary = 0;
+        for (int i = 0; i < ndisks; i++) {
+            if (is_secondary_disk(i)) any_secondary = 1;
+        }
+        if (any_secondary) {
+            add(E_GAP, " ");
+            add(E_TITLE, "%s", _("Additional disks & arrays"));
+            for (int i = 0; i < ndisks; i++) {
+                if (!is_secondary_disk(i)) continue;
+                int ei = extra_for_disk(disks[i].path);
+                extra_disk_summary(ei >= 0 ? &c.extra[ei] : NULL, desc, sizeof desc);
+                human_size(disks[i].size, size, sizeof size);
+                snprintf(line, sizeof line, "%.63s (%.31s)", disks[i].path, size);
+                add_item(R_EXTRA_DISK + i, line, desc);
+            }
+            int arr = array_member_count();
+            if (arr >= 2) {
+                add_item(R_ARR_NAME, _("Btrfs array name"), c.array_name);
+                add_item(R_ARR_RAID, _("Array RAID mode"), choice(raid_name(c.array_raid)));
+                add_item(R_ARR_ROLE, _("Array role"), choice(role_name(c.array_role)));
+                add_item(R_ARR_ENC, _("Array encryption"), choice(venc_label(c.array_encrypt)));
+                if (strcmp(role_name(c.array_role), "data") != 0) {
+                    add_item(R_ARR_COMPUTE, _("Array as Compute storage"), choice(yes_no(c.array_compute_storage)));
+                }
+            } else if (arr == 1) {
+                add(E_WARN, "%s", _("Btrfs array needs at least 2 disks."));
+            }
+        }
+    }
+    if (ndisks > 0) {
+        add(E_GAP, " ");
+        add(E_TITLE, "%s", _("Maintenance Windows"));
+        winmaint_label(desc, sizeof desc);
+        add_item(R_WINMAINT_DISK, _("Hosted on"), choice(desc));
+        if (c.winmaint_disk[0]) {
+            snprintf(line, sizeof line, P_("%d GiB", "%d GiB", (unsigned long)c.winmaint_gib), c.winmaint_gib);
+            add_item(R_WINMAINT_GIB, _("Windows C: size"), choice(line));
+            if (disk_has_extra_format(c.winmaint_disk)) {
+                snprintf(line, sizeof line, _("Formatting %s reserves the tail for Maintenance Windows."),
+                         c.winmaint_disk);
+                add_wrapped(E_NOTE, line, width);
+            }
+        }
+    }
+    add(E_GAP, " ");
     add_item(R_RESCAN, _("Disks changed"), _("Enter: look again"));
     add_next(S_DISK);
 }
@@ -919,7 +1347,7 @@ static void list_chosen(char *out, size_t size, const struct named *items, const
     if (!out[0]) snprintf(out, size, "%s", _("none"));
 }
 
-/* What will be erased, a line each (for the summary and the confirmation). */
+/* What will be erased (and what is kept attached), a line each (for the summary and confirmation). */
 static void add_erased(void)
 {
     char line[512];
@@ -936,6 +1364,33 @@ static void add_erased(void)
             if (!p) continue;
             part_text(p, line, sizeof line);
             add(E_WARN, _("    formatted: %s"), line);
+        }
+    }
+    for (int e = 0; e < c.nextra; e++) {
+        const struct extra_disk *ex = &c.extra[e];
+        const char *vname = ex->action == EXTRA_ARRAY ? c.array_name : ex->name;
+        if (ex->action == EXTRA_ATTACH) {
+            const struct part *p = find_part(ex->part);
+            if (p) {
+                part_text(p, line, sizeof line);
+                add(E_NOTE, _("    attached (keep data, volume %s): %s"), vname, line);
+            } else if (ex->part[0]) {
+                add(E_NOTE, _("    attached (keep data, volume %s): %s"), vname, ex->part);
+            }
+        } else if (ex->action == EXTRA_FMT_EXT4 || ex->action == EXTRA_FMT_BTRFS || ex->action == EXTRA_ARRAY) {
+            int di = disk_index(ex->disk);
+            if (di >= 0) {
+                int with_wm = (ex->action == EXTRA_FMT_EXT4 || ex->action == EXTRA_FMT_BTRFS) &&
+                              c.winmaint_disk[0] && strcmp(c.winmaint_disk, ex->disk) == 0;
+                disk_text(&disks[di], line, sizeof line);
+                add(E_WARN, with_wm ? _("    erased (volume %s, Maintenance Windows tail): %s")
+                                    : _("    erased (volume %s): %s"),
+                    vname, line);
+                for (int k = 0; k < disks[di].nparts; k++) {
+                    part_text(&disks[di].parts[k], line, sizeof line);
+                    add(E_WARN, _("      erased (volume %s): %s"), vname, line);
+                }
+            }
         }
     }
 }
@@ -969,6 +1424,34 @@ static void build_summary(int width)
         snprintf(line, sizeof line, "%s", _("the filesystems mounted at /mnt and /mnt/efi"));
     }
     add_item(E_NOTE, _("Disk"), line);
+    if (c.nextra > 0) {
+        char arr_devs[512] = "";
+        int arr_n = 0;
+        for (int e = 0; e < c.nextra; e++) {
+            const struct extra_disk *ex = &c.extra[e];
+            if (ex->action == EXTRA_ARRAY) {
+                size_t n = strlen(arr_devs);
+                snprintf(arr_devs + n, sizeof arr_devs - n, "%s%s", n ? " + " : "", ex->disk);
+                arr_n++;
+                continue;
+            }
+            extra_disk_summary(ex, list, sizeof list);
+            snprintf(line, sizeof line, "%s: %s", ex->disk, list);
+            add_item(E_NOTE, _("Storage volume"), line);
+        }
+        if (arr_n > 0) {
+            snprintf(line, sizeof line, _("%s (%s, %s, %s) on %s%s"), c.array_name, raid_name(c.array_raid),
+                     venc_name(c.array_encrypt), role_name(c.array_role), arr_devs,
+                     c.array_compute_storage ? _(" [Compute storage]") : "");
+            add_item(E_NOTE, _("Btrfs array"), line);
+        }
+    }
+    if (c.winmaint_disk[0]) {
+        char wlabel[128];
+        winmaint_label(wlabel, sizeof wlabel);
+        snprintf(line, sizeof line, _("%s, Windows C: %d GiB"), wlabel, c.winmaint_gib);
+        add_item(E_NOTE, _("Maintenance Windows"), line);
+    }
     add_erased();
     add_item(E_NOTE, _("Encryption"), enc_label(c.encrypt));
     if (tpm_setup_mode) {
@@ -1437,11 +1920,12 @@ static int yes(const char *question)
     }
 }
 
-/* locachy-install's options for what is chosen. */
+/* locachy-install's options for what is chosen. An option that does not fit
+ * is never dropped silently: overflow makes install_args fail. */
 struct args {
-    char *v[96];
-    int n;
-    char buf[8192];
+    char *v[160];
+    int n, overflow;
+    char buf[16384];
     size_t used;
 };
 
@@ -1449,14 +1933,55 @@ static void arg(struct args *a, const char *fmt, ...) __attribute__((format(prin
 static void arg(struct args *a, const char *fmt, ...)
 {
     va_list ap;
-    if (a->n + 1 >= (int)(sizeof a->v / sizeof a->v[0])) return;
+    if (a->n + 1 >= (int)(sizeof a->v / sizeof a->v[0])) {
+        a->overflow = 1;
+        return;
+    }
     va_start(ap, fmt);
     int len = vsnprintf(a->buf + a->used, sizeof a->buf - a->used, fmt, ap);
     va_end(ap);
-    if (len < 0 || a->used + (size_t)len + 1 > sizeof a->buf) return;
+    if (len < 0 || a->used + (size_t)len + 1 > sizeof a->buf) {
+        a->overflow = 1;
+        return;
+    }
     a->v[a->n++] = a->buf + a->used;
     a->v[a->n] = NULL;
     a->used += (size_t)len + 1;
+}
+
+/* The --extra-volume options (locachy-install's SPEC) and Maintenance Windows'. */
+static void storage_args(struct args *a)
+{
+    char spec[1600], devs[1200] = "";
+    for (int e = 0; e < c.nextra; e++) {
+        const struct extra_disk *ex = &c.extra[e];
+        const char *compute = ex->compute_storage ? ",compute_storage=1" : "";
+        if (ex->action == EXTRA_ATTACH) {
+            snprintf(spec, sizeof spec, "name=%s,mode=attach,dev=%s,role=%s%s", ex->name, ex->part,
+                     role_name(ex->role), compute);
+        } else if (ex->action == EXTRA_FMT_EXT4 || ex->action == EXTRA_FMT_BTRFS) {
+            snprintf(spec, sizeof spec, "name=%s,mode=format,dev=%s,fs=%s,role=%s,encrypt=%s%s", ex->name, ex->disk,
+                     ex->action == EXTRA_FMT_BTRFS ? "btrfs" : "ext4", role_name(ex->role), venc_name(ex->encrypt),
+                     compute);
+        } else {
+            if (ex->action == EXTRA_ARRAY) {
+                size_t n = strlen(devs);
+                snprintf(devs + n, sizeof devs - n, "%s%s", n ? "+" : "", ex->disk);
+            }
+            continue;
+        }
+        arg(a, "--extra-volume=%s", spec);
+    }
+    if (array_member_count() >= 2) {
+        snprintf(spec, sizeof spec, "name=%s,mode=array,devs=%s,raid=%s,role=%s,encrypt=%s%s", c.array_name, devs,
+                 raid_name(c.array_raid), role_name(c.array_role), venc_name(c.array_encrypt),
+                 c.array_compute_storage ? ",compute_storage=1" : "");
+        arg(a, "--extra-volume=%s", spec);
+    }
+    if (c.winmaint_disk[0]) {
+        arg(a, "--winmaint-disk=%s", c.winmaint_disk);
+        arg(a, "--winmaint-gib=%d", c.winmaint_gib);
+    }
 }
 
 static void list_arg(struct args *a, const char *option, const struct named *items, const unsigned char *on, int n)
@@ -1469,12 +1994,14 @@ static void list_arg(struct args *a, const char *option, const struct named *ite
     arg(a, "%s=%s", option, list);
 }
 
-/* The options, the secrets written for them: 0, or -1. */
+/* The options, the secrets written for them: 0; -1 when a secret cannot be
+ * written, -2 when the options do not fit (said in the notice). */
 static int install_args(struct args *a, int check)
 {
     char path[512];
     a->n = 0;
     a->used = 0;
+    a->overflow = 0;
     arg(a, "%s", INSTALL_CMD);
     arg(a, "%s", check ? "--check" : "--yes");
     if (c.disk_mode == WHOLE) {
@@ -1527,6 +2054,11 @@ static int install_args(struct args *a, int check)
     arg(a, "--apps-repo=%s", c.apps_repo);
     arg(a, "--apps-branch=%s", c.apps_branch);
     if (c.hibernate >= 0) arg(a, "--hibernate-after=%d", c.hibernate);
+    storage_args(a);
+    if (a->overflow) {
+        tell(1, "%s", _("Too many choices to pass to locachy-install; nothing was started."));
+        return -2;
+    }
     return 0;
 }
 
@@ -1671,12 +2203,17 @@ static void start_install(char *const argv[], int resumed)
     log_path(path, sizeof path);
     mkdir(RUN_DIR, 0700);
     if (!resumed) unlink(path);
-    int out = resumed ? open(path, O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC)
-                      : open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (out < 0) {
+    int out = open(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | (resumed ? O_APPEND : O_EXCL), 0600);
+    struct stat st;
+    if (out < 0 || fstat(out, &st) < 0 || !S_ISREG(st.st_mode)) {
+        if (out >= 0) close(out);
         tell(1, _("Cannot write %s."), path);
+        remove_secrets();
         return;
     }
+    /* Take the offset before the child can print to the log. A fast failure
+     * can otherwise leave even its first error and resume hint unread. */
+    off_t previous = resumed ? st.st_size : 0;
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
@@ -1702,13 +2239,37 @@ static void start_install(char *const argv[], int resumed)
     last_line[0] = error_line[0] = log_part[0] = run_source[0] = trust_command[0] = '\0';
     nwanted = resumable = 0;
     resumed_run = resumed;
-    struct stat st;
-    log_read = resumed && stat(path, &st) == 0 ? st.st_size : 0;
+    log_read = previous;
     tell(0, "%s", "");
     say("installer: installing");
 }
 
 /* The installation ended: 0 done, 1 failed; -1 still going. */
+/* A backend can reject a continued run before it reaches the line that says
+ * "Continue with" (for example, an old target's app catalog can be rejected
+ * while argparse is reconstructing the saved command). The resume record is
+ * still the authority in that case. Ask for its public, secret-free status so
+ * the person does not lose the c button or get sent back to formatting. */
+static void recover_resume_status(void)
+{
+    char out[8192];
+    char *const argv[] = { INSTALL_CMD, "--resume-status", NULL };
+    if (capture(argv, out, sizeof out, 0) != 0) return;
+    struct json_object *record = json_tokener_parse(out);
+    if (!json_object_is_type(record, json_type_object) || !jlen(jget(record, "argv"))) {
+        if (record) json_object_put(record);
+        return;
+    }
+    const char *phase = jstr(record, "phase");
+    if (phase[0] && strcmp(phase, "target") && strcmp(phase, "preflight")) {
+        json_object_put(record);
+        return;
+    }
+    if (stopped_installation) json_object_put(stopped_installation);
+    stopped_installation = record;
+    resumable = 1;
+}
+
 static int check_install(void)
 {
     int status;
@@ -1723,6 +2284,7 @@ static int check_install(void)
         say("installer: installation completed");
     } else {
         say("installer: installation failed (%d)", WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        if (!resumable) recover_resume_status();
     }
     return ok ? 0 : 1;
 }
@@ -1733,8 +2295,10 @@ static int check_choices(void)
 {
     static struct args a;
     char out[8192];
-    if (install_args(&a, 1) < 0) {
-        tell(1, _("Cannot write %s."), RUN_DIR);
+    int rc = install_args(&a, 1);
+    if (rc < 0) {
+        remove_secrets();
+        if (rc == -1) tell(1, _("Cannot write %s."), RUN_DIR);
         return 0;
     }
     screen_fill(0, screen_rows() - 1, screen_cols(), 1, BG);
@@ -2269,6 +2833,17 @@ static void reread(void)
     if (!find_part(c.esp)) c.esp[0] = '\0';
     if (!find_part(c.root)) c.root[0] = '\0';
     if (!find_part(c.swap)) c.swap[0] = '\0';
+    for (int i = 0; i < c.nextra; ) {
+        int di = disk_index(c.extra[i].disk);
+        if (di < 0 || !is_secondary_disk(di) ||
+            (c.extra[i].action == EXTRA_ATTACH && !find_part(c.extra[i].part))) {
+            extra_clear_disk(c.extra[i].disk);
+        } else {
+            i++;
+        }
+    }
+    if (c.winmaint_disk[0] && disk_index(c.winmaint_disk) < 0) c.winmaint_disk[0] = '\0';
+    if (c.winmaint_gib < winmaint_min_gib) c.winmaint_gib = winmaint_default_gib;
 }
 
 /* The layout chosen: the installer types as it does from now on, as the
@@ -2325,8 +2900,10 @@ static void begin_install_current(void)
         tell(0, "%s", _("Nothing was written."));
         return;
     }
-    if (install_args(&a, 0) < 0) {
-        tell(1, _("Cannot write %s."), RUN_DIR);
+    int rc = install_args(&a, 0);
+    if (rc < 0) {
+        remove_secrets();
+        if (rc == -1) tell(1, _("Cannot write %s."), RUN_DIR);
         return;
     }
     start_install(a.v, 0);
@@ -2387,13 +2964,200 @@ static void continue_install(void)
     if (refresh_installer("continue") == 0) continue_install_current();
 }
 
+static int volume_name_taken(const char *name, const char *ignore_disk)
+{
+    for (int i = 0; i < c.nextra; i++) {
+        if (c.extra[i].action == EXTRA_ARRAY) continue;
+        if (ignore_disk && strcmp(c.extra[i].disk, ignore_disk) == 0) continue;
+        if (strcmp(c.extra[i].name, name) == 0) return 1;
+    }
+    if (ignore_disk && array_member_count() >= 2 && strcmp(c.array_name, name) == 0) return 1;
+    return 0;
+}
+
+static void default_volume_name(char *out, size_t size, const char *ignore_disk)
+{
+    if (!volume_name_taken("data", ignore_disk)) {
+        copy(out, size, "data");
+        return;
+    }
+    for (int n = 2; n <= 32; n++) {
+        snprintf(out, size, "data%d", n);
+        if (!volume_name_taken(out, ignore_disk)) return;
+    }
+    copy(out, size, "data");
+}
+
+static void configure_extra_disk(int di)
+{
+    if (di < 0 || di >= ndisks || !is_secondary_disk(di)) return;
+    const struct disk *d = &disks[di];
+    int existing = extra_for_disk(d->path);
+    struct extra_disk cur = existing >= 0 ? c.extra[existing] : (struct extra_disk){0};
+    copy(cur.disk, sizeof cur.disk, d->path);
+
+    const char *actions[5] = {
+        _("Leave untouched"),
+        _("Attach existing partition (keep data)"),
+        _("Format whole disk (ext4)"),
+        _("Format whole disk (btrfs)"),
+        _("Add to Btrfs array"),
+    };
+    char title[256];
+    snprintf(title, sizeof title, _("Additional disk %s"), d->path);
+    int act_choice = pick(title, actions, 5, cur.action);
+    if (act_choice < 0) return;
+    if (act_choice == EXTRA_NONE) {
+        extra_clear_disk(d->path);
+        tell(0, _("%s left untouched."), d->path);
+        return;
+    }
+    if (act_choice == EXTRA_ARRAY) {
+        if (existing < 0) {
+            if (c.nextra >= MAX_DISKS) return;
+            existing = c.nextra++;
+        }
+        memset(&c.extra[existing], 0, sizeof c.extra[existing]);
+        copy(c.extra[existing].disk, sizeof c.extra[existing].disk, d->path);
+        c.extra[existing].action = EXTRA_ARRAY;
+        if (!c.array_name[0]) copy(c.array_name, sizeof c.array_name, "pool");
+        tell(0, _("%s added to Btrfs array %s."), d->path, c.array_name);
+        return;
+    }
+
+    char part_path[64] = "";
+    if (act_choice == EXTRA_ATTACH) {
+        static char ptexts[MAX_PARTS][400];
+        static const char *pitems[MAX_PARTS];
+        int pmap[MAX_PARTS], np = 0, pcur = 0;
+        for (int k = 0; k < d->nparts; k++) {
+            if (!part_attachable(&d->parts[k])) continue;
+            part_text(&d->parts[k], ptexts[np], sizeof ptexts[0]);
+            pitems[np] = ptexts[np];
+            if (strcmp(d->parts[k].path, cur.part) == 0) pcur = np;
+            pmap[np++] = k;
+        }
+        if (np == 0) {
+            tell(1, _("No supported unmounted partitions on %s."), d->path);
+            return;
+        }
+        int pi = pick(_("Partition to attach (existing data is kept)"), pitems, np, pcur);
+        if (pi < 0) return;
+        copy(part_path, sizeof part_path, d->parts[pmap[pi]].path);
+    }
+
+    char vname[36] = "";
+    if (existing >= 0 && cur.action != EXTRA_ARRAY && cur.name[0]) {
+        copy(vname, sizeof vname, cur.name);
+    } else {
+        default_volume_name(vname, sizeof vname, d->path);
+    }
+    if (!prompt(_("Volume name:"), vname, sizeof vname, 0)) return;
+    if (!valid_volume_name(vname)) {
+        tell(1, "%s", _("Volume name: lowercase letters, digits, ., _ or - (start with letter or digit)."));
+        return;
+    }
+    if (volume_name_taken(vname, d->path)) {
+        tell(1, _("Volume name %s is already used."), vname);
+        return;
+    }
+
+    char rtexts[8][96];
+    const char *ritems[8];
+    for (int i = 0; i < nstorage_roles; i++) {
+        const char *rn = storage_roles[i];
+        if (strcmp(rn, "shared") == 0) snprintf(rtexts[i], sizeof rtexts[0], "%s", _("shared (System Drives + Compute)"));
+        else if (strcmp(rn, "data") == 0) snprintf(rtexts[i], sizeof rtexts[0], "%s", _("data (System Drives only)"));
+        else if (strcmp(rn, "compute") == 0) snprintf(rtexts[i], sizeof rtexts[0], "%s", _("compute (Compute only)"));
+        else copy(rtexts[i], sizeof rtexts[0], rn);
+        ritems[i] = rtexts[i];
+    }
+    int rchoice = pick(_("Volume role"), ritems, nstorage_roles, cur.role);
+    if (rchoice < 0) return;
+
+    int echoice = VENC_NONE;
+    if (act_choice == EXTRA_FMT_EXT4 || act_choice == EXTRA_FMT_BTRFS) {
+        const char *eitems[3] = {
+            _("Follow system disk (auto)"),
+            _("LUKS2"),
+            _("None"),
+        };
+        int ecur = existing >= 0 && (cur.action == EXTRA_FMT_EXT4 || cur.action == EXTRA_FMT_BTRFS) ? cur.encrypt : VENC_AUTO;
+        echoice = pick(_("Volume encryption"), eitems, 3, ecur);
+        if (echoice < 0) return;
+    }
+
+    int cs = 0;
+    if (strcmp(role_name(rchoice), "data") != 0) {
+        cs = yes(_("Use as default Compute storage?"));
+    }
+
+    if (existing < 0) {
+        if (c.nextra >= MAX_DISKS) return;
+        existing = c.nextra++;
+    }
+    memset(&c.extra[existing], 0, sizeof c.extra[existing]);
+    copy(c.extra[existing].disk, sizeof c.extra[existing].disk, d->path);
+    copy(c.extra[existing].part, sizeof c.extra[existing].part, part_path);
+    copy(c.extra[existing].name, sizeof c.extra[existing].name, vname);
+    c.extra[existing].action = act_choice;
+    c.extra[existing].role = rchoice;
+    c.extra[existing].encrypt = echoice;
+    c.extra[existing].compute_storage = cs;
+    if (cs) clear_other_compute_storage(existing, 0);
+    tell(0, "%s", "");
+}
+
+static void cycle_winmaint_disk(int dir)
+{
+    const char *opts[MAX_DISKS + 2];
+    int n = 0, cur = 0;
+    opts[n++] = "";
+    if (c.disk_mode == WHOLE && c.disk[0]) opts[n++] = c.disk;
+    for (int i = 0; i < ndisks; i++) {
+        if (!is_secondary_disk(i)) continue;
+        opts[n++] = disks[i].path;
+    }
+    for (int i = 0; i < n; i++) {
+        if (strcmp(opts[i], c.winmaint_disk) == 0) { cur = i; break; }
+    }
+    int next = (cur + n + dir) % n;
+    copy(c.winmaint_disk, sizeof c.winmaint_disk, opts[next]);
+    if (c.winmaint_disk[0] && c.winmaint_gib < winmaint_min_gib) c.winmaint_gib = winmaint_default_gib;
+}
+
+static void change_winmaint_gib(int key, int dir)
+{
+    static const int sizes[] = { 40, 48, 64, 96, 128, 256, 512 };
+    int nsizes = (int)(sizeof sizes / sizeof sizes[0]);
+    if (key == K_LEFT || key == K_RIGHT) {
+        int cur = 0;
+        for (int i = 0; i < nsizes; i++) {
+            if (sizes[i] <= c.winmaint_gib) cur = i;
+        }
+        int next = (cur + nsizes + dir) % nsizes;
+        c.winmaint_gib = sizes[next];
+    } else {
+        char text[32];
+        snprintf(text, sizeof text, "%d", c.winmaint_gib);
+        if (prompt(_("Windows C: size in GiB:"), text, sizeof text, 0)) {
+            int val = atoi(text);
+            if (val < winmaint_min_gib) val = winmaint_min_gib;
+            if (val > winmaint_max_gib) val = winmaint_max_gib;
+            c.winmaint_gib = val;
+        }
+    }
+}
+
 /* The rows Left and Right change in place (elsewhere Left goes to the
  * steps). */
 static int is_choice(int id)
 {
     return id == R_START_LANG || id == R_NET_COPY || id == R_DISK_MODE || id == R_SWAP || id == R_ENC ||
            id == R_LOCK || id == R_LANG || id == R_NTP || id == R_IME || id == R_MACHINE || id == R_LEVEL ||
-           id == R_RANK || id == R_SB || id == R_SB_MICROSOFT || (id >= R_REPO && id < R_REPO + 4);
+           id == R_RANK || id == R_SB || id == R_SB_MICROSOFT || (id >= R_REPO && id < R_REPO + 4) ||
+           id == R_ARR_RAID || id == R_ARR_ROLE || id == R_ARR_ENC || id == R_ARR_COMPUTE ||
+           id == R_WINMAINT_DISK || id == R_WINMAINT_GIB;
 }
 
 static void act(int id, int key)
@@ -2461,12 +3225,59 @@ static void act(int id, int key)
         break;
     case R_ESP:
         pick_part(_("The EFI system partition (formatted FAT32)"), c.esp, sizeof c.esp, 0);
+        for (int i = 0; i < c.nextra; ) {
+            if (!is_secondary_disk(disk_index(c.extra[i].disk))) extra_clear_disk(c.extra[i].disk);
+            else i++;
+        }
         break;
     case R_ROOT:
         pick_part(_("The root partition (formatted ext4)"), c.root, sizeof c.root, 0);
+        for (int i = 0; i < c.nextra; ) {
+            if (!is_secondary_disk(disk_index(c.extra[i].disk))) extra_clear_disk(c.extra[i].disk);
+            else i++;
+        }
         break;
     case R_SWAP_PART:
         pick_part(_("The swap partition (formatted)"), c.swap, sizeof c.swap, 1);
+        for (int i = 0; i < c.nextra; ) {
+            if (!is_secondary_disk(disk_index(c.extra[i].disk))) extra_clear_disk(c.extra[i].disk);
+            else i++;
+        }
+        break;
+    case R_ARR_NAME:
+        copy(text, sizeof text, c.array_name);
+        if (prompt(_("Btrfs array name:"), text, sizeof text, 0)) {
+            if (!valid_volume_name(text)) {
+                tell(1, "%s", _("Volume name: lowercase letters, digits, ., _ or - (start with letter or digit)."));
+            } else if (volume_name_taken(text, NULL)) {
+                tell(1, _("Volume name %s is already used."), text);
+            } else {
+                copy(c.array_name, sizeof c.array_name, text);
+                tell(0, "%s", "");
+            }
+        }
+        break;
+    case R_ARR_RAID:
+        if (nstorage_raids) c.array_raid = (c.array_raid + nstorage_raids + dir) % nstorage_raids;
+        break;
+    case R_ARR_ROLE:
+        if (nstorage_roles) c.array_role = (c.array_role + nstorage_roles + dir) % nstorage_roles;
+        if (strcmp(role_name(c.array_role), "data") == 0) c.array_compute_storage = 0;
+        break;
+    case R_ARR_ENC:
+        c.array_encrypt = (c.array_encrypt + 3 + dir) % 3;
+        break;
+    case R_ARR_COMPUTE:
+        if (strcmp(role_name(c.array_role), "data") != 0) {
+            c.array_compute_storage = !c.array_compute_storage;
+            if (c.array_compute_storage) clear_other_compute_storage(-1, 1);
+        }
+        break;
+    case R_WINMAINT_DISK:
+        cycle_winmaint_disk(dir);
+        break;
+    case R_WINMAINT_GIB:
+        change_winmaint_gib(key, dir);
         break;
     case R_RESCAN:
         reread();
@@ -2575,8 +3386,11 @@ static void act(int id, int key)
             c.module_on[id - R_MODULE] ^= 1;
             c.modules_touched = 1;
             follow_modules();
+        } else if (id >= R_EXTRA_DISK && id < R_EXTRA_DISK + ndisks) {
+            configure_extra_disk(id - R_EXTRA_DISK);
         } else if (id >= R_DISK && id < R_DISK + ndisks) {
             copy(c.disk, sizeof c.disk, disks[id - R_DISK].path);
+            extra_clear_disk(c.disk);
         }
     }
 }
