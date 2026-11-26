@@ -1,8 +1,6 @@
 --- a/PKGBUILD
 +++ b/PKGBUILD
-@@ -22,19 +22,13 @@
-   systemd-libs
- )
+@@ -24,15 +24,9 @@
  makedepends=(
 -  cairo
    check
@@ -18,8 +16,6 @@
 -  wayland
 -  wayland-protocols
  )
- checkdepends=(python-pytest)
- source=(
 @@ -49,6 +43,7 @@
    local meson_options=(
      # upstream recommends not building docs

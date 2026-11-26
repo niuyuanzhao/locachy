@@ -1,6 +1,6 @@
 --- a/mkarchiso
 +++ b/mkarchiso
-@@ -901,6 +901,10 @@
+@@ -915,6 +915,10 @@
 
      # Copy systemd-boot configuration files
      cp -r --remove-destination -- "${work_dir}/loader" "${isofs_dir}/"
@@ -11,11 +11,11 @@
 
      # Copy EFI binaries and related files
      _make_common_bootmode_uefi.systemd-boot_copy_files "${uefi_arch[$arch]}"
-@@ -930,6 +934,7 @@
+@@ -944,6 +948,7 @@
          efiboot_rootdir_files+=("${isofs_dir}/shell"*'.efi')
      fi
      mcopy -s -i "${efibootimg}" "${efiboot_rootdir_files[@]}" '::/'
 +    mattrib -i "${efibootimg}" +r '::/loader/random-seed'
-     if [[ -e "${isofs_dir}/boot/memtest86+/memtest.efi" ]]; then
+     if compgen -G "${isofs_dir}/boot/memtest86+/memtest"*'.efi' >/dev/null; then
          mmd -i "${efibootimg}" '::/boot' '::/boot/memtest86+'
          mcopy -i "${efibootimg}" \

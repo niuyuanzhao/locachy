@@ -142,7 +142,8 @@ pkgname = libinput-tools
         self.urls.append(url)
         self.assertIn("archlinux%2Fpackaging%2Fpackages%2Flibinput", url)
         if "/repository/tags/" in url:
-            return json.dumps({"name": "1.32.0-1", "commit": {"id": "a" * 40}}).encode()
+            tag = urllib.parse.unquote(url.split("/repository/tags/", 1)[1])
+            return json.dumps({"name": tag, "commit": {"id": "a" * 40}}).encode()
         if "/repository/tree?" in url:
             return json.dumps([{"path": n, "type": "blob", "mode": "100644"} for n in self.remote]).encode()
         encoded = url.split("/repository/files/", 1)[1].split("/raw?", 1)[0]
@@ -249,6 +250,28 @@ package_libinput-tools
         patch = (path / "cli.patch").read_bytes()
         self.assertIn(hashlib.sha256(patch).hexdigest(), (path / "PKGBUILD").read_text())
         self.assertEqual(list((path / "pkg").iterdir()), [path / "pkg/libinput-tools"])
+
+    def test_multiline_checkdepends_upstream_layout_applies_cleanly(self):
+        # Arch 1.32.0-2 switched depends from lua54 to lua and expanded
+        # checkdepends into a multiline array with valgrind.
+        self.remote["PKGBUILD"] = (
+            RECIPE.replace("pkgrel=1", "pkgrel=2")
+                  .replace("  lua54\n", "  lua\n")
+                  .replace("checkdepends=(python-pytest)\n",
+                           "checkdepends=(\n  python-pytest\n  valgrind\n)\n")
+        ).encode()
+        self.remote[".SRCINFO"] = self.info().replace(b"\tpkgrel = 1\n", b"\tpkgrel = 2\n")
+        lock = u.prepare_candidate("libinput-tools", self.baseline, "extra", "1.32.0-2",
+                                   self.state, stable_version="1.32.0-2", fetch=self.fetch)
+        result = self.source(lock.parent / "recipe", '''
+startdir=$PWD
+source ./PKGBUILD
+[[ $epoch == 1 && $pkgver == 1.32.0 && $pkgrel == 2 ]]
+[[ ${depends[*]} == 'glibc libevdev libgcc libinput python python-libevdev python-pyudev python-yaml systemd-libs' ]]
+[[ ${makedepends[*]} == 'check git meson python python-libevdev python-pyudev python-yaml' ]]
+[[ ${checkdepends[*]} == 'python-pytest valgrind' ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_changed_patch_anchor_cannot_build_untrimmed_tools(self):
         self.remote["PKGBUILD"] = RECIPE.replace("-D documentation=false", "-D documentation=true").encode()
