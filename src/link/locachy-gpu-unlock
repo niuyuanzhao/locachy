@@ -399,7 +399,7 @@ def run_domain_cmd(cmd, **kwargs):
 
 
 def resolve_build_user():
-    for candidate in (os.environ.get("LOCACHY_BUILD_USER", ""), "locachy-build", "builder", "nobody"):
+    for candidate in (os.environ.get("LOCACHY_BUILD_USER", ""), "locachy-builder", "builder", "nobody"):
         if not candidate:
             continue
         try:
@@ -493,20 +493,24 @@ def cmd_install(args):
 
         if os.geteuid() == 0:
             for root_d, dirs, files in os.walk(stage):
-                os.chown(root_d, uid, gid)
+                os.lchown(root_d, uid, gid)
                 for n in dirs:
-                    os.chown(os.path.join(root_d, n), uid, gid)
+                    os.lchown(os.path.join(root_d, n), uid, gid)
                 for n in files:
-                    os.chown(os.path.join(root_d, n), uid, gid)
-            # Run makepkg as the isolated build user inside locachy-net so upstream's
-            # official download.nvidia.com URLs and SHA-256 verification execute cleanly.
+                    os.lchown(os.path.join(root_d, n), uid, gid)
+            # Run makepkg as the isolated build user inside locachy-net using setpriv
+            # (never PAM su, which rejects system/expired accounts such as nobody) so
+            # upstream's official download.nvidia.com URLs and SHA-256 checks run cleanly.
             home_dir = stage / "home"
             home_dir.mkdir(exist_ok=True)
             os.chown(home_dir, uid, gid)
             run_cmd([
-                *net, "su", "-s", "/bin/sh", build_user, "-c",
-                'HOME="$1"; export HOME; cd "$2" && exec makepkg -f --noconfirm',
-                "sh", str(home_dir), str(build_dir),
+                *net, "setpriv",
+                f"--reuid={uid}", f"--regid={gid}", "--clear-groups",
+                "--", "env",
+                f"HOME={home_dir}", f"USER={build_user}", f"LOGNAME={build_user}",
+                "/bin/sh", "-c", 'cd "$1" && exec makepkg -f --noconfirm',
+                "sh", str(build_dir),
             ])
         else:
             run_cmd([*net, "makepkg", "-f", "--noconfirm"], cwd=str(build_dir))

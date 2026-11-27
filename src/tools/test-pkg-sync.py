@@ -435,6 +435,49 @@ class VulkanDriver(unittest.TestCase):
                         self.assertTrue(pkg.install_planned_missing([("host", "missing", "intel-media-driver", "", "hardware video driver for this GPU")], {}))
                     self.assertEqual(calls, ["pacman -S --needed --noconfirm --asdeps intel-media-driver"])
 
+    def test_vaapi_driver_in_keep_not_pruned_as_orphan(self):
+        installed = {
+            "ffmpeg": ["libva"],
+            "libva": [],
+            "libva-nvidia-driver": ["libva"],
+            "stale-orphan": [],
+        }
+        pruned = []
+        def fake_pacman(cmd):
+            args = shlex.split(cmd)
+            if "-Rns" in args:
+                for p in list(installed):
+                    if p in args:
+                        pruned.append(p)
+                        installed.pop(p, None)
+            return True
+        def fake_check_output(cmd, **kwargs):
+            if cmd == ["pacman", "-Qtdq"]:
+                return "\n".join(p for p in ("libva-nvidia-driver", "stale-orphan") if p in installed) + "\n"
+            return ""
+        with mock.patch.object(pkg, "load_manifest", lambda: ["ffmpeg"]), \
+             mock.patch.object(pkg, "load_installed_db", lambda: (dict(installed), {n: [n] for n in installed}, {"ffmpeg"})), \
+             mock.patch.object(pkg, "gpu_vaapi_drivers", lambda: ["libva-nvidia-driver"]), \
+             mock.patch.object(pkg, "needed_vaapi_drivers", lambda r, a, i=None: []), \
+             mock.patch.object(pkg, "baseline_recipes", lambda: {}), \
+             mock.patch.object(pkg, "tracked_recipes", lambda b: {}), \
+             mock.patch.object(pkg, "local_recipes", lambda build=False: {}), \
+             mock.patch.object(pkg, "dirty_tracked", lambda t: []), \
+             mock.patch.object(pkg, "run_pacman", fake_pacman), \
+             mock.patch.object(pkg.subprocess, "check_output", fake_check_output):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = pkg.cmd_sync(install=True)
+            self.assertEqual(rc, 0)
+            self.assertIn("libva-nvidia-driver", installed)
+            self.assertNotIn("libva-nvidia-driver", pruned)
+            self.assertIn("stale-orphan", pruned)
+            sbuf = io.StringIO()
+            with contextlib.redirect_stdout(sbuf), \
+                 mock.patch.object(pkg, "local_details", lambda db: {k: ("1", 0) for k in installed}):
+                self.assertEqual(pkg.cmd_status(machine=True), 0)
+            self.assertNotIn("orphan\tlibva-nvidia-driver", sbuf.getvalue())
+
     def needed(self, satisfied, repo_depends, aur_depends, repo=("repo-program",), aur=("aur-program",)):
         def run(cmd, **kwargs):
             if cmd[:2] == ["pacman", "-T"]:

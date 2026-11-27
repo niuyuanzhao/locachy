@@ -235,7 +235,54 @@ assert "base" in mf2 and "linux-cachyos" in mf2
 calls = call_log.read_text()
 assert "locachy-pkg kernel headers on" in calls
 assert "locachy-boot " in calls
-print("PASS locachy-gpu-unlock install, overlay, drop-ins, manifest, set, and remove")
+
+# Verify root privilege drop prefers locachy-builder over nobody and uses setpriv (never PAM su).
+from unittest import mock as _mock
+import types as _types
+_USERS = {"locachy-builder": (968, 968), "nobody": (65534, 65534)}
+def _fake_pwnam(name):
+    if name not in _USERS:
+        raise KeyError(name)
+    uid, gid = _USERS[name]
+    return _types.SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=gid)
+with _mock.patch.dict(os.environ, {"LOCACHY_BUILD_USER": ""}), \
+     _mock.patch.object(unlock.pwd, "getpwnam", _fake_pwnam):
+    assert unlock.resolve_build_user() == ("locachy-builder", 968, 968)
+
+root_cmds = []
+def _fake_run_cmd(cmd, **kwargs):
+    root_cmds.append(list(cmd))
+    if cmd[0] == "git" or (len(cmd) > 4 and cmd[4] == "git"):
+        dest = Path(cmd[-1])
+        (dest / "kernel/gpu_unlock").mkdir(parents=True, exist_ok=True)
+        (dest / "kernel/gpu_unlock/recipes.c").write_text("GA103(0x2414),\n", encoding="utf-8")
+        (dest / "packaging/arch").mkdir(parents=True, exist_ok=True)
+        (dest / "packaging/arch/PKGBUILD").write_text("pkgname=(gpu-unlock-dkms gpu-unlock-firmware)\n", encoding="utf-8")
+    elif any("makepkg" in str(a) for a in cmd):
+        bdir = Path(cmd[-1])
+        (bdir / "gpu-unlock-dkms-2.0.0-1-x86_64.pkg.tar.zst").write_text("", encoding="utf-8")
+        (bdir / "gpu-unlock-firmware-2.0.0-1-x86_64.pkg.tar.zst").write_text("", encoding="utf-8")
+    return _types.SimpleNamespace(returncode=0)
+
+with _mock.patch.dict(os.environ, uenv, clear=False), \
+     _mock.patch.object(unlock.os, "geteuid", lambda: 0), \
+     _mock.patch.object(unlock.os, "chown", lambda *a, **k: None), \
+     _mock.patch.object(unlock.os, "lchown", lambda *a, **k: None), \
+     _mock.patch.object(unlock, "resolve_build_user", lambda: ("locachy-builder", 968, 968)), \
+     _mock.patch.object(unlock, "ensure_build_deps", lambda: None), \
+     _mock.patch.object(unlock, "netns_prefix", lambda: ["ip", "netns", "exec", "locachy-net"]), \
+     _mock.patch.object(unlock, "run_cmd", _fake_run_cmd), \
+     _mock.patch.object(unlock, "run_boot_rebuild", lambda: None):
+    rc = unlock.cmd_install(_types.SimpleNamespace(repo=None, branch=None, target="all"))
+    assert rc == 0
+setpriv_cmds = [c for c in root_cmds if "setpriv" in c]
+assert len(setpriv_cmds) == 1, f"expected one setpriv makepkg call, got: {root_cmds}"
+assert setpriv_cmds[0][:8] == [
+    "ip", "netns", "exec", "locachy-net",
+    "setpriv", "--reuid=968", "--regid=968", "--clear-groups",
+], f"unexpected setpriv argv: {setpriv_cmds[0]}"
+assert not any("su" in c for c in root_cmds), f"PAM su must never be invoked: {root_cmds}"
+print("PASS locachy-gpu-unlock install, overlay, drop-ins, manifest, set, remove, and setpriv build drop")
 
 # 4. locachy-gpu-power tests (hp-omen-17-ck1 layering, modes, AC/auto, nvidia-powerd, remove)
 proot = out / "power-root"

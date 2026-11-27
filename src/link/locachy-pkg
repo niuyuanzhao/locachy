@@ -248,11 +248,12 @@ def cmd_status(machine=False):
     missing_leaves = sorted(set(leaves) - installed_all)
     unmanaged = sorted(installed_all - keep)
 
-    # Orphaned dependencies: packages installed as dependency that have no dependent
+    # Orphaned dependencies: packages installed as dependency that have no dependent,
+    # excluding packages intentionally retained in keep (e.g. hardware VA-API drivers).
     orphans = []
     try:
         out = subprocess.check_output(["pacman", "-Qtdq"], text=True, stderr=subprocess.DEVNULL)
-        orphans = sorted([l.strip() for l in out.splitlines() if l.strip()])
+        orphans = sorted([l.strip() for l in out.splitlines() if l.strip() and l.strip() not in keep])
     except Exception:
         pass
 
@@ -627,12 +628,12 @@ def cmd_sync(first_install=False, install=True):
         if not run_pacman(f"pacman -Rns --noconfirm {' '.join(unmanaged)}"):
             return 1
 
-    # 5. Prune any lingering orphaned dependencies
+    # 5. Prune any lingering orphaned dependencies outside the keep set
     print("===> [4/4] Pruning orphaned dependencies...")
     while True:
         try:
             out = subprocess.check_output(["pacman", "-Qtdq"], text=True, stderr=subprocess.DEVNULL)
-            orphans = [l.strip() for l in out.splitlines() if l.strip()]
+            orphans = [l.strip() for l in out.splitlines() if l.strip() and l.strip() not in keep]
         except Exception:
             orphans = []
         if not orphans:
