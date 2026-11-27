@@ -319,7 +319,7 @@ assert not (proot / "etc/modprobe.d/50-locachy-hp-omen-gpu.conf").exists()
 assert not (proot / "etc/modules-load.d/50-locachy-hp-omen-gpu.conf").exists()
 print("PASS locachy-gpu-power machine layering, modes, auto/AC mapping, nvidia-powerd, and remove")
 
-# 4b. End-to-end mocked locachy-nvidia (open -> 580xx -> off, GSP drop-in, gpu-unlock sync, multilib guard)
+# 4b. End-to-end mocked locachy-nvidia (PCI family detection, auto/open/580xx/off, GSP drop-in, gpu-unlock sync, multilib guard)
 nvroot = out / "nv-root"
 (nvroot / "etc/locachy").mkdir(parents=True)
 (nvroot / "etc/locachy/packages").write_text("base\nlinux-cachyos-bore\n", encoding="utf-8")
@@ -331,9 +331,29 @@ nv_db.mkdir(parents=True)
 nv_bin = out / "nv-bin"
 nv_bin.mkdir(parents=True)
 nv_log = out / "nv-calls.log"
+nv_pci_ids = out / "mock-pci.ids"
+nv_pci_ids.write_text(
+    "# Mock pci.ids fixture for Arch Wiki NVIDIA GPU family detection\n"
+    "10de  NVIDIA Corporation\n"
+    "\t2b85  GB202 [GeForce RTX 5090]\n"
+    "\t2684  AD102 [GeForce RTX 4090]\n"
+    "\t2460  GA103M [GeForce RTX 3080 Ti Laptop GPU]\n"
+    "\t2204  GA102 [GeForce RTX 3090]\n"
+    "\t1f08  TU106 [GeForce RTX 2060 Rev. A]\n"
+    "\t1d81  GV100 [TITAN V]\n"
+    "\t1b06  GP102 [GeForce GTX 1080 Ti]\n"
+    "\t13c2  GM204 [GeForce GTX 970]\n"
+    "\t1004  GK110 [GeForce GTX 780]\n"
+    "\t1080  GF110 [GeForce GTX 580]\n"
+    "\t0611  G92 [GeForce 8800 GT]\n"
+    "\t0290  G71 [GeForce 7900 GTX]\n"
+    "8086  Intel Corporation\n"
+    "\t4688  AlderLake-S GT1\n",
+    encoding="utf-8",
+)
 nv_ver_map = {
-    "nvidia-open-dkms": "595.45.04-1",
-    "nvidia-utils": "595.45.04-1",
+    "nvidia-open-dkms": "620.73.04-1",
+    "nvidia-utils": "620.73.04-1",
     "nvidia-580xx-dkms": "580.126.25-1",
     "nvidia-580xx-utils": "580.126.25-1",
     "dkms": "3.1.5-1",
@@ -457,33 +477,65 @@ nvenv.update({
     "LOCACHY_NVIDIA_ROOT": str(nvroot),
     "LOCACHY_NVIDIA_SYS_PCI": str(sys_pci),
     "LOCACHY_NVIDIA_SYS_MODULE": str(out / "no-nv-mod"),
+    "LOCACHY_NVIDIA_PCI_IDS": str(nv_pci_ids),
+    "LOCACHY_NVIDIA_DMI_CHASSIS": str(out / "no-dmi-chassis"),
+    "LOCACHY_NVIDIA_NO_LSPCI": "1",
     "LOCACHY_NVIDIA_PKG": str(nv_bin / "locachy-pkg"),
     "LOCACHY_NVIDIA_BOOT": str(nv_bin / "locachy-boot"),
     "LOCACHY_NVIDIA_POWER": str(out / "no-nv-power"),
     "LOCACHY_NVIDIA_NO_NETNS": "1",
 })
 
-def run_nv(*args, expect_ok=True):
+def run_nv(*args, expect_ok=True, extra_env=None):
+    env = dict(nvenv)
+    if extra_env:
+        env.update(extra_env)
     r = subprocess.run([sys.executable, "-B", str(src / "link/locachy-nvidia"), *args],
-                       env=nvenv, capture_output=True, text=True)
+                       env=env, capture_output=True, text=True)
     if expect_ok:
-        assert r.returncode == 0, f"locachy-nvidia {args} failed: {r.stderr}\\n{r.stdout}"
+        assert r.returncode == 0, f"locachy-nvidia {args} failed: {r.stderr}\n{r.stdout}"
     else:
         assert r.returncode != 0, f"locachy-nvidia {args} unexpectedly succeeded"
     return r
 
+def make_mock_pci(name, dev_ids):
+    d = out / f"pci-{name}"
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    for idx, dev_id in enumerate(dev_ids):
+        slot = d / f"0000:0{idx + 1}:00.0"
+        slot.mkdir(parents=True)
+        (slot / "vendor").write_text("0x10de\n")
+        (slot / "device").write_text(f"{dev_id}\n")
+        (slot / "class").write_text("0x030000\n")
+    return d
+
+def set_unlock(value):
+    rc_file = nvroot / "etc/locachy/rc.conf"
+    kept = [l for l in rc_file.read_text(encoding="utf-8").splitlines() if not l.startswith("gpu_unlock_targets=")]
+    rc_file.write_text("\n".join(kept + [f'gpu_unlock_targets="{value}"']) + "\n", encoding="utf-8")
+
 nst0 = json.loads(run_nv("status", "--json").stdout)
-assert nst0["branches"] == ["open", "580xx", "off"]
+assert nst0["branches"] == ["auto", "open", "580xx", "off"]
 assert nst0["installed_branch"] == "off" and nst0["configured_branch"] == "off"
 assert len(nst0["nvidia_gpus"]) == 1 and nst0["nvidia_gpus"][0]["device"] == "0x2460"
+assert nst0["gpu_family"] == "ampere" and "RTX 3080 Ti Laptop" in nst0["gpu_name"]
+assert nst0["ampere_laptop_gsp_note"] is True
+assert nst0["supported_branches"] == ["open", "580xx"]
+# Zagitta/gpu-unlock #135: GSP does not block gpu-unlock; open stays recommended even when unlock is active.
+assert nst0["recommended_branch"] == "open"
+assert "NVreg_GpuInitOnProbe" in nst0["gpu_unlock_advisory"]
 
-# Install open DKMS (new branch first)
-run_nv("set", "open")
+# Install open DKMS via `set auto` on Ampere laptop with gpu-unlock active
+run_nv("set", "auto")
 nst_open = json.loads(run_nv("status", "--json").stdout)
-assert nst_open["installed_branch"] == "open" and nst_open["configured_branch"] == "open"
-assert nst_open["dkms_version"] == "595.45.04-1" and nst_open["kernel_headers_installed"] is True
+assert nst_open["installed_branch"] == "open" and nst_open["configured_branch"] == "auto"
+assert 'nvidia_driver="auto"' in (nvroot / "etc/locachy/rc.conf").read_text()
+assert nst_open["dkms_version"] == "620.73.04-1" and nst_open["kernel_headers_installed"] is True
 assert nst_open["gsp_disabled_configured"] is False
-assert "gpu-unlock" in nst_open["gpu_unlock_advisory"]
+assert "NVreg_GpuInitOnProbe" in nst_open["gpu_unlock_advisory"]
+assert any("Ampere laptop" in a for a in nst_open["advisories"])
 mp_open = (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").read_text()
 assert "blacklist nouveau" in mp_open and "options nvidia-drm modeset=1" in mp_open
 assert "NVreg_EnableGpuFirmware=0" not in mp_open
@@ -491,6 +543,10 @@ nv_log_txt = nv_log.read_text()
 assert "locachy-pkg kernel headers on" in nv_log_txt
 assert "locachy-pkg install dkms" in nv_log_txt
 assert "locachy-pkg install nvidia-open-dkms nvidia-utils" in nv_log_txt
+
+# Explicit `set open` still records nvidia_driver="open"
+run_nv("set", "open")
+assert json.loads(run_nv("status", "--json").stdout)["configured_branch"] == "open"
 
 # Multilib disabled guard refuses 580xx cleanly before touching installed open driver
 (nvroot / "etc/locachy/rc.conf").write_text(
@@ -519,6 +575,8 @@ assert "pacman -S --needed --noconfirm --ask 4 nvidia-580xx-dkms nvidia-580xx-ut
 # TSV status output matches settings.c parser contract
 tsv_580 = run_nv("status", "--tsv").stdout
 assert "installed\t580xx\n" in tsv_580
+assert "recommended\topen\n" in tsv_580
+assert "gpu_family\tampere\n" in tsv_580
 assert "dkms_version\t580.126.25-1\n" in tsv_580
 assert "gsp_disabled\t1\n" in tsv_580
 
@@ -534,13 +592,114 @@ assert "options nvidia NVreg_EnableGpuFirmware=0" in (nvroot / "etc/modprobe.d/4
 run_nv("sync-dropin")
 assert "NVreg_EnableGpuFirmware" not in (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").read_text()
 
+# With gpu-unlock off, Ampere laptop still recommends open, clears gpu-unlock advisory, keeps Ampere laptop note
+nst_amp_no_unlock = json.loads(run_nv("status", "--json").stdout)
+assert nst_amp_no_unlock["recommended_branch"] == "open"
+assert nst_amp_no_unlock["ampere_laptop_gsp_note"] is True
+assert nst_amp_no_unlock["gpu_unlock_advisory"] == ""
+run_nv("set", "auto")
+nst_auto_amp = json.loads(run_nv("status", "--json").stdout)
+assert nst_auto_amp["configured_branch"] == "auto"
+assert nst_auto_amp["installed_branch"] == "open"
+assert 'nvidia_driver="auto"' in (nvroot / "etc/locachy/rc.conf").read_text()
+
+# Ampere laptop with gpu-unlock active: auto still recommends open (GSP-RM does not block unlock)
+set_unlock("all")
+st_unlock_amp = json.loads(run_nv("status", "--json").stdout)
+assert st_unlock_amp["gpu_unlock_active"] is True and st_unlock_amp["recommended_branch"] == "open"
+assert st_unlock_amp["gpu_unlock_advisory"].startswith("gpu-unlock is active with nvidia-open-dkms")
+assert any("Ampere laptop" in a for a in st_unlock_amp["advisories"])
+run_nv("set", "auto")
+st_unlock_auto = json.loads(run_nv("status", "--json").stdout)
+assert st_unlock_auto["configured_branch"] == "auto" and st_unlock_auto["installed_branch"] == "open"
+assert st_unlock_auto["gsp_disabled_configured"] is False
+
 # Remove driver cleanly
 run_nv("set", "off")
 nst_off = json.loads(run_nv("status", "--json").stdout)
 assert nst_off["installed_branch"] == "off" and nst_off["configured_branch"] == "off"
 assert not (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").exists()
 assert "nvidia-580xx-dkms" not in (nvroot / "etc/locachy/packages").read_text()
-print("PASS locachy-nvidia open/580xx/off DKMS flow, atomic switch, multilib guard, GSP & sync-dropin")
+
+# Arch Wiki family classification & branch validation matrix across PCI ID fixtures (gpu-unlock active)
+set_unlock("all")
+# 1) Blackwell (GB202): recommends open, refuses 580xx without --force, `set auto` installs open
+pci_bw = make_mock_pci("blackwell", ["0x2b85"])
+st_bw = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_bw)}).stdout)
+assert st_bw["gpu_family"] == "blackwell"
+assert st_bw["recommended_branch"] == "open" and st_bw["supported_branches"] == ["open"]
+r_bw_580 = run_nv("set", "580xx", expect_ok=False, extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_bw)})
+assert "blackwell" in r_bw_580.stderr.lower() and "--force" in r_bw_580.stderr
+run_nv("set", "auto", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_bw)})
+st_bw_after = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_bw)}).stdout)
+assert st_bw_after["configured_branch"] == "auto" and st_bw_after["installed_branch"] == "open"
+run_nv("set", "off", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_bw)})
+
+# 2) Pascal (GP102), Maxwell (GM204), Volta (GV100): recommend 580xx, refuse open without --force
+for fam_name, dev_id in (("pascal", "0x1b06"), ("maxwell", "0x13c2"), ("volta", "0x1d81")):
+    pci_f = make_mock_pci(fam_name, [dev_id])
+    st_f = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_f)}).stdout)
+    assert st_f["gpu_family"] == fam_name, f"expected {fam_name}, got {st_f}"
+    assert st_f["recommended_branch"] == "580xx" and st_f["supported_branches"] == ["580xx"]
+    r_open = run_nv("set", "open", expect_ok=False, extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_f)})
+    assert fam_name in r_open.stderr.lower() and "--force" in r_open.stderr
+
+# `set auto` on Pascal installs 580xx and persists nvidia_driver="auto"; `--force` overrides open refusal
+pci_pascal = make_mock_pci("pascal-auto", ["0x1b06"])
+run_nv("set", "auto", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_pascal)})
+st_pa = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_pascal)}).stdout)
+assert st_pa["configured_branch"] == "auto" and st_pa["installed_branch"] == "580xx"
+assert 'nvidia_driver="auto"' in (nvroot / "etc/locachy/rc.conf").read_text()
+run_nv("set", "open", "--force", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_pascal)})
+assert json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_pascal)}).stdout)["installed_branch"] == "open"
+run_nv("set", "off", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_pascal)})
+
+# 3) Kepler (GK110) / Fermi / Tesla / Curie: unsupported -> recommended off, `set auto` refuses cleanly
+for leg_name, dev_id in (("kepler", "0x1004"), ("fermi", "0x1080"), ("tesla", "0x0611"), ("curie", "0x0290")):
+    pci_l = make_mock_pci(leg_name, [dev_id])
+    st_l = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_l)}).stdout)
+    assert st_l["gpu_family"] == leg_name and st_l["recommended_branch"] == "off"
+    assert st_l["supported_branches"] == []
+    r_auto_l = run_nv("set", "auto", expect_ok=False, extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_l)})
+    assert "unsupported" in r_auto_l.stderr.lower()
+
+# 4) Ada / Turing: both supported, default open
+for mod_name, dev_id in (("ada", "0x2684"), ("turing", "0x1f08")):
+    pci_m = make_mock_pci(mod_name, [dev_id])
+    st_m = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_m)}).stdout)
+    assert st_m["gpu_family"] == mod_name
+    assert st_m["recommended_branch"] == "open" and st_m["supported_branches"] == ["open", "580xx"]
+    assert "gpu-unlock is active with nvidia-open-dkms" in st_m["gpu_unlock_advisory"]
+
+# 4b) Ampere desktop (GA102) recommends open with no laptop note; same GPU on a laptop DMI chassis gets the GSP fallback note
+dmi_laptop = out / "dmi-laptop-chassis"
+dmi_laptop.write_text("10\n", encoding="utf-8")
+pci_ga = make_mock_pci("ampere-desktop", ["0x2204"])
+st_ga_desk = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_ga)}).stdout)
+assert st_ga_desk["gpu_family"] == "ampere" and st_ga_desk["recommended_branch"] == "open"
+assert st_ga_desk["ampere_laptop_gsp_note"] is False
+assert not any("Ampere laptop" in a for a in st_ga_desk["advisories"])
+st_ga_lap = json.loads(run_nv("status", "--json", extra_env={
+    "LOCACHY_NVIDIA_SYS_PCI": str(pci_ga), "LOCACHY_NVIDIA_DMI_CHASSIS": str(dmi_laptop)}).stdout)
+assert st_ga_lap["recommended_branch"] == "open" and st_ga_lap["ampere_laptop_gsp_note"] is True
+assert any("Ampere laptop" in a for a in st_ga_lap["advisories"])
+
+# 5) Unknown future PCI ID: defaults to open with both supported (gpu-unlock active)
+pci_unk = make_mock_pci("unknown", ["0x9999"])
+st_unk = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_unk)}).stdout)
+assert st_unk["gpu_family"] == "unknown"
+assert st_unk["recommended_branch"] == "open" and st_unk["supported_branches"] == ["open", "580xx"]
+assert "NVreg_GpuInitOnProbe" in st_unk["gpu_unlock_advisory"]
+
+# 6) Multi-GPU conflict (Blackwell + Pascal): reports conflict and refuses `set auto`
+pci_mix = make_mock_pci("conflict", ["0x2b85", "0x1b06"])
+st_mix = json.loads(run_nv("status", "--json", extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_mix)}).stdout)
+assert st_mix["recommended_branch"] == "off" and st_mix["supported_branches"] == []
+assert "conflict" in st_mix["gpu_conflict"].lower()
+r_mix = run_nv("set", "auto", expect_ok=False, extra_env={"LOCACHY_NVIDIA_SYS_PCI": str(pci_mix)})
+assert "conflict" in r_mix.stderr.lower()
+
+print("PASS locachy-nvidia PCI family detection, auto/open/580xx/off DKMS flow, atomic switch, multilib guard, GSP & sync-dropin")
 PY
 
 # 5. Compile hp_omen_gpu.c against real Linux kernel headers when available (no install, no load).

@@ -14,27 +14,40 @@ LOCachy 将独立 NVIDIA GPU 的底层硬件能力直接并入系统的原生分
 
 ## 0. NVIDIA DKMS 驱动管理（`locachy-nvidia`）
 
-LOCachy 统一通过 **DKMS** 管理 NVIDIA 驱动（不使用绑定特定内核分支的预编译模块包），按从新到旧排序，贴合 Arch Wiki 建议并与 LOCachy 的内核切换（`locachy-pkg kernel select`）协同：
+LOCachy 统一通过 **DKMS** 管理 NVIDIA 驱动（不使用绑定特定内核分支的预编译模块包），按 `auto` → `open` → `580xx` → `off` 排序，贴合 Arch Wiki 建议并与 LOCachy 的内核切换（`locachy-pkg kernel select`）协同：
 
-- **`open`**（新版，Turing RTX 20+ / Ampere / Ada / Blackwell 默认）：`nvidia-open-dkms` + `nvidia-utils` + `dkms` + 当前内核头文件。开源内核模块强制使用 GSP-RM 固件。
-- **`580xx`**（旧版闭源 / 可关 GSP：Maxwell / Pascal / Volta，或需要通过 `NVreg_EnableGpuFirmware=0` 关闭 GSP 固件的 Turing / Ampere / Ada 笔记本，例如配合 `gpu-unlock` 时避免 GSP-RM 覆盖频率设定）：`nvidia-580xx-dkms` + `nvidia-580xx-utils` + `dkms` + 当前内核头文件。注意 `cachyos/nvidia-580xx-utils` 依赖 `[multilib]` 中的 `lib32-nvidia-580xx-utils`，`locachy-nvidia` 在改动已安装驱动前会先检查 `[multilib]` 是否启用。
+- **`auto`**：读取 PCI sysfs（`/sys/bus/pci/devices/*/vendor`、`device`、`class`）并从 `/usr/share/hwdata/pci.ids` 解析 NVIDIA（`10de`）设备描述（不可用时回退到 `lspci -nn -d 10de:`），按 Arch Wiki 的 NVIDIA 架构表识别 GPU 代际，安装推荐分支对应的 DKMS 与用户态包（若推荐分支不在已启用软件源中，会改用下一个受支持分支，并打印回退提示），同时在 `rc.conf` 中记录 `nvidia_driver="auto"`。
+- **`open`**（新版，Turing RTX 20+ / Ampere / Ada / Blackwell 及更新架构默认）：`nvidia-open-dkms` + `nvidia-utils` + `dkms` + 当前内核头文件。开源内核模块强制使用 GSP-RM 固件。
+- **`580xx`**（旧版闭源 / 可关 GSP：Maxwell / Pascal / Volta，作为 Turing / Ampere / Ada 笔记本的手动回退分支（GSP-RM 出现故障时，通过 `NVreg_EnableGpuFirmware=0` 关闭 GSP 固件）：`nvidia-580xx-dkms` + `nvidia-580xx-utils` + `dkms` + 当前内核头文件。注意 `cachyos/nvidia-580xx-utils` 依赖 `[multilib]` 中的 `lib32-nvidia-580xx-utils`，`locachy-nvidia` 在改动已安装驱动前会先检查 `[multilib]` 是否启用。
 - **`off`**：移除已安装的 NVIDIA 驱动包、清理 `/etc/locachy/packages` 条目、删除 `/etc/modprobe.d/40-locachy-nvidia.conf` 并重建 UKI。
+
+### PCI 架构自动识别与分支映射（遵循 Arch Wiki）
+
+| GPU 架构代际（`pci.ids` 中的芯片代号） | 受支持分支 | `auto` 推荐 | 说明 |
+| --- | --- | --- | --- |
+| Blackwell / Hopper（`GB*`、`GH*`）及更新 | `open` | `open` | `580xx` 不支持 Blackwell；手动执行 `set 580xx` 会被拦截（除非显式传入 `--force`）。 |
+| Ada Lovelace（`AD*`）、Ampere（`GA*`）、Turing（`TU*`） | `open`、`580xx` | `open`（台式机与笔记本相同；启用 `gpu_unlock_targets` 时同样为 `open`） | 检测到 Ampere 笔记本 GPU（`GA*M`、名称含 Mobile/Laptop 或 DMI 机箱类型为笔记本）时，会提示 Arch Wiki 的说明：部分 Ampere 笔记本上 GSP-RM 会导致完全失效；若本机受影响，请手动切换到 `580xx` 并关闭 GSP。 |
+| Volta（`GV*`）、Pascal（`GP*`）、Maxwell（`GM*`） | `580xx` | `580xx` | Turing 之前的 GPU 无 GSP；手动执行 `set open` 会被拦截（除非显式传入 `--force`）。 |
+| Kepler（`GK*`）、Fermi（`GF*`）、Tesla（`G8*`/`G9*`/`GT2*`）、Curie（`G7*`/`NV4*`） | 无 | `off`（`set auto` 会明确拒绝） | `open` 与 `580xx` 均已不再支持，请使用 `nouveau` 或 AUR 的 `470xx`/`390xx`。 |
+| 未知 NVIDIA PCI ID（尚未收录的新卡） | `open`、`580xx` | `open` | 在 `pci.ids` 收录前按新卡默认推荐 `open`。 |
+
+若机器同时存在多张 NVIDIA GPU，`locachy-nvidia` 会求各卡受支持分支的交集：全部卡都支持 `open` 与 `580xx` 时沿用单卡规则；仅有一个分支同时覆盖全部卡时推荐该分支；若出现一卡仅支持 `open`、另一卡仅支持 `580xx`（或含不受支持的旧卡）的冲突，`status` 会明确报告冲突且 `set auto` 会拒绝安装。
 
 「设置」在 **输入与输出 → NVIDIA GPU** 顶部提供两行控制：
 
-- **NVIDIA driver (DKMS)**（`nvidia_driver="open"|"580xx"|"off"`）：选择器行（`Enter` 进入 → `Left`/`Right` 切换 → 再次 `Enter` 通过 `gpu-driver-set` 应用）。
-- **NVIDIA GSP firmware**（`nvidia_gsp="auto"|"off"|"on"`）：作用于 `580xx`（通过 `gpu-driver-gsp`）。`auto` 在 `gpu_unlock_targets` 启用时自动写入 `options nvidia NVreg_EnableGpuFirmware=0`；`off` 强制关闭；`on` 强制开启。`open` 分支必须使用 GSP-RM，若同时启用 `gpu-unlock`，`locachy-nvidia status` 会给出提示。
+- **NVIDIA driver (DKMS)**（`nvidia_driver="auto"|"open"|"580xx"|"off"`）：选择器行（`Enter` 进入 → `Left`/`Right` 切换 → 再次 `Enter` 通过 `gpu-driver-set` 应用），并展示 `locachy-nvidia status --tsv` 返回的 GPU 架构与推荐分支。
+- **NVIDIA GSP firmware**（`nvidia_gsp="auto"|"off"|"on"`）：作用于 `580xx`（通过 `gpu-driver-gsp`）。`auto` 在 `gpu_unlock_targets` 启用时自动写入 `options nvidia NVreg_EnableGpuFirmware=0`；`off` 强制关闭；`on` 强制开启。`open` 分支始终使用 GSP-RM，`locachy-nvidia` 因此保持 GSP 开启；若同时启用 `gpu-unlock`，`status` 会给出提示（GSP-RM 不会阻止 `gpu-unlock`；595 分支的回归由 `NVreg_GpuInitOnProbe` 默认值为 0 引起，615 及以上分支已恢复为探测时初始化。若在受影响的 595 版本或 GSP 不稳定的机器上出现问题，可设置 `NVreg_GpuInitOnProbe=1` 或手动切换到 `580xx`，见 `Zagitta/gpu-unlock` #135）。
 
 命令行接口：
 
 ```sh
 locachy-nvidia status [--json | --tsv]
-locachy-nvidia set open|580xx|off
+locachy-nvidia set auto|open|580xx|off [--force]
 locachy-nvidia gsp auto|off|on
 locachy-nvidia sync-dropin
 ```
 
-在 `open` 与 `580xx` 之间切换时，工具会原子替换冲突包（`pacman -S --needed --noconfirm --ask 4`），更新 `/etc/locachy/packages`（`locachy-pkg` 的 Vulkan 驱动探测同时兼容 `nvidia-utils` 与 `nvidia-580xx-utils`），生成 `/etc/modprobe.d/40-locachy-nvidia.conf`（`blacklist nouveau`、`options nouveau modeset=0`、`options nvidia-drm modeset=1`、`softdep nvidia post: nvidia-uvm` 及按需写入的 `NVreg_EnableGpuFirmware`），在启用 `nvidia_powerd="1"` 时同步服务，并重建 UKI。`locachy-gpu-unlock` 在安装、开关和卸载时也会自动调用 `locachy-nvidia sync-dropin`。
+手动指定与硬件不匹配的分支（例如在 Maxwell/Pascal/Volta 上执行 `set open`，或在 Blackwell 上执行 `set 580xx`）会在改动软件包前被拦截并给出原因，只有显式传入 `--force` 时才允许覆盖。在 `open` 与 `580xx` 之间切换时，工具会原子替换冲突包（`pacman -S --needed --noconfirm --ask 4`），更新 `/etc/locachy/packages`（`locachy-pkg` 的 Vulkan 驱动探测同时兼容 `nvidia-utils` 与 `nvidia-580xx-utils`），生成 `/etc/modprobe.d/40-locachy-nvidia.conf`（`blacklist nouveau`、`options nouveau modeset=0`、`options nvidia-drm modeset=1`、`softdep nvidia post: nvidia-uvm` 及按需写入的 `NVreg_EnableGpuFirmware`），在启用 `nvidia_powerd="1"` 时同步服务，并重建 UKI。`locachy-gpu-unlock` 在安装、开关和卸载时也会自动调用 `locachy-nvidia sync-dropin`。
 
 ## 1. 驱动前 NVIDIA GPU 解锁（`locachy-gpu-unlock`）
 
@@ -59,6 +72,8 @@ locachy-gpu-unlock remove
 5. **卸载**：在「设置」对应行连续按两次 `Delete`（或运行 `locachy-gpu-unlock remove`），将清理 drop-in 配置、清除 `gpu_unlock_targets`、卸载软件包与清单条目，并重建 UKI。
 
 电源状态说明：上游 `gpu-unlock` 已挂接 S3 挂起/唤醒回调以在睡眠恢复后重新应用设置；当前尚未覆盖 S4 休眠恢复。
+
+驱动兼容性说明：上游报告（`Zagitta/gpu-unlock` #135）显示 GSP-RM 本身并不阻止解锁。595 分支的问题来自 NVIDIA 将 `NVreg_GpuInitOnProbe` 默认值改为 `0`（延迟初始化会让速度选择器重新锁定）；615 及以上分支把默认值恢复为探测时初始化的 `AUTO`。上游 #88 报告 HP RTX 3080 Ti Laptop（`GA103`，`0x2460`）可以正常工作。上游 #206 记录过一例：580 系列 open 模块下速度选择器被复位，而关闭 GSP 的闭源 580xx 仍保持锁定，因此 `580xx` 仍保留为手动回退。
 
 ## 2. 机型 GPU 功耗配置（`locachy-gpu-power`）
 

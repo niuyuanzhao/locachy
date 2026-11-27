@@ -1847,9 +1847,35 @@ static void test_adaptive_charging(void)
     assert(strstr(line, "unsupported"));
     charge_to_full_now();
     assert(strstr(notice, "unsupported") && !rc_log[0] && hups == hup_before + 3);
-    file_text("sys/class/power_supply/AC/online", "1\n");
-    file_text(end_path, "85\n");
+    /* Hardware without charge_control_end_threshold but with charge_behaviour
+     * supports both adaptive charging and manual limits with an honest note. */
     assert(fixture_unlink("/var/lib/locachy/battery/charge-status") == 0);
+    file_text("sys/class/power_supply/AC/online", "1\n");
+    assert(fixture_unlink("/sys/class/power_supply/BAT0/charge_control_start_threshold") == 0);
+    file_text("sys/class/power_supply/BAT0/charge_behaviour", "[auto] inhibit-charge\n");
+    rc_bat_full_until = 0;
+    on_rc("battery_charge_start", "75", NULL);
+    on_rc("battery_charge_end", "80", NULL);
+    power_refresh_devices();
+    assert(power_can_manage_charge() && power_thresh_count() == 2);
+    item_text(bat_adaptive_index(), line, sizeof line);
+    assert(!strstr(line, "unsupported"));
+    item_text(bat_thresh_index(), line, sizeof line);
+    assert(strstr(line, "Charge start threshold") && strstr(line, "< 75% >"));
+    item_text(bat_thresh_index() + 1, line, sizeof line);
+    assert(strstr(line, "Charge stop threshold") && strstr(line, "< 80% >"));
+    draw();
+    assert(canvas_has("Software limit: applies while running; charging resumes in sleep or off."));
+    rc_log[0] = '\0';
+    selected = bat_thresh_index() + 1;
+    adjust(+1);
+    assert(rc_bat_end == 85 && strstr(rc_log, "battery_charge_end=85;"));
+    /* Restore hardware threshold fixture for subsequent model-fetch assertions. */
+    assert(fixture_unlink("/sys/class/power_supply/BAT0/charge_behaviour") == 0);
+    file_text("sys/class/power_supply/BAT0/charge_control_start_threshold", "80\n");
+    file_text(end_path, "85\n");
+    on_rc("battery_charge_start", "80", NULL);
+    on_rc("battery_charge_end", "85", NULL);
     rc_bat_full_until = 0;
     power_refresh_devices();
 

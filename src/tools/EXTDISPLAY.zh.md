@@ -20,7 +20,7 @@
 
 在 LOCachy 的 **设置 → 系统 → 可选组件** 中启用 **扩展屏 (extdisplay)**（依赖 FFmpeg、json-c、Avahi 与 OpenSSL）。
 
-- 在 Linux 上，`extdisplay-worker` 会在进入 Landlock + seccomp 沙箱前通过预打开的 `/dev/dri/renderD*` 描述符向 `libva` 查询真实硬件 VLD 解码能力，并通过 `VA-API VPP` → 多 plane `DRM_PRIME_2` 配合非阻塞 `DRM_IOCTL_MODE_PAGE_FLIP` 零拷贝直出扫描帧（驱动拒绝翻页时记录日志并回退至 `SETCRTC`）。`hello.videoCaps` 精确声明硬件支持的档案（`h264`、具备 `VAProfileHEVCMain` VLD 时报 `hevc420`、仅当真正具备 `VAProfileHEVCMain444` VLD 时才报 `hevc444` 与旧字段 `hevc`），避免没有 4:4:4 硬解的显卡误入慢速 4:4:4 软件解码。运行在 `nouveau`、`nvidia-drm`、`simpledrm` 或无 VA-API 的虚拟机时，自动回退至沙箱 CPU 解码与 `MADV_HUGEPAGE` 只读 `memfd` 路径。
+- 在 Linux 上，`extdisplay-worker` 会在进入 Landlock + seccomp 沙箱前，通过预打开的 `/dev/dri/renderD*` 描述符向 `libva` 查询真实硬件 VLD 解码能力并初始化 `libgbm`；解码帧经 `VA-API VPP` 写入 `libgbm` 分配的扫描输出缓冲（`GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR`，以 `DRM_PRIME_2` 导入；导入被拒时回退至 VA 自管表面，该 `libgbm` 路径已在 Intel xe 上实测），并通过非阻塞 `DRM_IOCTL_MODE_PAGE_FLIP` 零拷贝直出（驱动拒绝翻页时记录日志并回退至 `SETCRTC`）。`hello.videoCaps` 精确声明硬件支持的档案（`h264`、具备 `VAProfileHEVCMain` VLD 时报 `hevc420`、仅当真正具备 `VAProfileHEVCMain444` VLD 时才报 `hevc444` 与旧字段 `hevc`），避免没有 4:4:4 硬解的显卡误入慢速 4:4:4 软件解码。运行在 `nouveau`、`nvidia-drm`、`simpledrm` 或无 VA-API 的虚拟机时，自动回退至沙箱 CPU 解码、FFmpeg `libswscale`（`SWS_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND`）、`MADV_HUGEPAGE` 只读 `memfd` 传递与双缓冲 `DRM_IOCTL_MODE_PAGE_FLIP` 扫描输出。
 - 在系统安装、组件安装及同步更新期间，`locachy-pkg` 会自动扫描 `/sys/class/drm` 与 PCI 显示设备，为本机硬件自动补全匹配的 Vulkan 与 VA-API 驱动（Intel Gen8+ 自动安装 `intel-media-driver`，Gen4–7.5 安装 `libva-intel-driver`，AMD/Nouveau 安装 `mesa`，专有 NVIDIA 安装 `libva-nvidia-driver`，并在双显卡 Optimus / MX 笔记本上按实际驱动各自匹配）。
 - 可在 **设置 → 输入与输出 → Extended display video**（`rc.conf` 的 `extdisplay_decode`：`"auto"` / `"hw"` / `"sw"`）中切换：自动选择硬件支持的最高编解码、优先硬件解码，或仅使用纯 CPU 沙箱解码。
 
@@ -41,7 +41,7 @@ Thunderbolt/USB4 网络支持线缆直连，或经过兼容的雷电／USB4 Hub�
 1. `extdisplay-broker` 将已验证的 `thunderbolt-net` 接口移入独立网络命名空间，配置 IPv6 链路本地地址，并启动 `extdisplay-advertise` 在该链路上发布携带当次会话随机 128 位 PSK 的 `_locachy-ext._tcp.local.` 服务。
 2. macOS 后台服务在雷电链路上自动发现该广播，并使用 `TLS_PSK_WITH_AES_128_GCM_SHA256`（身份与 ALPN 为 `locachy-extdisplay-v1`）自动建立连接。
 3. 接收端在已认证的 `hello` 中上报其面板物理像素尺寸（`pixelsWide × pixelsHigh`）、缩放系数、脱敏后的 `host` 与 `model` 机器标识、精确硬件解码能力（`h264`、`hevc420`、`hevc444`、`hevc`）及输入能力（在 5 项基础输入之外协商 `"touch"` 与 `"tablet"`）。
-4. 发送端根据上报面板尺寸自动推导适用于任意主流分辨率和纵横比的 5 档 HiDPI 缩放比例与对应物理尺寸提示（涵盖“更大文字 ↔ 更多空间”及 `1:1` HiDPI／原生档），并按 `(host, model, pixelsWide × pixelsHigh)` 记入 `~/Library/Application Support/LOCachy/display-modes.json` 供重连自动恢复。处于 `1:1` 档位时零缩放直出；其余缩放档位经 Metal Mitchell 双三次（`B=1/3, C=1/3`）采样至面板物理像素后编码传输。
+4. 发送端根据上报面板尺寸自动推导适用于任意主流分辨率和纵横比的 5 档 HiDPI 缩放比例与对应物理尺寸提示（涵盖“更大文字 ↔ 更多空间”及 `1:1` HiDPI／原生档），并按 `(host, model, pixelsWide × pixelsHigh)` 记入 `~/Library/Application Support/LOCachy/display-modes.json` 供重连自动恢复。处于 `1:1` 档位时零缩放直出；其余缩放档位通过 Apple `MetalPerformanceShaders`（`MPSImageLanczosScale`）采样至面板物理像素后编码传输。
 
 ## 会话行为
 

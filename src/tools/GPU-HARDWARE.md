@@ -14,27 +14,40 @@ Confirm firmware changes with a second Enter. `locachy-gpu-graphics status --jso
 
 ## 0. NVIDIA DKMS Driver Management (`locachy-nvidia`)
 
-LOCachy manages NVIDIA drivers strictly through **DKMS** (never prebuilt kernel-flavor module packages), ordered new → old to match Arch Wiki guidance and LOCachy's multi-kernel selector (`locachy-pkg kernel select`):
+LOCachy manages NVIDIA drivers strictly through **DKMS** (never prebuilt kernel-flavor module packages), ordered `auto` → `open` → `580xx` → `off` to match Arch Wiki guidance and LOCachy's multi-kernel selector (`locachy-pkg kernel select`):
 
-- **`open`** (new, default for Turing RTX 20+ / Ampere / Ada / Blackwell): `nvidia-open-dkms` + `nvidia-utils` + `dkms` + active kernel headers. Open kernel modules always run with GSP-RM firmware.
-- **`580xx`** (legacy / GSP-off fallback: Maxwell / Pascal / Volta, or Turing / Ampere / Ada laptops that need GSP firmware off via `NVreg_EnableGpuFirmware=0`, e.g. when GSP-RM conflicts with `gpu-unlock`): `nvidia-580xx-dkms` + `nvidia-580xx-utils` + `dkms` + active kernel headers. Note that `cachyos/nvidia-580xx-utils` depends on `lib32-nvidia-580xx-utils` from `[multilib]`; `locachy-nvidia` verifies `[multilib]` is enabled before modifying an installed driver.
+- **`auto`**: reads PCI sysfs (`/sys/bus/pci/devices/*/vendor`, `device`, `class`) and resolves NVIDIA (`10de`) device descriptions from `/usr/share/hwdata/pci.ids` (falling back to `lspci -nn -d 10de:`), classifies each GPU against the Arch Wiki NVIDIA family table, installs the recommended branch's DKMS + utils packages (if the recommended branch is missing from the enabled repositories, the next supported branch is used and the fallback is printed), and records `nvidia_driver="auto"` in `rc.conf`.
+- **`open`** (new, Arch Wiki default for Turing RTX 20+ / Ampere / Ada / Blackwell+): `nvidia-open-dkms` + `nvidia-utils` + `dkms` + active kernel headers. Open kernel modules always run with GSP-RM firmware.
+- **`580xx`** (legacy / GSP-off fallback: Maxwell / Pascal / Volta, or a manual fallback for Turing / Ampere / Ada laptops where GSP-RM fails, with GSP firmware off via `NVreg_EnableGpuFirmware=0`): `nvidia-580xx-dkms` + `nvidia-580xx-utils` + `dkms` + active kernel headers. Note that `cachyos/nvidia-580xx-utils` depends on `lib32-nvidia-580xx-utils` from `[multilib]`; `locachy-nvidia` verifies `[multilib]` is enabled before modifying an installed driver.
 - **`off`**: removes installed NVIDIA driver packages, clears manifest leaves, removes `/etc/modprobe.d/40-locachy-nvidia.conf`, and rebuilds the UKI.
+
+### Automatic PCI family-to-branch mapping (Arch Wiki table)
+
+| GPU family (codename in `pci.ids`) | Supported branches | `auto` recommendation | Notes |
+| --- | --- | --- | --- |
+| Blackwell / Hopper (`GB*`, `GH*`) and newer | `open` | `open` | `580xx` does not support Blackwell; manual `set 580xx` is refused unless `--force` is passed. |
+| Ada Lovelace (`AD*`), Ampere (`GA*`), Turing (`TU*`) | `open`, `580xx` | `open` (desktop and laptop; still `open` when `gpu_unlock_targets` is active) | Ampere laptop GPUs (`GA*M`, mobile/laptop name, or laptop DMI chassis) get the Arch Wiki note: on some Ampere laptops GSP-RM causes complete failure; if this machine is affected, switch manually to `580xx` with GSP off. |
+| Volta (`GV*`), Pascal (`GP*`), Maxwell (`GM*`) | `580xx` | `580xx` | Pre-Turing GPUs lack GSP; manual `set open` is refused unless `--force` is passed. |
+| Kepler (`GK*`), Fermi (`GF*`), Tesla (`G8*`/`G9*`/`GT2*`), Curie (`G7*`/`NV4*`) | none | `off` (refused by `set auto`) | Unsupported by `open` and `580xx`; use `nouveau` or AUR `470xx`/`390xx`. |
+| Unknown NVIDIA PCI ID (unlisted future card) | `open`, `580xx` | `open` | Treated as a newer card until `pci.ids` adds its entry. |
+
+When multiple NVIDIA GPUs are present, `locachy-nvidia` intersects their supported branches: if every GPU supports `open` and `580xx`, the single-GPU rules apply; if only one branch supports all GPUs, that branch is recommended; if one requires `open` while another requires `580xx` (or is legacy/unsupported), `status` reports the conflict and `set auto` refuses cleanly.
 
 Settings exposes two rows at the top of **Input & Output → NVIDIA GPU**:
 
-- **NVIDIA driver (DKMS)** (`nvidia_driver="open"|"580xx"|"off"`): picker row (`Enter` → `Left`/`Right` → `Enter` applies via `gpu-driver-set`).
-- **NVIDIA GSP firmware** (`nvidia_gsp="auto"|"off"|"on"`): applies to `580xx` via `gpu-driver-gsp`. `auto` writes `options nvidia NVreg_EnableGpuFirmware=0` whenever `gpu_unlock_targets` is active; `off` forces it off; `on` forces GSP on. `open` requires GSP-RM, so `locachy-nvidia` keeps GSP enabled on `open` and prints an advisory if `gpu-unlock` is also active.
+- **NVIDIA driver (DKMS)** (`nvidia_driver="auto"|"open"|"580xx"|"off"`): picker row (`Enter` → `Left`/`Right` → `Enter` applies via `gpu-driver-set`), showing detected GPU family and recommended branch from `locachy-nvidia status --tsv`.
+- **NVIDIA GSP firmware** (`nvidia_gsp="auto"|"off"|"on"`): applies to `580xx` via `gpu-driver-gsp`. `auto` writes `options nvidia NVreg_EnableGpuFirmware=0` whenever `gpu_unlock_targets` is active; `off` forces it off; `on` forces GSP on. `open` requires GSP-RM, so `locachy-nvidia` leaves GSP enabled on `open`; when `gpu-unlock` is also active, `status` shows an informational note (GSP-RM does not block `gpu-unlock`, and branch 615+ restored probe-time init after the 595 `NVreg_GpuInitOnProbe` regression, per `Zagitta/gpu-unlock` #135 — on an affected 595 build or on unstable GSP hardware, set `NVreg_GpuInitOnProbe=1` or switch manually to `580xx`).
 
 CLI interface:
 
 ```sh
 locachy-nvidia status [--json | --tsv]
-locachy-nvidia set open|580xx|off
+locachy-nvidia set auto|open|580xx|off [--force]
 locachy-nvidia gsp auto|off|on
 locachy-nvidia sync-dropin
 ```
 
-Switching between `open` and `580xx` replaces conflicting packages atomically (`pacman -S --needed --noconfirm --ask 4`), updates `/etc/locachy/packages` (and `locachy-pkg`'s Vulkan detection recognizes `nvidia-580xx-utils` as well as `nvidia-utils`), writes `/etc/modprobe.d/40-locachy-nvidia.conf` (`blacklist nouveau`, `options nouveau modeset=0`, `options nvidia-drm modeset=1`, `softdep nvidia post: nvidia-uvm`, and optional `NVreg_EnableGpuFirmware`), refreshes `nvidia-powerd` when enabled, and rebuilds the UKI. `locachy-gpu-unlock` calls `locachy-nvidia sync-dropin` automatically whenever `gpu-unlock` is installed, toggled, or removed.
+Manual overrides (`set open` on Maxwell/Pascal/Volta or `set 580xx` on Blackwell) are refused before touching packages unless `--force` is given. Switching between `open` and `580xx` replaces conflicting packages atomically (`pacman -S --needed --noconfirm --ask 4`), updates `/etc/locachy/packages` (and `locachy-pkg`'s Vulkan detection recognizes `nvidia-580xx-utils` as well as `nvidia-utils`), writes `/etc/modprobe.d/40-locachy-nvidia.conf` (`blacklist nouveau`, `options nouveau modeset=0`, `options nvidia-drm modeset=1`, `softdep nvidia post: nvidia-uvm`, and optional `NVreg_EnableGpuFirmware`), refreshes `nvidia-powerd` when enabled, and rebuilds the UKI. `locachy-gpu-unlock` calls `locachy-nvidia sync-dropin` automatically whenever `gpu-unlock` is installed, toggled, or removed.
 
 ## 1. Pre-driver NVIDIA GPU Unlock (`locachy-gpu-unlock`)
 
@@ -59,6 +72,8 @@ How it works:
 5. **Removal**: Pressing `Delete` twice on the Settings row (or running `locachy-gpu-unlock remove`) removes the drop-in files, clears `gpu_unlock_targets`, removes the packages and manifest entries, and rebuilds the UKI.
 
 Power-state note: upstream `gpu-unlock` hooks S3 suspend/resume to re-apply speed selectors after sleep; it does not currently re-apply across S4 hibernation.
+
+Driver compatibility note: upstream reports (`Zagitta/gpu-unlock` #135) show that GSP-RM itself does not prevent the unlock. The breakage on branch 595 came from NVIDIA's `NVreg_GpuInitOnProbe` default of `0` (lazy init re-latched the speed selector); branch 615+ returns the default to probe-time `AUTO`. The HP RTX 3080 Ti Laptop (`GA103`, `0x2460`) is reported working (`Zagitta/gpu-unlock` #88). One reported case (#206) had selectors reverted under the 580-series open module while the proprietary 580xx with GSP off kept them latched, which is why `580xx` stays available as a manual fallback.
 
 ## 2. Machine GPU Power Profiles (`locachy-gpu-power`)
 

@@ -128,6 +128,15 @@ struct ssh_key_entry {
 };
 static struct ssh_key_entry ssh_keys[MAX_SSH_KEYS];
 static int nssh_keys = -1;            /* -1 = not loaded yet */
+struct ssh_pending_entry {
+    int index;
+    char type[48];
+    char fingerprint[96];
+    char comment[128];
+    char line[2048];
+};
+static struct ssh_pending_entry ssh_pending[MAX_SSH_KEYS];
+static int nssh_pending;
 static char ssh_host_fp[128];         /* cached SHA256:... or empty */
 static int ssh_host_fp_loaded;        /* 0 = not loaded yet */
 static int ssh_hostkey_regen_asked;   /* Enter pressed once on sshd host key */
@@ -443,15 +452,16 @@ static const char *const power_profile_labels[NPPROFS] = {
     N_("Auto (battery power-saving)"), N_("Power saver"), N_("Balanced"), N_("Performance"),
 };
 static int power_profile = PPROF_AUTO;
-/* NVIDIA DKMS driver (locachy-nvidia: open -> 580xx -> off; nvidia_gsp: auto/off/on),
+/* NVIDIA DKMS driver (locachy-nvidia: auto -> open -> 580xx -> off; nvidia_gsp: auto/off/on),
  * pre-driver GPU unlock (gpu_unlock_targets), and machine GPU power control
  * (gpu_power_method, gpu_power_mode, nvidia_powerd). */
 #ifndef LOCACHY_NVIDIA
 #define LOCACHY_NVIDIA "/usr/local/bin/locachy-nvidia"
 #endif
-enum { NVD_OPEN, NVD_580XX, NVD_OFF, NNVD_BRANCHES };
-static const char *const gpu_driver_values[NNVD_BRANCHES] = { "open", "580xx", "off" };
+enum { NVD_AUTO, NVD_OPEN, NVD_580XX, NVD_OFF, NNVD_BRANCHES };
+static const char *const gpu_driver_values[NNVD_BRANCHES] = { "auto", "open", "580xx", "off" };
 static const char *const gpu_driver_labels[NNVD_BRANCHES] = {
+    N_("Auto (by detected GPU)"),
     N_("Open DKMS (new, RTX 20+)"),
     N_("580xx DKMS (legacy / GSP off)"),
     N_("Off (not installed)"),
@@ -463,11 +473,13 @@ static const char *const gpu_gsp_labels[NNVGSP_MODES] = {
     N_("Off (580xx only)"),
     N_("On"),
 };
-static int gpu_driver_choice = NVD_OPEN;
+static int gpu_driver_choice = NVD_AUTO;
 static int gpu_driver_cfg = NVD_OFF;
 static int gpu_driver_installed = NVD_OFF;
 static int gpu_driver_loaded;
 static char gpu_driver_ver[48];
+static char gpu_driver_rec[16];
+static char gpu_driver_family[32];
 static int gpu_gsp_mode = NVGSP_AUTO;
 static int gpu_gsp_disabled;
 static int gpu_driver_job;
@@ -6537,8 +6549,405 @@ static int ssh_remove_key_index(const char *user, int key_idx)
     return 0;
 }
 
+static int ssh_add_key_file(const char *user, const char *path)
+{
+    char out[256];
+    if (!user || !path || !path[0]) return -1;
+    char *const argv[] = { SSH_ADMIN_CMD, "--keys-add", (char *)user, (char *)path, NULL };
+    int rc = ssh_admin_run(argv, NULL, out, sizeof out);
+    if (rc != 0) {
+        const char *last = strrchr(out, '\n');
+        const char *msg = last ? last + 1 : out;
+        snprintf(notice, sizeof notice, _("Cannot import SSH public key: %.120s"),
+                 msg[0] ? msg : _("command failed"));
+        return -1;
+    }
+    out[strcspn(out, " \t\r\n")] = '\0';
+    load_ssh_keys();
+    snprintf(notice, sizeof notice, _("Imported SSH public key (%.48s)."), out[0] ? out : _("ok"));
+    return 0;
+}
+
+static int load_ssh_pending(const char *user)
+{
+    nssh_pending = 0;
+    if (!user || access(SSH_ADMIN_CMD, X_OK) != 0) return -1;
+    char buf[16384];
+    char *const argv[] = { SSH_ADMIN_CMD, "--keys-pending", (char *)user, NULL };
+    if (ssh_admin_run(argv, NULL, buf, sizeof buf) != 0) return -1;
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line && nssh_pending < MAX_SSH_KEYS;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *t1 = strchr(line, '\t');
+        if (!t1) continue;
+        *t1++ = '\0';
+        char *t2 = strchr(t1, '\t');
+        if (!t2) continue;
+        *t2++ = '\0';
+        char *t3 = strchr(t2, '\t');
+        if (!t3) continue;
+        *t3++ = '\0';
+        char *t4 = strchr(t3, '\t');
+        if (!t4) continue;
+        *t4++ = '\0';
+        char *end = NULL;
+        long idx = strtol(line, &end, 10);
+        if (!end || end == line || *end || idx < 1 || !t4[0]) continue;
+        struct ssh_pending_entry *e = &ssh_pending[nssh_pending++];
+        e->index = (int)idx;
+        snprintf(e->type, sizeof e->type, "%.47s", t1);
+        snprintf(e->fingerprint, sizeof e->fingerprint, "%.95s", t2);
+        snprintf(e->comment, sizeof e->comment, "%.127s", t3);
+        snprintf(e->line, sizeof e->line, "%.2047s", t4);
+    }
+    return 0;
+}
+
+static void manage_ssh_pending_keys(const char *user)
+{
+    if (load_ssh_pending(user) != 0) {
+        snprintf(notice, sizeof notice, "%s", _("Cannot read pending keys from ~/.ssh/authorized_keys."));
+        return;
+    }
+    int sel = 0, top = 0;
+    char line[320];
+    notice[0] = '\0';
+    for (;;) {
+        int total = nssh_pending;
+        int list_y = 4;
+        int height = screen_rows() - list_y - 4;
+        if (height < 1) height = 1;
+        if (sel >= total) sel = total > 0 ? total - 1 : 0;
+        if (sel < 0) sel = 0;
+        if (sel < top) top = sel;
+        if (sel >= top + height) top = sel - height + 1;
+        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+        screen_bar(_("Pending keys (approve)"), NULL);
+        ui_hits_clear();
+        /* TRANSLATORS: Enter and Esc are key names; keep them. */
+        screen_text(2, screen_rows() - 3, _("Enter: approve selected key   Esc: back"), ACCENT_TEXT, BG);
+        if (total == 0) {
+            screen_text(4, list_y, _("No pending keys in ~/.ssh/authorized_keys."), DIM, BG);
+        } else {
+            for (int r = 0; r < height && top + r < total; r++) {
+                int row_i = top + r, y = list_y + r, on = row_i == sel;
+                const struct ssh_pending_entry *e = &ssh_pending[row_i];
+                if (e->comment[0]) {
+                    snprintf(line, sizeof line, "%2d. %-16.16s  %.50s  %.80s",
+                             e->index, e->type, e->fingerprint, e->comment);
+                } else {
+                    snprintf(line, sizeof line, "%2d. %-16.16s  %.50s",
+                             e->index, e->type, e->fingerprint);
+                }
+                screen_fill(0, y, screen_cols(), 1, on ? ACCENT : BG);
+                screen_text(4, y, line, on ? ON_ACCENT : FG, on ? ACCENT : BG);
+                ui_hit(0, y, screen_cols(), 1, row_i);
+            }
+        }
+        if (notice[0]) {
+            screen_text(2, screen_rows() - 4, notice, ACCENT_TEXT, BG);
+        }
+        settings_back_button(screen_rows() - 2);
+        screen_flush();
+        int key = key_get(), mods = mods_now(), act = key_list_action(key, mods);
+        if (close_read(key)) return;
+        if (key == K_REPAINT || key == K_SHOWN) continue;
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (settings_back_clicked(e)) return;
+            if (e->wheel && total > 0) {
+                sel -= e->wheel;
+                if (sel < 0) sel = 0;
+                if (sel >= total) sel = total - 1;
+                continue;
+            }
+            if (e->button == BTN_LEFT && e->pressed) {
+                int hit = ui_hit_at(e->col, e->row);
+                if (hit >= 0 && hit < total) {
+                    sel = hit;
+                    if (e->clicks == 2) key = '\n';
+                    else continue;
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+        if (act == ACT_HELP) {
+            help_screen();
+            if (close_due()) return;
+            continue;
+        }
+        if (act == ACT_CANCEL) return;
+        if (act != ACT_NONE || (key >= ' ' && key < 0x7F && (mods & (KEYS_ALT | KEYS_META)))) {
+            continue;
+        }
+        if (key == K_UP && sel > 0) {
+            sel--;
+        } else if (key == K_DOWN && sel + 1 < total) {
+            sel++;
+        } else if (key == K_PGUP && total > 0) {
+            sel = sel > height ? sel - height : 0;
+        } else if (key == K_PGDN && total > 0) {
+            sel = sel + height < total ? sel + height : total - 1;
+        } else if (key == K_BOL && total > 0) {
+            sel = 0;
+        } else if (key == K_EOL && total > 0) {
+            sel = total - 1;
+        } else if (key == '\n' && total > 0) {
+            if (ssh_add_key_line(user, ssh_pending[sel].line) == 0) {
+                load_ssh_pending(user);
+            }
+        }
+    }
+}
+
+static void ssh_receive_parse_line(const char *ln, int *ready, char *url, size_t url_size,
+                                   int *timeout_secs, double *ready_at, int *got_key,
+                                   char *peer_ip, size_t peer_size, char *ktype, size_t type_size,
+                                   char *kfp, size_t fp_size, char *kcomment, size_t comment_size,
+                                   char *kline, size_t line_size, char *err_msg, size_t err_size)
+{
+    if (!ln || !ln[0]) return;
+    if (strncmp(ln, "READY\t", 6) == 0) {
+        const char *p = ln + 6;
+        const char *t1 = strchr(p, '\t');
+        if (t1 && t1 > p) {
+            size_t ulen = (size_t)(t1 - p);
+            if (ulen >= url_size) ulen = url_size - 1;
+            memcpy(url, p, ulen);
+            url[ulen] = '\0';
+            int secs = atoi(t1 + 1);
+            if (secs > 0) *timeout_secs = secs;
+            *ready = 1;
+            *ready_at = settings_mono_sec();
+        }
+        return;
+    }
+    if (strncmp(ln, "KEY\t", 4) == 0) {
+        const char *p = ln + 4;
+        const char *t1 = strchr(p, '\t');
+        const char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+        const char *t3 = t2 ? strchr(t2 + 1, '\t') : NULL;
+        const char *t4 = t3 ? strchr(t3 + 1, '\t') : NULL;
+        if (t1 && t2 && t3 && t4 && t4[1]) {
+            snprintf(peer_ip, peer_size, "%.*s", (int)(t1 - p), p);
+            snprintf(ktype, type_size, "%.*s", (int)(t2 - (t1 + 1)), t1 + 1);
+            snprintf(kfp, fp_size, "%.*s", (int)(t3 - (t2 + 1)), t2 + 1);
+            snprintf(kcomment, comment_size, "%.*s", (int)(t4 - (t3 + 1)), t3 + 1);
+            snprintf(kline, line_size, "%s", t4 + 1);
+            *got_key = 1;
+        }
+        return;
+    }
+    snprintf(err_msg, err_size, "%s", ln);
+}
+
+static void ssh_receive_key_modal(const char *user)
+{
+    int p[2];
+    if (pipe2(p, O_CLOEXEC | O_NONBLOCK) < 0) {
+        snprintf(notice, sizeof notice, "%s", _("Cannot start SSH key receiver."));
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (null >= 0) dup2(null, STDIN_FILENO);
+        dup2(p[1], STDOUT_FILENO);
+        dup2(p[1], STDERR_FILENO);
+        char *const argv[] = { SSH_ADMIN_CMD, "--receive-key", (char *)user, "--timeout", "120", NULL };
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    close(p[1]);
+    if (pid < 0) {
+        close(p[0]);
+        snprintf(notice, sizeof notice, "%s", _("Cannot start SSH key receiver."));
+        return;
+    }
+
+    char buf[8192];
+    size_t len = 0, parsed = 0;
+    int ready = 0, got_key = 0, cancelled = 0, ended = 0, eof = 0, status = 0;
+    int timeout_secs = 120;
+    double ready_at = 0.0;
+    char url[256] = "", peer_ip[96] = "", ktype[48] = "", kfp[96] = "", kcomment[128] = "";
+    char kline[2048] = "", err_msg[160] = "", line[320];
+
+    for (;;) {
+        ssize_t n;
+        while (!eof && len < sizeof buf - 1) {
+            n = read(p[0], buf + len, sizeof buf - 1 - len);
+            if (n > 0) {
+                len += (size_t)n;
+            } else if (n == 0) {
+                eof = 1;
+            } else if (errno != EINTR) {
+                break;
+            }
+        }
+        buf[len] = '\0';
+        char *nl;
+        while ((nl = strchr(buf + parsed, '\n')) != NULL) {
+            *nl = '\0';
+            if (nl > buf + parsed && nl[-1] == '\r') nl[-1] = '\0';
+            ssh_receive_parse_line(buf + parsed, &ready, url, sizeof url, &timeout_secs, &ready_at,
+                                   &got_key, peer_ip, sizeof peer_ip, ktype, sizeof ktype,
+                                   kfp, sizeof kfp, kcomment, sizeof kcomment,
+                                   kline, sizeof kline, err_msg, sizeof err_msg);
+            parsed = (size_t)(nl - buf) + 1;
+        }
+        if (!ended && waitpid(pid, &status, WNOHANG) == pid) {
+            ended = 1;
+            while (!eof && len < sizeof buf - 1) {
+                n = read(p[0], buf + len, sizeof buf - 1 - len);
+                if (n > 0) {
+                    len += (size_t)n;
+                } else if (n == 0) {
+                    eof = 1;
+                } else if (errno != EINTR) {
+                    break;
+                }
+            }
+            buf[len] = '\0';
+            while ((nl = strchr(buf + parsed, '\n')) != NULL) {
+                *nl = '\0';
+                if (nl > buf + parsed && nl[-1] == '\r') nl[-1] = '\0';
+                ssh_receive_parse_line(buf + parsed, &ready, url, sizeof url, &timeout_secs, &ready_at,
+                                       &got_key, peer_ip, sizeof peer_ip, ktype, sizeof ktype,
+                                       kfp, sizeof kfp, kcomment, sizeof kcomment,
+                                       kline, sizeof kline, err_msg, sizeof err_msg);
+                parsed = (size_t)(nl - buf) + 1;
+            }
+            if (parsed < len) {
+                ssh_receive_parse_line(buf + parsed, &ready, url, sizeof url, &timeout_secs, &ready_at,
+                                       &got_key, peer_ip, sizeof peer_ip, ktype, sizeof ktype,
+                                       kfp, sizeof kfp, kcomment, sizeof kcomment,
+                                       kline, sizeof kline, err_msg, sizeof err_msg);
+                parsed = len;
+            }
+        }
+        if (got_key || ended) break;
+
+        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+        screen_bar(_("Receive SSH public key"), NULL);
+        ui_hits_clear();
+        if (ready) {
+            int rem = timeout_secs - (int)(settings_mono_sec() - ready_at);
+            if (rem < 0) rem = 0;
+            screen_text(4, 4, _("Run this command on the other computer to send its public key:"), FG, BG);
+            snprintf(line, sizeof line, "curl -T ~/.ssh/id_ed25519.pub %s", url);
+            screen_text(4, 6, line, ACCENT_TEXT, BG);
+            snprintf(line, sizeof line, _("Waiting for key upload (%d s left)..."), rem);
+            screen_text(4, 8, line, DIM, BG);
+        } else {
+            screen_text(4, 4, _("Starting one-time receiver..."), FG, BG);
+        }
+        /* TRANSLATORS: Esc is the Esc key; keep it. */
+        screen_text(2, screen_rows() - 3, _("Esc: cancel"), ACCENT_TEXT, BG);
+        settings_back_button(screen_rows() - 2);
+        screen_flush();
+
+        int key = key_poll_timeout(eof ? -1 : p[0], eof ? 50 : 500);
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (settings_back_clicked(e)) key = 27;
+            else continue;
+        }
+        if (close_read(key) || (key > 0 && key_list_action(key, mods_now()) == ACT_CANCEL)) {
+            kill(pid, SIGTERM);
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+            ended = 1;
+            cancelled = 1;
+            break;
+        }
+    }
+    close(p[0]);
+    if (!ended) {
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+
+    if (cancelled) {
+        snprintf(notice, sizeof notice, "%s", _("SSH key receive cancelled; no key added."));
+        return;
+    }
+    if (!got_key) {
+        int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (code == 124) {
+            snprintf(notice, sizeof notice, "%s", _("SSH key receive timed out; no key added."));
+        } else if (code == 130) {
+            snprintf(notice, sizeof notice, "%s", _("SSH key receive cancelled; no key added."));
+        } else {
+            snprintf(notice, sizeof notice, _("SSH key receive failed: %.120s"),
+                     err_msg[0] ? err_msg : _("command failed"));
+        }
+        return;
+    }
+
+    for (;;) {
+        screen_fill(0, 0, screen_cols(), screen_rows(), BG);
+        screen_bar(_("Confirm received SSH public key"), NULL);
+        ui_hits_clear();
+        screen_text(4, 4, _("Verify this key before approving:"), FG, BG);
+        snprintf(line, sizeof line, _("Peer IP:     %s"), peer_ip);
+        screen_text(4, 6, line, FG, BG);
+        snprintf(line, sizeof line, _("Key type:    %s"), ktype);
+        screen_text(4, 7, line, FG, BG);
+        snprintf(line, sizeof line, _("Fingerprint: %s"), kfp);
+        screen_text(4, 8, line, ACCENT_TEXT, BG);
+        if (kcomment[0]) {
+            snprintf(line, sizeof line, _("Comment:     %s"), kcomment);
+            screen_text(4, 9, line, FG, BG);
+        }
+        /* TRANSLATORS: Enter and Esc are key names; keep them. */
+        screen_text(2, screen_rows() - 3, _("Enter: approve and add key   Esc: reject"), ACCENT_TEXT, BG);
+        settings_back_button(screen_rows() - 2);
+        screen_flush();
+
+        int key = key_get(), mods = mods_now(), act = key_list_action(key, mods);
+        if (close_read(key)) {
+            snprintf(notice, sizeof notice, "%s", _("Received SSH public key rejected."));
+            return;
+        }
+        if (key == K_REPAINT || key == K_SHOWN) continue;
+        if (key == K_POINTER) {
+            const struct pointer_event *e = pointer_last();
+            if (settings_back_clicked(e)) {
+                snprintf(notice, sizeof notice, "%s", _("Received SSH public key rejected."));
+                return;
+            }
+            continue;
+        }
+        if (act == ACT_HELP) {
+            help_screen();
+            if (close_due()) {
+                snprintf(notice, sizeof notice, "%s", _("Received SSH public key rejected."));
+                return;
+            }
+            continue;
+        }
+        if (act == ACT_CANCEL) {
+            snprintf(notice, sizeof notice, "%s", _("Received SSH public key rejected."));
+            return;
+        }
+        if (key == '\n' && act == ACT_NONE) {
+            ssh_add_key_line(user, kline);
+            return;
+        }
+    }
+}
+
 static void manage_ssh_authorized_keys(void)
 {
+    enum {
+        SSH_ROW_RECEIVE,
+        SSH_ROW_PENDING,
+        SSH_ROW_IMPORT,
+        SSH_ROW_PASTE,
+        SSH_ACTION_ROWS
+    };
     const char *user = user_name();
     if (!user) {
         snprintf(notice, sizeof notice, "%s", _("No regular local user (uid 1000) found."));
@@ -6554,7 +6963,7 @@ static void manage_ssh_authorized_keys(void)
     snprintf(title, sizeof title, _("sshd AuthorizedKeys (%.40s)"), user);
     notice[0] = '\0';
     for (;;) {
-        int total = 1 + nssh_keys;
+        int total = SSH_ACTION_ROWS + nssh_keys;
         int list_y = 4;
         int height = screen_rows() - list_y - 4;
         if (height < 1) height = 1;
@@ -6565,14 +6974,20 @@ static void manage_ssh_authorized_keys(void)
         screen_fill(0, 0, screen_cols(), screen_rows(), BG);
         screen_bar(title, NULL);
         ui_hits_clear();
-        /* TRANSLATORS: a, Enter, Delete and Esc are key names; keep them. */
-        screen_text(2, screen_rows() - 3, _("a / Enter: add public key   Delete: remove selected   Esc: back"), ACCENT_TEXT, BG);
+        /* TRANSLATORS: Enter, a, Delete and Esc are key names; keep them. */
+        screen_text(2, screen_rows() - 3, _("Enter: run action   a: paste key   Delete: remove selected   Esc: back"), ACCENT_TEXT, BG);
         for (int r = 0; r < height && top + r < total; r++) {
             int row_i = top + r, y = list_y + r, on = row_i == sel;
-            if (row_i == 0) {
+            if (row_i == SSH_ROW_RECEIVE) {
+                snprintf(line, sizeof line, "%s", _("[ Receive from another computer (one-time link) ]"));
+            } else if (row_i == SSH_ROW_PENDING) {
+                snprintf(line, sizeof line, "%s", _("[ Approve pending keys from ~/.ssh ]"));
+            } else if (row_i == SSH_ROW_IMPORT) {
+                snprintf(line, sizeof line, "%s", _("[ Import public key file ]"));
+            } else if (row_i == SSH_ROW_PASTE) {
                 snprintf(line, sizeof line, "%s", _("[ + Add public key ]"));
             } else {
-                const struct ssh_key_entry *e = &ssh_keys[row_i - 1];
+                const struct ssh_key_entry *e = &ssh_keys[row_i - SSH_ACTION_ROWS];
                 if (e->comment[0]) {
                     snprintf(line, sizeof line, "%2d. %-16.16s  %.50s  %.80s",
                              e->index, e->type, e->fingerprint, e->comment);
@@ -6585,8 +7000,11 @@ static void manage_ssh_authorized_keys(void)
             screen_text(4, y, line, on ? ON_ACCENT : FG, on ? ACCENT : BG);
             ui_hit(0, y, screen_cols(), 1, row_i);
         }
-        if (nssh_keys == 0 && height > 1) {
-            screen_text(4, list_y + 1, _("No authorized public keys yet."), DIM, BG);
+        if (nssh_keys == 0) {
+            int empty_r = SSH_ACTION_ROWS - top;
+            if (empty_r >= 0 && empty_r < height) {
+                screen_text(4, list_y + empty_r, _("No authorized public keys yet."), DIM, BG);
+            }
         }
         if (notice[0]) {
             screen_text(2, screen_rows() - 4, notice, ACCENT_TEXT, BG);
@@ -6611,7 +7029,7 @@ static void manage_ssh_authorized_keys(void)
                 if (hit >= 0 && hit < total) {
                     if (hit != sel) delete_asked = -1;
                     sel = hit;
-                    if (e->clicks == 2 && sel == 0) key = '\n';
+                    if (e->clicks == 2 && sel < SSH_ACTION_ROWS) key = '\n';
                     else continue;
                 } else {
                     continue;
@@ -6650,7 +7068,24 @@ static void manage_ssh_authorized_keys(void)
             sel = 0;
         } else if (key == K_EOL) {
             sel = total - 1;
-        } else if ((key == 'a' || key == 'A') || (key == '\n' && sel == 0)) {
+        } else if (key == '\n' && sel == SSH_ROW_RECEIVE) {
+            ssh_receive_key_modal(user);
+            if (close_due()) return;
+        } else if (key == '\n' && sel == SSH_ROW_PENDING) {
+            manage_ssh_pending_keys(user);
+            if (close_due()) return;
+        } else if (key == '\n' && sel == SSH_ROW_IMPORT) {
+            char key_path[512] = "";
+            if (!prompt(_("Path to SSH public key file (e.g. /home/user/.ssh/id_ed25519.pub): "),
+                        key_path, sizeof key_path)) {
+                if (close_due()) return;
+                snprintf(notice, sizeof notice, "%s", _("No key imported."));
+            } else if (key_path[0] != '/') {
+                snprintf(notice, sizeof notice, "%s", _("Enter an absolute path to a public key file."));
+            } else {
+                ssh_add_key_file(user, key_path);
+            }
+        } else if ((key == 'a' || key == 'A') || (key == '\n' && sel == SSH_ROW_PASTE)) {
             char key_text[2048] = "";
             if (!prompt(_("Paste SSH public key (ssh-ed25519 / ssh-rsa ...): "), key_text, sizeof key_text)) {
                 if (close_due()) return;
@@ -6661,15 +7096,15 @@ static void manage_ssh_authorized_keys(void)
                 ssh_add_key_line(user, key_text);
             }
         } else if (key == K_DEL) {
-            if (sel == 0) {
+            if (sel < SSH_ACTION_ROWS) {
                 snprintf(notice, sizeof notice, "%s", _("Select a key below to remove it."));
             } else if (delete_asked != sel) {
                 delete_asked = sel;
                 /* TRANSLATORS: Delete is the Delete key; keep it. */
                 snprintf(notice, sizeof notice, _("Delete again: remove key #%d (%.48s)."),
-                         ssh_keys[sel - 1].index, ssh_keys[sel - 1].fingerprint);
+                         ssh_keys[sel - SSH_ACTION_ROWS].index, ssh_keys[sel - SSH_ACTION_ROWS].fingerprint);
             } else {
-                int target = ssh_keys[sel - 1].index;
+                int target = ssh_keys[sel - SSH_ACTION_ROWS].index;
                 delete_asked = -1;
                 ssh_remove_key_index(user, target);
             }
@@ -7012,13 +7447,15 @@ static int gpu_unlock_present(void)
     return access(GPU_UNLOCK_DOC, R_OK) == 0;
 }
 
-/* locachy-nvidia status --tsv: the installed DKMS branch, version, and GSP state. */
+/* locachy-nvidia status --tsv: the installed DKMS branch, recommendation, version, and GSP state. */
 static void load_gpu_driver_status(void)
 {
-    char out[512], *save = NULL;
+    char out[1024], *save = NULL;
     char *const argv[] = { LOCACHY_NVIDIA, "status", "--tsv", NULL };
     gpu_driver_installed = NVD_OFF;
     gpu_driver_ver[0] = '\0';
+    gpu_driver_rec[0] = '\0';
+    gpu_driver_family[0] = '\0';
     gpu_gsp_disabled = 0;
     gpu_driver_loaded = 1;
     out[0] = '\0';
@@ -7026,16 +7463,22 @@ static void load_gpu_driver_status(void)
     command_output(argv, out, sizeof out);
     for (char *line = strtok_r(out, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         if (!strncmp(line, "installed\t", 10)) {
-            for (int i = 0; i < NNVD_BRANCHES; i++) {
+            for (int i = NVD_OPEN; i < NNVD_BRANCHES; i++) {
                 if (!strcmp(line + 10, gpu_driver_values[i])) gpu_driver_installed = i;
             }
+        } else if (!strncmp(line, "recommended\t", 12)) {
+            snprintf(gpu_driver_rec, sizeof gpu_driver_rec, "%s", line + 12);
+        } else if (!strncmp(line, "gpu_family\t", 11)) {
+            snprintf(gpu_driver_family, sizeof gpu_driver_family, "%s", line + 11);
         } else if (!strncmp(line, "dkms_version\t", 13)) {
             snprintf(gpu_driver_ver, sizeof gpu_driver_ver, "%s", line + 13);
         } else if (!strncmp(line, "gsp_disabled\t", 13)) {
             gpu_gsp_disabled = atoi(line + 13) != 0;
         }
     }
-    if (gpu_driver_cfg == NVD_OFF && gpu_driver_installed != NVD_OFF) {
+    if (gpu_driver_cfg == NVD_AUTO) {
+        gpu_driver_choice = NVD_AUTO;
+    } else if (gpu_driver_cfg == NVD_OFF && gpu_driver_installed != NVD_OFF) {
         gpu_driver_choice = gpu_driver_installed;
     }
 }
@@ -9053,7 +9496,7 @@ static void item_text(int idx, char *line, size_t size)
         return;
     }
     if (idx == gpu_driver_index()) {
-        char state[80] = "";
+        char state[96] = "";
         if (gpu_driver_job) {
             snprintf(state, sizeof state, "%s", _("working..."));
         } else if (gpu_driver_installed == NVD_OPEN || gpu_driver_installed == NVD_580XX) {
@@ -9064,6 +9507,10 @@ static void item_text(int idx, char *line, size_t size)
                 snprintf(state, sizeof state, _("installed %s  (Enter: apply)"),
                          gpu_driver_values[gpu_driver_installed]);
             }
+        } else if (gpu_driver_family[0] && strcmp(gpu_driver_family, "none") != 0) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(state, sizeof state, _("detected %.24s, rec %.12s (Enter: apply)"),
+                     gpu_driver_family, gpu_driver_rec[0] ? gpu_driver_rec : "off");
         } else {
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(state, sizeof state, "%s", _("not installed  (Enter: apply)"));
@@ -9074,8 +9521,12 @@ static void item_text(int idx, char *line, size_t size)
         return;
     }
     if (idx == gpu_gsp_index()) {
+        int open_gsp = gpu_driver_installed == NVD_OPEN ||
+                       (gpu_driver_installed == NVD_OFF &&
+                        (gpu_driver_cfg == NVD_OPEN ||
+                         (gpu_driver_cfg == NVD_AUTO && strcmp(gpu_driver_rec, "open") == 0)));
         const char *note = gpu_driver_job ? _("working...") :
-                           (gpu_driver_installed == NVD_OPEN || (gpu_driver_installed == NVD_OFF && gpu_driver_cfg == NVD_OPEN)) ?
+                           open_gsp ?
                            _("(open requires GSP; use 580xx to disable)") :
                            gpu_gsp_disabled ? _("(NVreg_EnableGpuFirmware=0 active)") : "";
         snprintf(line, size, "  %.95s < %s >%s%s",
@@ -9554,19 +10005,7 @@ static void item_text(int idx, char *line, size_t size)
         return;
     }
     if ((i = idx - bat_thresh_index()) >= 0 && i < power_thresh_count()) {
-        int bi = power_thresh_bat_index();
-        const struct bat_device *b = &power_devs[bi];
-        int is_end = i == 1 || !b->has_start_thresh;
-        const char *name = is_end ? _("Charge stop threshold") : _("Charge start threshold");
-        if (power_charge_managed()) {
-            int saved = is_end ? rc_bat_end : rc_bat_start;
-            if (saved < 0) snprintf(vbuf, sizeof vbuf, "%s", _("not set for manual charging"));
-            else snprintf(vbuf, sizeof vbuf, _("%d%% saved for manual charging"), saved);
-            snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, name, 32), vbuf);
-        } else {
-            snprintf(line, size, "%.95s < %d%% >", ui_pad(label, sizeof label, name, 32),
-                     is_end ? b->end_thresh : b->start_thresh);
-        }
+        power_thresh_item_text(i, line, size);
         return;
     }
     if (idx == hwinfo_index()) {
@@ -11197,7 +11636,7 @@ static void row_hint_text(int idx, char *out, size_t size)
     } else if (idx == gpu_driver_index()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s",
-                 _("Choose Open DKMS (new, RTX 20+), 580xx DKMS (legacy / GSP off), or Off; Enter applies."));
+                 _("Choose Auto (by detected GPU), Open DKMS (new, RTX 20+), 580xx DKMS (legacy / GSP off), or Off; Enter applies."));
     } else if (idx == gpu_gsp_index()) {
         snprintf(out, size, "%s",
                  _("Auto disables GSP when gpu-unlock is on (580xx); Open DKMS always uses GSP firmware."));

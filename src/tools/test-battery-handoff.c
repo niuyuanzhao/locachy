@@ -7,6 +7,8 @@
  *   5. Dual-battery active discharge handoff (BAT1 -> BAT0) -> DISCHARGE event
  *   6. Adaptive charge handoff: model gate, unsupported/no-write, readback,
  *      per-pack baseline restore, one-time full expiry, restart persistence, status
+ *   7. Software charge_behaviour single-pack swap: per-pack .charge-* baseline
+ *      isolation and hysteresis when a different pack is inserted
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -17,6 +19,20 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* Emulate kernel sysfs charge_behaviour readback formatting on plain fixture
+ * files after bat_write_charge_behaviour() performs the real write. */
+static void test_emulate_kernel_behaviour_write(const char *path, const char *mode)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    if (strcmp(mode, "auto") == 0) fprintf(f, "[auto] inhibit-charge\n");
+    else if (strcmp(mode, "inhibit-charge") == 0) fprintf(f, "auto [inhibit-charge]\n");
+    else fprintf(f, "%s\n", mode);
+    fclose(f);
+}
+
+#define BAT_CHARGE_BEHAVIOUR_AFTER_WRITE(path, mode) test_emulate_kernel_behaviour_write((path), (mode))
 
 #define main battery_history_main
 #include "../progs/battery-history.c"
@@ -547,6 +563,94 @@ static void test_adaptive(int64_t t0)
     free(pb);
 }
 
+/* Single pack with software charge_behaviour only: a swap hands the cap to the
+ * incoming pack and never applies the outgoing pack's .charge-* baseline to it. */
+static int rel_exists(const char *rel)
+{
+    char p[1280];
+    snprintf(p, sizeof p, "%s/%s", root, rel);
+    return access(p, F_OK) == 0;
+}
+
+static void drop(const char *rel)
+{
+    char p[1280];
+    snprintf(p, sizeof p, "%s/%s", root, rel);
+    (void)unlink(p);
+}
+
+static void test_sw_single_pack_swap(int64_t t0)
+{
+    const char *behav = "sys/BAT0/charge_behaviour";
+    const char *old_bl = "hist/.charge-BAT0.Panasonic_CF-VZSU1QJS_9001";
+    const char *new_bl = "hist/.charge-BAT0.SANYO_45N1029_2222";
+    char line[64];
+
+    /* Only BAT0 is present, with no charge threshold attributes. */
+    put_txt("rc.conf", "battery_charge_adaptive=\"0\"\nbattery_charge_start=\"75\"\nbattery_charge_end=\"80\"\n");
+    put_txt("sys/BAT1/present", "0\n");
+    drop("sys/BAT0/charge_control_start_threshold");
+    drop("sys/BAT0/charge_control_end_threshold");
+    put_txt("sys/AC/online", "1\n");
+    put_txt("sys/BAT0/manufacturer", "Panasonic\n");
+    put_txt("sys/BAT0/model_name", "CF-VZSU1QJS\n");
+    put_txt("sys/BAT0/serial_number", "9001\n");
+    put_txt("sys/BAT0/status", "Charging\n");
+    put_txt("sys/BAT0/energy_now", "52000000\n"); /* ~95% >= 80% */
+    put_txt("sys/BAT0/energy_full", "55000000\n");
+    put_txt("sys/BAT0/energy_full_design", "55000000\n");
+    put_txt(behav, "[auto] inhibit-charge\n");
+    reset_daemon_memory();
+
+    /* 95% on AC reaches the end limit: inhibit-charge with the old pack's baseline recorded. */
+    set_now(t0);
+    assert(record_snapshot(0) == 1);
+    charge_status_for("BAT0", "manual", 80, 80, 0);
+    assert(bat_read_line(bat_supply_root(), "BAT0", "charge_behaviour", line, sizeof line) == 0 &&
+           strcmp(line, "auto [inhibit-charge]") == 0);
+    assert(rel_exists(old_bl));
+
+    /* Swap in SANYO #2222 at 50%: its own charge is released to auto, and the old baseline is left alone. */
+    put_txt("sys/BAT0/manufacturer", "SANYO\n");
+    put_txt("sys/BAT0/model_name", "45N1029\n");
+    put_txt("sys/BAT0/serial_number", "2222\n");
+    put_txt("sys/BAT0/status", "Charging\n");
+    put_txt("sys/BAT0/energy_now", "30000000\n"); /* 50% <= 75% */
+    put_txt("sys/BAT0/energy_full", "60000000\n");
+    put_txt("sys/BAT0/energy_full_design", "60000000\n");
+    set_now(t0 + 60);
+    assert(record_snapshot(0) == 1);
+    charge_status_for("BAT0", "manual", 80, 80, 0);
+    assert(bat_read_line(bat_supply_root(), "BAT0", "charge_behaviour", line, sizeof line) == 0 &&
+           strcmp(line, "[auto] inhibit-charge") == 0);
+    assert(rel_exists(old_bl) && !rel_exists(new_bl));
+
+    /* SANYO #2222 reaches 85%: inhibits and writes its own baseline independently. */
+    put_txt("sys/BAT0/energy_now", "51000000\n"); /* 85% >= 80% */
+    set_now(t0 + 90);
+    assert(record_snapshot(0) == 1);
+    assert(bat_read_line(bat_supply_root(), "BAT0", "charge_behaviour", line, sizeof line) == 0 &&
+           strcmp(line, "auto [inhibit-charge]") == 0);
+    assert(rel_exists(old_bl) && rel_exists(new_bl));
+
+    /* Old pack returns at 70% (below start): its own baseline restores auto and is removed;
+     * SANYO's baseline remains untouched. */
+    put_txt("sys/BAT0/manufacturer", "Panasonic\n");
+    put_txt("sys/BAT0/model_name", "CF-VZSU1QJS\n");
+    put_txt("sys/BAT0/serial_number", "9001\n");
+    put_txt("sys/BAT0/status", "Not charging\n");
+    put_txt("sys/BAT0/energy_now", "38500000\n"); /* 70% <= 75% */
+    put_txt("sys/BAT0/energy_full", "55000000\n");
+    put_txt("sys/BAT0/energy_full_design", "55000000\n");
+    put_txt(behav, "auto [inhibit-charge]\n");
+    set_now(t0 + 120);
+    assert(record_snapshot(0) == 1);
+    charge_status_for("BAT0", "manual", 80, 80, 0);
+    assert(bat_read_line(bat_supply_root(), "BAT0", "charge_behaviour", line, sizeof line) == 0 &&
+           strcmp(line, "[auto] inhibit-charge") == 0);
+    assert(!rel_exists(old_bl) && rel_exists(new_bl));
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2 && argv[1][0] == '/');
@@ -696,5 +800,7 @@ int main(int argc, char **argv)
     test_adaptive(t0 + 10000);
     puts("PASS adaptive battery charge handoff: model gate, unsupported/no-write, readback, per-pack restore, "
          "one-time full expiry, restart persistence, and status");
+    test_sw_single_pack_swap(t0 + 20000);
+    puts("PASS software charge_behaviour single-pack swap: per-pack baseline isolation and hysteresis handoff");
     return 0;
 }

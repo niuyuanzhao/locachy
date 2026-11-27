@@ -412,7 +412,8 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
                                    strcmp(a[0], "--winmaint-shrink") == 0));
         break;
     case C_GPU_DRIVER:
-        ok = n == 1 && (strcmp(a[0], "open") == 0 || strcmp(a[0], "580xx") == 0 || strcmp(a[0], "off") == 0);
+        ok = n == 1 && (strcmp(a[0], "auto") == 0 || strcmp(a[0], "open") == 0 ||
+                        strcmp(a[0], "580xx") == 0 || strcmp(a[0], "off") == 0);
         break;
     case C_GPU_GSP:
         ok = n == 1 && (strcmp(a[0], "auto") == 0 || strcmp(a[0], "off") == 0 || strcmp(a[0], "on") == 0);

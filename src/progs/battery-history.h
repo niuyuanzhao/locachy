@@ -39,6 +39,19 @@
 #define BAT_MAX_SAMPLES    12000
 #define BAT_MAX_EVENTS     256
 
+enum bat_charge_behaviour {
+    BAT_BEHAV_UNKNOWN = 0,
+    BAT_BEHAV_AUTO,
+    BAT_BEHAV_INHIBIT,
+    BAT_BEHAV_OTHER,
+};
+
+enum bat_charge_control_kind {
+    BAT_CTL_NONE = 0,
+    BAT_CTL_HW_THRESHOLD,
+    BAT_CTL_SW_BEHAVIOUR,
+};
+
 struct bat_device {
     char pack_id[96];        /* physical pack key: vendor_model_serial (or slot fallback) */
     char name[48];           /* kernel slot name ("BAT0", "BAT1"), or last slot for offline pack */
@@ -66,6 +79,9 @@ struct bat_device {
     int has_start_thresh, has_end_thresh;
     int start_thresh, end_thresh;
     char start_attr[40], end_attr[40];
+    int has_charge_behaviour;              /* 1: charge_behaviour exposes auto + inhibit-charge */
+    enum bat_charge_behaviour charge_behaviour;
+    char charge_behaviour_active[32];      /* active token without brackets */
 };
 
 enum bat_system_ac { BAT_AC_UNKNOWN, BAT_AC_OFFLINE, BAT_AC_ONLINE };
@@ -305,6 +321,164 @@ static inline int bat_apply_thresholds_to(struct bat_device *b, int new_start, i
     return ret;
 }
 
+static inline const char *bat_charge_behaviour_name(enum bat_charge_behaviour bh)
+{
+    if (bh == BAT_BEHAV_AUTO) return "auto";
+    if (bh == BAT_BEHAV_INHIBIT) return "inhibit-charge";
+    return NULL;
+}
+
+/* Parse a kernel charge_behaviour token list such as
+ * "[auto] inhibit-charge force-discharge".
+ * Returns:
+ *   0  valid and controllable (exactly 1 [active] token, and both "auto"
+ *      and "inhibit-charge" appear in the token list)
+ *   1  well-formed (exactly 1 [active] token) but missing "auto" or
+ *      "inhibit-charge" (not controllable for charge capping)
+ *  -1  malformed (empty, invalid chars, unmatched brackets, 0 or >1 active) */
+static inline int bat_parse_charge_behaviour(const char *line,
+                                             enum bat_charge_behaviour *behav_out,
+                                             char *active_out, size_t active_size)
+{
+    if (behav_out) *behav_out = BAT_BEHAV_UNKNOWN;
+    if (active_out && active_size > 0) active_out[0] = '\0';
+    if (!line || !line[0]) return -1;
+
+    int active_count = 0, has_auto = 0, has_inhibit = 0;
+    char active_tok[32] = "";
+    const char *p = line;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        size_t len = (size_t)(p - start);
+        int bracketed = 0;
+        const char *tok = start;
+        size_t tlen = len;
+        if (start[0] == '[' || start[len - 1] == ']') {
+            if (len < 3 || start[0] != '[' || start[len - 1] != ']')
+                return -1;
+            bracketed = 1;
+            tok = start + 1;
+            tlen = len - 2;
+        }
+        if (tlen == 0 || tlen >= sizeof active_tok) return -1;
+        for (size_t i = 0; i < tlen; i++) {
+            unsigned char c = (unsigned char)tok[i];
+            if (!(isalnum(c) || c == '-' || c == '_')) return -1;
+        }
+        if (tlen == 4 && memcmp(tok, "auto", 4) == 0) has_auto = 1;
+        else if (tlen == 14 && memcmp(tok, "inhibit-charge", 14) == 0) has_inhibit = 1;
+        if (bracketed) {
+            active_count++;
+            if (active_count > 1) return -1;
+            memcpy(active_tok, tok, tlen);
+            active_tok[tlen] = '\0';
+        }
+    }
+    if (active_count != 1) return -1;
+
+    enum bat_charge_behaviour bh = BAT_BEHAV_OTHER;
+    if (strcmp(active_tok, "auto") == 0) bh = BAT_BEHAV_AUTO;
+    else if (strcmp(active_tok, "inhibit-charge") == 0) bh = BAT_BEHAV_INHIBIT;
+    if (behav_out) *behav_out = bh;
+    if (active_out && active_size > 0)
+        snprintf(active_out, active_size, "%s", active_tok);
+    return (has_auto && has_inhibit) ? 0 : 1;
+}
+
+static inline int bat_read_charge_behaviour(const struct bat_device *b,
+                                            enum bat_charge_behaviour *behav_out,
+                                            char *active_out, size_t active_size)
+{
+    if (behav_out) *behav_out = BAT_BEHAV_UNKNOWN;
+    if (active_out && active_size > 0) active_out[0] = '\0';
+    if (!b || !b->name[0]) return -1;
+    char buf[256];
+    if (bat_read_line(bat_supply_root(), b->name, "charge_behaviour", buf, sizeof buf) != 0)
+        return -1;
+    return bat_parse_charge_behaviour(buf, behav_out, active_out, active_size);
+}
+
+static inline void bat_probe_charge_behaviour(struct bat_device *b)
+{
+    enum bat_charge_behaviour bh = BAT_BEHAV_UNKNOWN;
+    char active[32] = "";
+    int rc = bat_read_charge_behaviour(b, &bh, active, sizeof active);
+    b->has_charge_behaviour = (rc == 0);
+    b->charge_behaviour = (rc >= 0) ? bh : BAT_BEHAV_UNKNOWN;
+    snprintf(b->charge_behaviour_active, sizeof b->charge_behaviour_active, "%s",
+             rc >= 0 ? active : "");
+}
+
+/* Write "auto" or "inhibit-charge" to charge_behaviour, skipping the write when
+ * already at target and verifying readback afterwards. Updates b's cached
+ * charge_behaviour fields.
+ *
+ * A real kernel sysfs file receives a bare mode name ("auto\n" or
+ * "inhibit-charge\n") and formats the full bracketed list on readback
+ * ("auto [inhibit-charge]"). Device-free unit tests that back sysfs with plain
+ * regular files may define BAT_CHARGE_BEHAVIOUR_AFTER_WRITE(path, mode) to
+ * emulate that kernel readback formatting after the real write completes. */
+#ifndef BAT_CHARGE_BEHAVIOUR_AFTER_WRITE
+#define BAT_CHARGE_BEHAVIOUR_AFTER_WRITE(path, mode) ((void)0)
+#endif
+
+static inline int bat_write_charge_behaviour(struct bat_device *b,
+                                             enum bat_charge_behaviour target)
+{
+    const char *mode = bat_charge_behaviour_name(target);
+    if (!b || !b->present || b->is_offline_pack || b->is_peripheral || !mode)
+        return -1;
+    enum bat_charge_behaviour cur = BAT_BEHAV_UNKNOWN;
+    char active[32] = "";
+    if (bat_read_charge_behaviour(b, &cur, active, sizeof active) != 0) {
+        b->has_charge_behaviour = 0;
+        b->charge_behaviour = BAT_BEHAV_UNKNOWN;
+        b->charge_behaviour_active[0] = '\0';
+        return -1;
+    }
+    b->has_charge_behaviour = 1;
+    b->charge_behaviour = cur;
+    snprintf(b->charge_behaviour_active, sizeof b->charge_behaviour_active, "%s", active);
+    if (cur == target) return 0;
+
+    char path[512], buf[32];
+    int n = snprintf(path, sizeof path, "%s/%s/charge_behaviour", bat_supply_root(), b->name);
+    if (n <= 0 || (size_t)n >= sizeof path) return -1;
+    int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1; /* Never create a missing attribute. */
+    int wn = snprintf(buf, sizeof buf, "%s\n", mode);
+    if (wn <= 0 || (size_t)wn >= sizeof buf) {
+        (void)close(fd);
+        return -1;
+    }
+    ssize_t written = write(fd, buf, (size_t)wn);
+    int closed = close(fd);
+    if (written != wn || closed != 0) return -1;
+    BAT_CHARGE_BEHAVIOUR_AFTER_WRITE(path, mode);
+
+    enum bat_charge_behaviour actual = BAT_BEHAV_UNKNOWN;
+    char actual_active[32] = "";
+    int rc = bat_read_charge_behaviour(b, &actual, actual_active, sizeof actual_active);
+    b->has_charge_behaviour = (rc == 0);
+    b->charge_behaviour = (rc >= 0) ? actual : BAT_BEHAV_UNKNOWN;
+    snprintf(b->charge_behaviour_active, sizeof b->charge_behaviour_active, "%s",
+             rc >= 0 ? actual_active : "");
+    return rc == 0 && actual == target ? 0 : -1;
+}
+
+/* Hardware charge_control_end_threshold always takes precedence over
+ * charge_behaviour so ThinkPad and similar ECs keep their native behaviour. */
+static inline enum bat_charge_control_kind bat_charge_control_kind(const struct bat_device *b)
+{
+    if (!b) return BAT_CTL_NONE;
+    if (b->has_end_thresh) return BAT_CTL_HW_THRESHOLD;
+    if (!b->has_end_thresh && b->has_charge_behaviour) return BAT_CTL_SW_BEHAVIOUR;
+    return BAT_CTL_NONE;
+}
+
 static inline char bat_state_code(const char *status)
 {
     if (!status || !status[0]) return 'U';
@@ -395,6 +569,7 @@ static inline int bat_refresh_dynamic(struct bat_device *b, int64_t now_ts)
             b->capacity_decipct = (int)cap * 10;
         }
     }
+    bat_probe_charge_behaviour(b);
     return 0;
 }
 
@@ -597,6 +772,7 @@ static inline int bat_scan_live(struct bat_device *devs, int max, struct bat_ac_
                 snprintf(b->end_attr, sizeof b->end_attr, "%s", end_names[k]);
             }
         }
+        bat_probe_charge_behaviour(b);
         bat_compute_pack_id(b);
         count++;
     }

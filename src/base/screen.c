@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,6 +84,15 @@ struct output {
     uint8_t *map;
     uint64_t map_size;
     uint32_t pitch, fb_id, handle;
+    /* Optional second dumb framebuffer allocated on demand for tear-free
+     * double-buffered CPU presentation (screen_present_shm_flip). When active,
+     * map/fb_id/handle is always the currently scanned-out front buffer and
+     * back_* is the off-screen back buffer; they swap on DRM_EVENT_FLIP_COMPLETE. */
+    uint8_t *back_map;
+    uint64_t back_map_size;
+    uint32_t back_pitch, back_fb_id, back_handle;
+    int shm_flip_pending;            /* 1 while a PAGE_FLIP to back_fb_id is in flight */
+    int shm_flip_broken;             /* 1 if driver refused PAGE_FLIP between dumb FBs */
     uint32_t dmabuf_fb_id;           /* zero-copy DRM PRIME scanout FB, currently on screen */
     uint32_t dmabuf_pending_fb_id;   /* async PAGE_FLIP target FB, waiting for FLIP_COMPLETE */
     uint32_t dmabuf_cache_fb[SCREEN_DMABUF_SLOTS]; /* cached DRM FBs indexed by worker VPP slot */
@@ -684,10 +694,127 @@ static void clear_dmabuf_fbs(int fd, struct output *o, int restore_crtc)
     o->dmabuf_flip_pending = 0;
 }
 
+/* Swap front and back dumb framebuffer metadata once a back-buffer flip lands. */
+static void swap_dumb_buffers(struct output *o)
+{
+    uint8_t *tmp_map = o->map;
+    uint64_t tmp_size = o->map_size;
+    uint32_t tmp_pitch = o->pitch, tmp_fb = o->fb_id, tmp_handle = o->handle;
+    o->map = o->back_map;
+    o->map_size = o->back_map_size;
+    o->pitch = o->back_pitch;
+    o->fb_id = o->back_fb_id;
+    o->handle = o->back_handle;
+    o->back_map = tmp_map;
+    o->back_map_size = tmp_size;
+    o->back_pitch = tmp_pitch;
+    o->back_fb_id = tmp_fb;
+    o->back_handle = tmp_handle;
+}
+
+/* A back-buffer PAGE_FLIP that got no vblank in time (CRTC off, event lost):
+ * show its target now with a synchronous SETCRTC and make it the front. Front
+ * and back bookkeeping then always match the CRTC, so a late flip event for the
+ * old target can never land on the buffer that is being written next. */
+static void shm_settle_target(struct output *o)
+{
+    struct drm_mode_crtc set = {
+        .crtc_id = o->crtc_id,
+        .fb_id = o->back_fb_id,
+        .set_connectors_ptr = (uintptr_t)&o->conn_id,
+        .count_connectors = 1,
+        .mode = o->mode,
+        .mode_valid = 1,
+    };
+    o->shm_flip_pending = 0;
+    if (card >= 0 && o->back_fb_id != 0 && ioctl(card, DRM_IOCTL_MODE_SETCRTC, &set) == 0) {
+        swap_dumb_buffers(o);
+    }
+}
+
+static void destroy_back_buffer(int fd, struct output *o)
+{
+    if (o->back_map != NULL) {
+        munmap(o->back_map, (size_t)o->back_map_size);
+        o->back_map = NULL;
+    }
+    o->back_map_size = 0;
+    o->back_pitch = 0;
+    if (o->back_fb_id != 0) {
+        if (fd >= 0) ioctl(fd, DRM_IOCTL_MODE_RMFB, &o->back_fb_id);
+        o->back_fb_id = 0;
+    }
+    if (o->back_handle != 0) {
+        if (fd >= 0) {
+            struct drm_mode_destroy_dumb d = { .handle = o->back_handle };
+            ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &d);
+        }
+        o->back_handle = 0;
+    }
+    o->shm_flip_pending = 0;
+    o->shm_flip_broken = 0;
+}
+
+/* Lazily create the second dumb framebuffer for tear-free CPU page flipping.
+ * Ordinary TUI programs never trigger this, keeping their memory footprint and
+ * single-buffer test expectations unchanged. */
+static int ensure_back_buffer(int fd, struct output *o)
+{
+    if (o->back_map != NULL && o->back_fb_id != 0) return 0;
+    destroy_back_buffer(fd, o);
+    struct drm_mode_create_dumb dumb = {
+        .width = o->mode.hdisplay,
+        .height = o->mode.vdisplay,
+        .bpp = 32,
+    };
+    if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) < 0) return -1;
+    o->back_handle = dumb.handle;
+    o->back_pitch = dumb.pitch;
+    o->back_map_size = dumb.size;
+    if (dumb.pitch < (uint32_t)o->mode.hdisplay * 4u || dumb.pitch % 4 != 0 ||
+        dumb.size < (uint64_t)dumb.pitch * o->mode.vdisplay || dumb.size > SIZE_MAX) {
+        destroy_back_buffer(fd, o);
+        errno = EINVAL;
+        return -1;
+    }
+    struct drm_mode_fb_cmd f = {
+        .width = o->mode.hdisplay,
+        .height = o->mode.vdisplay,
+        .pitch = dumb.pitch,
+        .bpp = 32,
+        .depth = 24,
+        .handle = dumb.handle,
+    };
+    if (ioctl(fd, DRM_IOCTL_MODE_ADDFB, &f) < 0) {
+        int err = errno;
+        destroy_back_buffer(fd, o);
+        errno = err;
+        return -1;
+    }
+    o->back_fb_id = f.fb_id;
+    struct drm_mode_map_dumb m = { .handle = dumb.handle };
+    if (ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &m) < 0) {
+        int err = errno;
+        destroy_back_buffer(fd, o);
+        errno = err;
+        return -1;
+    }
+    void *p = mmap(NULL, (size_t)dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)m.offset);
+    if (p == MAP_FAILED) {
+        int err = errno;
+        destroy_back_buffer(fd, o);
+        errno = err;
+        return -1;
+    }
+    o->back_map = p;
+    return 0;
+}
+
 /* Each successful step owns its resources immediately, including on failure. */
 static void destroy_output(int fd, struct output *o)
 {
     clear_dmabuf_fbs(fd, o, 1);
+    destroy_back_buffer(fd, o);
     if (o->map != NULL) {
         munmap(o->map, (size_t)o->map_size);
         o->map = NULL;
@@ -1988,7 +2115,7 @@ static int drm_render_node_in_dir(const char *drm_dir, const char *dev_dri_dir, 
         int n = snprintf(cand, sizeof cand, "%s/%s", dev_dri_dir, e->d_name);
         if (n <= 0 || (size_t)n >= sizeof cand || access(cand, R_OK | W_OK) != 0) continue;
         if (!best[0] || strcmp(e->d_name, best) < 0) {
-            snprintf(best, sizeof best, "%s", e->d_name);
+            snprintf(best, sizeof best, "%.31s", e->d_name);
         }
     }
     closedir(d);
@@ -2874,9 +3001,24 @@ void screen_flush(void)
     if (card < 0 || noutputs == 0 || shadow == NULL || lent || dirty.x1 == dirty.x2) {
         return;
     }
+    if (noutputs == 1 && outputs[0].back_map != NULL && !outputs[0].soft_cursor && ndesk < 2) {
+        struct output *o = &outputs[0];
+        /* Wait briefly for an in-flight SHM flip before writing the back buffer,
+         * so a synchronous TUI redraw (extdisplay returning to setup_loop) never
+         * drops a frame and never writes into the live front buffer. */
+        if (o->shm_flip_pending && screen_flip_complete() <= 0 && o->shm_flip_pending) {
+            struct pollfd p = { .fd = card, .events = POLLIN };
+            if (poll(&p, 1, 50) > 0 && (p.revents & POLLIN)) (void)screen_flip_complete();
+        }
+        if (o->shm_flip_pending) shm_settle_target(o);
+        if (screen_present_shm_flip(shadow, width, height) >= 0) {
+            dirty.x2 = dirty.x1;
+            return;
+        }
+    }
     int dmabuf_active = 0;
     for (uint32_t i = 0; i < noutputs; i++) {
-        if (has_any_dmabuf_fb(&outputs[i])) dmabuf_active = 1;
+        if (has_any_dmabuf_fb(&outputs[i]) || outputs[i].shm_flip_pending) dmabuf_active = 1;
     }
     if (dmabuf_active) {
         presented_valid = 0;
@@ -2892,6 +3034,15 @@ void screen_flush(void)
         struct output *o = &outputs[i];
         if (o->map == NULL) {
             continue;
+        }
+        if (o->shm_flip_pending) {
+            /* Wait/drain or restore front FB before direct single-buffer TUI
+             * drawing so screen_flush never writes into an in-flight flip. */
+            (void)screen_flip_complete();
+            if (o->shm_flip_pending) {
+                o->shm_flip_pending = 0;
+                (void)set_crtc(card, o);
+            }
         }
         if (has_any_dmabuf_fb(o)) {
             clear_dmabuf_fbs(card, o, 1);
@@ -3287,7 +3438,7 @@ int screen_render_node_for(const char *selector, char *path, size_t size)
 int screen_flip_fd(void)
 {
     if (card < 0 || noutputs != 1 || lent || window_mode || extended) return -1;
-    return outputs[0].dmabuf_flip_pending ? card : -1;
+    return (outputs[0].dmabuf_flip_pending || outputs[0].shm_flip_pending) ? card : -1;
 }
 
 int screen_flip_complete(void)
@@ -3312,7 +3463,10 @@ int screen_flip_complete(void)
             memcpy(&ev, buf + pos, sizeof ev);
             if (ev.length < sizeof ev || pos + ev.length > (size_t)n) break;
             if (ev.type == DRM_EVENT_FLIP_COMPLETE && ev.length >= sizeof(struct drm_event_vblank)) {
-                if (o->dmabuf_flip_pending) {
+                struct drm_event_vblank vb;
+                memcpy(&vb, buf + pos, sizeof vb);
+                if (o->dmabuf_flip_pending &&
+                    (vb.user_data == 0 || vb.user_data == (uint64_t)o->dmabuf_pending_fb_id)) {
                     if (o->dmabuf_fb_id != 0 && o->dmabuf_fb_id != o->dmabuf_pending_fb_id &&
                         !is_cached_dmabuf_fb(o, o->dmabuf_fb_id)) {
                         ioctl(card, DRM_IOCTL_MODE_RMFB, &o->dmabuf_fb_id);
@@ -3322,6 +3476,14 @@ int screen_flip_complete(void)
                     o->dmabuf_active_slot = o->dmabuf_pending_slot;
                     o->dmabuf_pending_slot = -1;
                     o->dmabuf_flip_pending = 0;
+                    completed = 1;
+                } else if (o->shm_flip_pending &&
+                           (vb.user_data == 0 || vb.user_data == (uint64_t)o->back_fb_id)) {
+                    /* The back dumb buffer is now actively scanning out; swap so
+                     * map/fb_id always tracks the front buffer and back_* is safe
+                     * to render the next frame into. */
+                    swap_dumb_buffers(o);
+                    o->shm_flip_pending = 0;
                     completed = 1;
                 }
             }
@@ -3335,11 +3497,12 @@ void screen_flip_reset(void)
 {
     if (card < 0 || noutputs != 1 || lent || window_mode || extended) return;
     struct output *o = &outputs[0];
-    if (!o->dmabuf_flip_pending) return;
+    if (!o->dmabuf_flip_pending && !o->shm_flip_pending) return;
     if (screen_flip_complete() > 0) return;
     o->dmabuf_flip_pending = 0;
     o->dmabuf_pending_fb_id = 0;
     o->dmabuf_pending_slot = -1;
+    if (o->shm_flip_pending) shm_settle_target(o);
 }
 
 int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t w, uint32_t h)
@@ -3358,9 +3521,9 @@ int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t 
     if (card < 0 || noutputs != 1 || lent) { errno = EAGAIN; return -1; }
     struct output *o = &outputs[0];
     if (o->mode.hdisplay != w || o->mode.vdisplay != h) { errno = EINVAL; return -1; }
-    if (o->dmabuf_flip_pending) {
+    if (o->dmabuf_flip_pending || o->shm_flip_pending) {
         (void)screen_flip_complete();
-        if (o->dmabuf_flip_pending) { errno = EBUSY; return -1; }
+        if (o->dmabuf_flip_pending || o->shm_flip_pending) { errno = EBUSY; return -1; }
     }
     uint32_t fb_id = 0;
     if (use_cache && p->num_planes == 0) {
@@ -3527,6 +3690,97 @@ int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc
     };
     int r = screen_present_dmabuf_planes(&p, w, h);
     return r < 0 ? -1 : 0;
+}
+
+/* Tear-free double-buffered CPU presentation for single-output mirrored mode.
+ * Writes directly into the inactive back dumb buffer and flips via
+ * DRM_IOCTL_MODE_PAGE_FLIP + DRM_MODE_PAGE_FLIP_EVENT, bypassing shadow,
+ * present_diff, and present_commit: for a 60 Hz full-screen video stream,
+ * full-frame memcmp + memcpy against a shadow snapshot costs ~29 MB/frame of
+ * extra memory bandwidth at 2560x1440 with no partial-damage benefit, because
+ * every back buffer must hold a complete frame before the CRTC scans it out.
+ * Never writes into the currently scanned-out front buffer. */
+int screen_present_shm_flip(const uint32_t *pixels, uint32_t w, uint32_t h)
+{
+    if (!pixels || w == 0 || h == 0 || window_mode || extended) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (card < 0 || noutputs != 1 || lent) {
+        errno = EAGAIN;
+        return -1;
+    }
+    struct output *o = &outputs[0];
+    if (o->map == NULL || o->fb_id == 0) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    if (o->dmabuf_flip_pending || o->shm_flip_pending) {
+        (void)screen_flip_complete();
+        if (o->dmabuf_flip_pending || o->shm_flip_pending) {
+            errno = EBUSY;
+            return -1;
+        }
+    }
+    if (ensure_back_buffer(card, o) < 0) {
+        return -1;
+    }
+    /* Copy the full frame (aspect-preserving fit with black borders when sizes
+     * differ, or direct row memcpy when 1:1) into the inactive back buffer. */
+    struct drm_clip_rect full = { 0, 0, (unsigned short)w, (unsigned short)h };
+    struct drm_clip_rect clip = copy_picture(o->back_map, o->back_pitch,
+        o->mode.hdisplay, o->mode.vdisplay, pixels, w, h, full);
+    if (clip.x1 < clip.x2 && clip.y1 < clip.y2) {
+        struct drm_mode_fb_dirty_cmd cmd = {
+            .fb_id = o->back_fb_id,
+            .num_clips = 1,
+            .clips_ptr = (uintptr_t)&clip,
+        };
+        (void)ioctl(card, DRM_IOCTL_MODE_DIRTYFB, &cmd);
+    }
+    /* Leaving dma-buf scanout: transition onto the populated back dumb FB with
+     * SETCRTC first so cached/active dma-buf FBs can be safely removed without
+     * blanking the CRTC or racing with an in-flight flip off a dma-buf FB. */
+    int leaving_dmabuf = has_any_dmabuf_fb(o);
+    if (!leaving_dmabuf && !o->shm_flip_broken) {
+        struct drm_mode_crtc_page_flip flip = {
+            .crtc_id = o->crtc_id,
+            .fb_id = o->back_fb_id,
+            .flags = DRM_MODE_PAGE_FLIP_EVENT,
+            .user_data = (uint64_t)o->back_fb_id,
+        };
+        if (ioctl(card, DRM_IOCTL_MODE_PAGE_FLIP, &flip) == 0) {
+            o->shm_flip_pending = 1;
+            presented_valid = 0;
+            dirty.x2 = dirty.x1;
+            return 1;
+        }
+        int flip_err = errno;
+        if (flip_err == EBUSY || flip_err == EACCES || flip_err == EPERM) {
+            errno = flip_err;
+            return -1;
+        }
+        o->shm_flip_broken = 1;
+        say("screen: SHM DRM page flip refused (%s); using synchronous SETCRTC", strerror(flip_err));
+    }
+    struct drm_mode_crtc set = {
+        .crtc_id = o->crtc_id,
+        .fb_id = o->back_fb_id,
+        .set_connectors_ptr = (uintptr_t)&o->conn_id,
+        .count_connectors = 1,
+        .mode = o->mode,
+        .mode_valid = 1,
+    };
+    if (ioctl(card, DRM_IOCTL_MODE_SETCRTC, &set) < 0) {
+        return -1;
+    }
+    swap_dumb_buffers(o);
+    if (leaving_dmabuf) {
+        clear_dmabuf_fbs(card, o, 0);
+    }
+    presented_valid = 0;
+    dirty.x2 = dirty.x1;
+    return 0;
 }
 
 void screen_cells(int *w, int *h, int *t)

@@ -351,12 +351,20 @@ table inet locachy-filter {
     set ssh_lan_v6 {
         type ifname . ipv6_addr . inet_service
     }
+    set ssh_enroll_v4 {
+        type ifname . ipv4_addr . inet_service
+    }
+    set ssh_enroll_v6 {
+        type ifname . ipv6_addr . inet_service
+    }
     chain input {
         type filter hook input priority filter; policy drop;
         iif "lo" accept
         iifname "tailscale0" accept
         iifname . ip daddr . tcp dport @ssh_lan_v4 accept
         iifname . ip6 daddr . tcp dport @ssh_lan_v6 accept
+        iifname . ip daddr . tcp dport @ssh_enroll_v4 accept
+        iifname . ip6 daddr . tcp dport @ssh_enroll_v6 accept
         ct state established,related accept
         ct state invalid drop
         meta l4proto { icmp, ipv6-icmp } accept

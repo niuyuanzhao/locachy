@@ -39,6 +39,7 @@
 #define BAT_STATIC_REFRESH_SEC 1800  /* re-read static EC attrs every 30 min */
 #define BAT_BUF_MAX 16               /* pending RAM samples per tracked pack */
 #define BAT_POLL_ACTIVE_MS 60000     /* 60 s while charging/discharging */
+#define BAT_POLL_SW_NEAR_CAP_MS 15000 /* 15 s only while SW-capped pack is actively charging near cap */
 #define BAT_POLL_IDLE_AC_MS 300000   /* 5 min when AC online & all packs Full/Not charging */
 
 static volatile sig_atomic_t stop_flag;
@@ -66,6 +67,7 @@ struct slot_state {
     int npending;
     int64_t last_flush_ts;
     struct bat_charge_slot_status charge_status;
+    int sw_target_end; /* active SW charge_behaviour cap (20..99) on AC, else -1 */
 };
 
 static struct slot_state slots[BAT_MAX_DEVICES];
@@ -79,6 +81,11 @@ static int active_dis_dpct;
  * such as test-battery-handoff.c invoking record_snapshot() get immediate
  * full scans & writes). */
 static int daemon_mode;
+/* Software charge_behaviour latching is allowed in daemon mode and in-process
+ * tests, never in --once mode (which exits immediately without a service loop
+ * to release inhibit-charge). */
+static int sw_behaviour_allow_inhibit = 1;
+static int sw_near_cap_poll;
 static int64_t last_full_scan_ts;
 static int last_ac_online;
 static enum bat_system_ac last_system_ac;
@@ -239,10 +246,16 @@ static void read_charge_config(void)
 
 /* A baseline belongs to this pack in this slot, not to whichever pack is
  * inserted next. Keep it separate from historical .meta files, which are
- * rewritten for ordinary samples and are only keyed by pack. */
+ * rewritten for ordinary samples and are only keyed by pack.
+ *
+ * Line 4 format (backwards-compatible):
+ *   Hardware threshold:  <start> <end> <start_attr|-> charge_control_end_threshold
+ *   Software behaviour:  -1 -1 <saved_behaviour> charge_behaviour */
 struct charge_baseline {
+    int is_behaviour;
     int start, end;
     char start_attr[40], end_attr[40];
+    char saved_behaviour[32];
 };
 
 static int charge_baseline_path(const struct bat_device *b, char *path, size_t cap)
@@ -266,9 +279,19 @@ static int charge_identity_matches(const struct bat_device *b)
            strcmp(serial, b->serial) == 0;
 }
 
+static int valid_saved_behaviour_token(const char *tok)
+{
+    if (!tok || !tok[0] || !isalnum((unsigned char)tok[0]) || strlen(tok) >= 32) return 0;
+    for (const unsigned char *p = (const unsigned char *)tok; *p; p++) {
+        if (!(isalnum(*p) || *p == '-' || *p == '_')) return 0;
+    }
+    return 1;
+}
+
 /* 0 = not saved, 1 = valid saved baseline, -1 = unreadable/conflicting. */
 static int load_charge_baseline(const struct bat_device *b, const char *path, struct charge_baseline *saved)
 {
+    memset(saved, 0, sizeof *saved);
     FILE *f = fopen(path, "r");
     if (!f) return errno == ENOENT ? 0 : -1;
     char identity[3][66];
@@ -284,10 +307,23 @@ static int load_charge_baseline(const struct bat_device *b, const char *path, st
         ok = strcmp(identity[0], b->vendor) == 0 && strcmp(identity[1], b->model) == 0 &&
              strcmp(identity[2], b->serial) == 0 &&
              fscanf(f, "%d %d %39s %39s", &saved->start, &saved->end,
-                    saved->start_attr, saved->end_attr) == 4 &&
-             saved->start >= -1 && saved->start < saved->end && saved->end > 0 && saved->end <= 100 &&
-             strcmp(saved->end_attr, "charge_control_end_threshold") == 0 &&
-             strcmp(saved->start_attr, saved->start < 0 ? "-" : "charge_control_start_threshold") == 0;
+                    saved->start_attr, saved->end_attr) == 4;
+        if (ok) {
+            if (strcmp(saved->end_attr, "charge_behaviour") == 0) {
+                saved->is_behaviour = 1;
+                ok = saved->start == -1 && saved->end == -1 &&
+                     valid_saved_behaviour_token(saved->start_attr);
+                if (ok)
+                    snprintf(saved->saved_behaviour, sizeof saved->saved_behaviour,
+                             "%.31s", saved->start_attr);
+            } else {
+                saved->is_behaviour = 0;
+                ok = saved->start >= -1 && saved->start < saved->end &&
+                     saved->end > 0 && saved->end <= 100 &&
+                     strcmp(saved->end_attr, "charge_control_end_threshold") == 0 &&
+                     strcmp(saved->start_attr, saved->start < 0 ? "-" : "charge_control_start_threshold") == 0;
+            }
+        }
     }
     fclose(f);
     return ok ? 1 : -1;
@@ -311,6 +347,25 @@ static int save_charge_baseline(const struct bat_device *b, const char *path, in
     if (fd < 0) return -1;
     int ok = dprintf(fd, "%s\n%s\n%s\n%d %d %s %s\n", b->vendor, b->model, b->serial,
                      start, end, start < 0 ? "-" : b->start_attr, b->end_attr) > 0 && fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    if (!ok || rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return sync_history_dir();
+}
+
+static int save_charge_behaviour_baseline(const struct bat_device *b, const char *path,
+                                          const char *saved_behaviour)
+{
+    if (!valid_saved_behaviour_token(saved_behaviour)) return -1;
+    char tmp[600];
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp.XXXXXX", path);
+    if (n <= 0 || (size_t)n >= sizeof tmp) return -1;
+    int fd = mkstemp(tmp);
+    if (fd < 0) return -1;
+    int ok = dprintf(fd, "%s\n%s\n%s\n-1 -1 %s charge_behaviour\n",
+                     b->vendor, b->model, b->serial, saved_behaviour) > 0 && fsync(fd) == 0;
     if (close(fd) != 0) ok = 0;
     if (!ok || rename(tmp, path) != 0) {
         unlink(tmp);
@@ -802,7 +857,7 @@ static int64_t charge_full_until(const struct bat_ac_info *ac, int64_t now)
     return 0;
 }
 
-static int present_charge_threshold(const struct bat_device *b, const char *attr)
+static int present_charge_attr(const struct bat_device *b, const char *attr)
 {
     char path[512];
     int n = snprintf(path, sizeof path, "%s/%s/%s", bat_supply_root(), b->name, attr);
@@ -812,20 +867,35 @@ static int present_charge_threshold(const struct bat_device *b, const char *attr
     return S_ISREG(st.st_mode) ? 1 : -1;
 }
 
-/* Adaptive control only uses the kernel's standard power_supply ABI. */
+/* Adaptive control only uses the kernel's standard power_supply ABI:
+ * charge_control_end_threshold first (never falling back if present and
+ * unreadable/malformed), then charge_behaviour (auto + inhibit-charge). */
 static const char *charge_check_support(const struct bat_device *b)
 {
     if (!b->serial[0] || !strcmp(b->serial, "0") || !strcasecmp(b->serial, "unknown"))
         return "unsupported";
-    if (!b->has_end_thresh || strcmp(b->end_attr, "charge_control_end_threshold") != 0) {
-        int present = present_charge_threshold(b, "charge_control_end_threshold");
-        return present == 0 ? "unsupported" : "error";
+    if (b->has_end_thresh) {
+        if (strcmp(b->end_attr, "charge_control_end_threshold") != 0) {
+            int present = present_charge_attr(b, "charge_control_end_threshold");
+            return present == 0 ? "unsupported" : "error";
+        }
+        if (b->has_start_thresh && strcmp(b->start_attr, "charge_control_start_threshold") != 0)
+            return "unsupported";
+        if (!b->has_start_thresh && present_charge_attr(b, "charge_control_start_threshold") != 0)
+            return "error";
+        return NULL;
     }
-    if (b->has_start_thresh && strcmp(b->start_attr, "charge_control_start_threshold") != 0)
-        return "unsupported";
-    if (!b->has_start_thresh && present_charge_threshold(b, "charge_control_start_threshold") != 0)
+    if (present_charge_attr(b, "charge_control_end_threshold") != 0)
         return "error";
-    return NULL;
+    if (b->has_charge_behaviour)
+        return NULL;
+    int behav_present = present_charge_attr(b, "charge_behaviour");
+    if (behav_present == 0) return "unsupported";
+    if (behav_present < 0) return "error";
+    enum bat_charge_behaviour bh = BAT_BEHAV_UNKNOWN;
+    int rc = bat_read_charge_behaviour(b, &bh, NULL, 0);
+    if (rc == 0) return NULL;
+    return rc > 0 ? "unsupported" : "error";
 }
 
 static struct slot_state *get_slot(const char *slot_name, int create)
@@ -1083,6 +1153,8 @@ static int apply_managed_thresholds(struct bat_device *b, int have,
                                     struct bat_charge_slot_status *s)
 {
     s->requested_end = end;
+    if (have && saved->is_behaviour)
+        return -1;
     if (!b->has_start_thresh) start = -1;
     if ((b->has_start_thresh && bat_read_threshold(b, b->start_attr, 0, &b->start_thresh) != 0) ||
         bat_read_threshold(b, b->end_attr, 1, &b->end_thresh) != 0 ||
@@ -1099,6 +1171,139 @@ static int apply_managed_thresholds(struct bat_device *b, int have,
             return -1;
     }
     return 0;
+}
+
+/* Release software charge_behaviour back to "auto" and unlink our .charge-*
+ * baseline marker. When force_auto is 0, only an active inhibit-charge (e.g.
+ * orphaned after a crash) or an owned baseline triggers a write to "auto". */
+static int sw_release_behaviour(struct bat_device *b, int have,
+                                const struct charge_baseline *saved,
+                                const char *baseline_path, int force_auto)
+{
+    if (have && !saved->is_behaviour)
+        return -1;
+    enum bat_charge_behaviour cur = BAT_BEHAV_UNKNOWN;
+    char active[32] = "";
+    if (bat_read_charge_behaviour(b, &cur, active, sizeof active) != 0) {
+        b->has_charge_behaviour = 0;
+        b->charge_behaviour = BAT_BEHAV_UNKNOWN;
+        b->charge_behaviour_active[0] = '\0';
+        return -1;
+    }
+    b->has_charge_behaviour = 1;
+    b->charge_behaviour = cur;
+    snprintf(b->charge_behaviour_active, sizeof b->charge_behaviour_active, "%s", active);
+
+    /* Releasing an inhibit is always safe, so it is written before any identity
+     * check; the baseline (keyed to this pack) is only removed for the same pack. */
+    int need_auto = (cur == BAT_BEHAV_INHIBIT) || (cur != BAT_BEHAV_AUTO && (have || force_auto));
+    if (need_auto && bat_write_charge_behaviour(b, BAT_BEHAV_AUTO) != 0)
+        return -1;
+    if (have) {
+        if (!charge_identity_matches(b))
+            return -1;
+        if (unlink(baseline_path) != 0 && errno != ENOENT)
+            return -1;
+        if (sync_history_dir() != 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Software hysteresis enforcer for BAT_CTL_SW_BEHAVIOUR:
+ *   pct >= end         -> inhibit-charge (recording .charge-* baseline first)
+ *   pct <= start       -> auto (unlinking .charge-*)
+ *   start < pct < end  -> preserve current auto / inhibit-charge (no chatter)
+ * Never latches inhibit-charge when off AC, in --once mode, or at end >= 100. */
+static int sw_enforce_cap(struct bat_device *b, const struct bat_ac_info *ac,
+                          int have, const struct charge_baseline *saved,
+                          const char *baseline_path, int start, int end,
+                          int *actual_end_out)
+{
+    *actual_end_out = -1;
+    if (have && !saved->is_behaviour)
+        return -1;
+    if (end < 20 || end > 100)
+        return -1;
+
+    if (ac->system != BAT_AC_ONLINE || !sw_behaviour_allow_inhibit || end >= 100) {
+        if (sw_release_behaviour(b, have, saved, baseline_path, end >= 100) != 0)
+            return -1;
+        if (end >= 100 && ac->system == BAT_AC_ONLINE)
+            *actual_end_out = 100;
+        return 0;
+    }
+
+    if (start < 0) start = end >= 5 ? end - 5 : 0;
+    if (start >= end) start = end - 1;
+
+    enum bat_charge_behaviour cur = BAT_BEHAV_UNKNOWN;
+    char active[32] = "";
+    if (bat_read_charge_behaviour(b, &cur, active, sizeof active) != 0) {
+        b->has_charge_behaviour = 0;
+        b->charge_behaviour = BAT_BEHAV_UNKNOWN;
+        b->charge_behaviour_active[0] = '\0';
+        return -1;
+    }
+    b->has_charge_behaviour = 1;
+    b->charge_behaviour = cur;
+    snprintf(b->charge_behaviour_active, sizeof b->charge_behaviour_active, "%s", active);
+
+    int pct = b->capacity_pct;
+    /* The baseline records what firmware reported before LOCachy took control. */
+    const char *pre = cur == BAT_BEHAV_INHIBIT ? "auto" : active;
+    if (pct >= end) {
+        if (cur != BAT_BEHAV_INHIBIT) {
+            if (!charge_identity_matches(b))
+                return -1;
+            if (!have && save_charge_behaviour_baseline(b, baseline_path, pre) != 0)
+                return -1;
+            if (bat_write_charge_behaviour(b, BAT_BEHAV_INHIBIT) != 0)
+                return -1;
+        } else if (!have) {
+            if (!charge_identity_matches(b) ||
+                save_charge_behaviour_baseline(b, baseline_path, "auto") != 0)
+                return -1;
+        }
+    } else if (pct <= start) {
+        if (sw_release_behaviour(b, have, saved, baseline_path, 1) != 0)
+            return -1;
+    } else {
+        if (cur == BAT_BEHAV_INHIBIT) {
+            if (!have) {
+                if (!charge_identity_matches(b) ||
+                    save_charge_behaviour_baseline(b, baseline_path, "auto") != 0)
+                    return -1;
+            }
+        } else if (cur == BAT_BEHAV_AUTO) {
+            /* Already auto: nothing to write; a baseline, if any, stays for the next cap. */
+        } else {
+            if (sw_release_behaviour(b, have, saved, baseline_path, 1) != 0)
+                return -1;
+        }
+    }
+    *actual_end_out = end;
+    return 0;
+}
+
+/* Fail-safe release for every occupied BAT_CTL_SW_BEHAVIOUR slot before sleep,
+ * hibernate, or service exit so the EC is never left inhibiting charge. */
+static void release_all_sw_behaviour(void)
+{
+    for (int j = 0; j < nslots; j++) {
+        struct slot_state *sl = &slots[j];
+        if (!sl->occupied) continue;
+        struct bat_device *b = &sl->dev;
+        if (bat_charge_control_kind(b) != BAT_CTL_SW_BEHAVIOUR) continue;
+        if (present_charge_attr(b, "charge_control_end_threshold") != 0) continue;
+        char path[560];
+        struct charge_baseline saved = { 0 };
+        int have = charge_baseline_path(b, path, sizeof path) == 0
+                   ? load_charge_baseline(b, path, &saved) : -1;
+        if (have < 0 || (have && !saved.is_behaviour)) have = 0;
+        (void)sw_release_behaviour(b, have, &saved, path, have);
+        sl->sw_target_end = -1;
+    }
 }
 
 /* Convert charge_alarm_at to a stable Unix timestamp, caching across routine
@@ -1150,11 +1355,16 @@ static void update_charge_slot(struct slot_state *sl, const struct bat_ac_info *
     snprintf(s->slot, sizeof s->slot, "%s", b->name);
     snprintf(s->pack_id, sizeof s->pack_id, "%s", b->pack_id);
     s->requested_end = -1;
+    sl->sw_target_end = -1;
 
     const char *state = "manual";
+    int sw_actual_end = -1;
     int managed = charge_cfg.adaptive || full_until > 0;
+    int broken_hw_end = !b->has_end_thresh &&
+                        present_charge_attr(b, "charge_control_end_threshold") != 0;
+    int is_sw = !broken_hw_end && bat_charge_control_kind(b) == BAT_CTL_SW_BEHAVIOUR;
     char path[560];
-    struct charge_baseline saved;
+    struct charge_baseline saved = { 0 };
     int have = charge_baseline_path(b, path, sizeof path) == 0 ? load_charge_baseline(b, path, &saved) : -1;
     if (have < 0) {
         state = "error";
@@ -1193,8 +1403,15 @@ static void update_charge_slot(struct slot_state *sl, const struct bat_ac_info *
             (void)save_ctrl_history(0);
         }
         state = "full";
-        if (apply_managed_thresholds(b, have, &saved, path, 99, 100, s) != 0)
+        if (is_sw) {
+            s->requested_end = 100;
+            if (sw_release_behaviour(b, have, &saved, path, 1) != 0)
+                state = "error";
+            else
+                sw_actual_end = 100;
+        } else if (apply_managed_thresholds(b, have, &saved, path, 99, 100, s) != 0) {
             state = "error";
+        }
         goto done;
     }
 
@@ -1302,11 +1519,18 @@ static void update_charge_slot(struct slot_state *sl, const struct bat_ac_info *
     switch (adaptive_ctrl.state) {
     case BAT_CTRL_STATE_ACTIVE:
         if (adaptive_ctrl.is_sustain_set) {
-            /* HOLD: end = max(hold_percent, current percent). */
-            int end = b->capacity_pct > adaptive_ctrl.cfg.hold_percent ?
+            int end;
+            if (is_sw) {
+                end = adaptive_ctrl.sustain_percent;
+                if (end < adaptive_ctrl.cfg.hold_percent) end = adaptive_ctrl.cfg.hold_percent;
+                if (end > 100) end = 100;
+            } else {
+                /* HOLD: end = max(hold_percent, current percent). */
+                end = b->capacity_pct > adaptive_ctrl.cfg.hold_percent ?
                       b->capacity_pct : adaptive_ctrl.cfg.hold_percent;
-            if (end > 100) end = 100;
-            int start = b->has_start_thresh ? (end >= 5 ? end - 5 : 0) : -1;
+                if (end > 100) end = 100;
+            }
+            int start = (is_sw || b->has_start_thresh) ? (end >= 5 ? end - 5 : 0) : -1;
             adaptive_held_this_plug = 1;
             adaptive_released_this_plug = 0;
             state = "hold";
@@ -1314,8 +1538,15 @@ static void update_charge_slot(struct slot_state *sl, const struct bat_ac_info *
                 s->release_ts = stable_release_ts(adaptive_ctrl.charge_alarm_at, now, boot_sec, clock_stepped);
             else
                 s->release_ts = 0;
-            if (apply_managed_thresholds(b, have, &saved, path, start, end, s) != 0)
+            if (is_sw) {
+                s->requested_end = end;
+                if (sw_enforce_cap(b, ac, have, &saved, path, start, end, &sw_actual_end) != 0)
+                    state = "error";
+                else if (sw_behaviour_allow_inhibit && end < 100)
+                    sl->sw_target_end = end;
+            } else if (apply_managed_thresholds(b, have, &saved, path, start, end, s) != 0) {
                 state = "error";
+            }
             goto done;
         }
         state = "inactive";
@@ -1335,8 +1566,15 @@ static void update_charge_slot(struct slot_state *sl, const struct bat_ac_info *
     case BAT_CTRL_STATE_INACTIVE:
         if (adaptive_held_this_plug && adaptive_released_this_plug && !adaptive_pred_failed) {
             state = "top-up";
-            if (apply_managed_thresholds(b, have, &saved, path, 99, 100, s) != 0)
+            if (is_sw) {
+                s->requested_end = 100;
+                if (sw_release_behaviour(b, have, &saved, path, 1) != 0)
+                    state = "error";
+                else
+                    sw_actual_end = 100;
+            } else if (apply_managed_thresholds(b, have, &saved, path, 99, 100, s) != 0) {
                 state = "error";
+            }
             goto done;
         }
         state = "inactive";
@@ -1356,10 +1594,38 @@ static void update_charge_slot(struct slot_state *sl, const struct bat_ac_info *
     }
 
 manual_limits:
-    if (have) {
+    if (is_sw) {
+        int can_cap = strcmp(state, "error") != 0;
+        if (can_cap && ac->system == BAT_AC_ONLINE &&
+            charge_cfg.end >= 20 && charge_cfg.end <= 99) {
+            int end = charge_cfg.end;
+            int start = (charge_cfg.start >= 0 && charge_cfg.start < end)
+                        ? charge_cfg.start : (end >= 5 ? end - 5 : 0);
+            s->requested_end = end;
+            if (sw_enforce_cap(b, ac, have, &saved, path, start, end, &sw_actual_end) != 0)
+                state = "error";
+            else if (sw_behaviour_allow_inhibit)
+                sl->sw_target_end = end;
+        } else if (can_cap && charge_cfg.end == 100) {
+            s->requested_end = 100;
+            if (sw_release_behaviour(b, have, &saved, path, 1) != 0)
+                state = "error";
+            else
+                sw_actual_end = 100;
+        } else if (have || b->charge_behaviour == BAT_BEHAV_INHIBIT) {
+            if (can_cap && charge_cfg.end >= 20 && charge_cfg.end <= 99)
+                s->requested_end = charge_cfg.end;
+            if (sw_release_behaviour(b, have, &saved, path, have) != 0)
+                state = "error";
+        } else if (can_cap && charge_cfg.end >= 20 && charge_cfg.end <= 99) {
+            s->requested_end = charge_cfg.end;
+        }
+    } else if (broken_hw_end && (have || charge_cfg.start >= 0 || charge_cfg.end >= 0)) {
+        state = "error";
+    } else if (have) {
         int start = charge_cfg.start >= 0 ? charge_cfg.start : saved.start;
         int end = charge_cfg.end >= 0 ? charge_cfg.end : saved.end;
-        if (!b->has_end_thresh || strcmp(saved.end_attr, b->end_attr) ||
+        if (saved.is_behaviour || !b->has_end_thresh || strcmp(saved.end_attr, b->end_attr) ||
             strcmp(saved.start_attr, b->has_start_thresh ? b->start_attr : "-") ||
             !charge_identity_matches(b) || bat_apply_thresholds_to(b, start, end) != 0 ||
             unlink(path) != 0 || sync_history_dir() != 0) {
@@ -1374,7 +1640,10 @@ manual_limits:
     }
 done:
     if (intent_error && charge_cfg.full_until) state = "error";
-    s->actual_end = b->has_end_thresh ? b->end_thresh : -1;
+    if (is_sw)
+        s->actual_end = strcmp(state, "error") == 0 ? -1 : sw_actual_end;
+    else
+        s->actual_end = b->has_end_thresh ? b->end_thresh : -1;
     snprintf(s->state, sizeof s->state, "%s", state);
 }
 
@@ -1565,6 +1834,7 @@ static int record_snapshot_ex(int force, int full_scan, int reapply_manual)
         .full_until = charge_full_until(&ac, now_ts),
     };
     int full_applied = 0;
+    int near_cap = 0;
     for (int j = 0; j < nslots; j++) {
         struct slot_state *sl = &slots[j];
         if (!sl->occupied) continue;
@@ -1578,6 +1848,15 @@ static int record_snapshot_ex(int force, int full_scan, int reapply_manual)
                            reapply_manual || manual_slots[j],
                            reapply_manual, continuity_break, sys_bats == 1);
         if (!strcmp(sl->charge_status.state, "full")) full_applied = 1;
+        if (ac.system == BAT_AC_ONLINE &&
+            bat_charge_control_kind(&sl->dev) == BAT_CTL_SW_BEHAVIOUR &&
+            sl->sw_target_end >= 20 && sl->sw_target_end <= 99 &&
+            strcmp(sl->dev.status, "Charging") == 0 &&
+            sl->dev.charge_behaviour != BAT_BEHAV_INHIBIT &&
+            sl->dev.capacity_pct < sl->sw_target_end &&
+            sl->sw_target_end - sl->dev.capacity_pct <= 3) {
+            near_cap = 1;
+        }
         charge.slots[charge.nslots++] = sl->charge_status;
     }
     if (!full_applied) charge.full_until = 0;
@@ -1639,6 +1918,7 @@ static int record_snapshot_ex(int force, int full_scan, int reapply_manual)
     last_ac_online = ac.online;
     last_system_ac = ac.system;
     all_packs_idle_ac = (sys_bats > 0 && idle_ac);
+    sw_near_cap_poll = near_cap;
     return sys_bats;
 }
 
@@ -1647,12 +1927,17 @@ static int record_snapshot(int force)
     return record_snapshot_ex(force, 1, force);
 }
 
-/* Pre-suspend / SIGUSR1 hook: flush low-power durations, run synchronous
- * SUSPEND prediction if running, and persist history before sleep. */
+/* Pre-suspend / SIGUSR1 hook: release any software inhibit-charge FIRST so
+ * charging resumes during sleep/hibernate, flush low-power durations, run
+ * synchronous SUSPEND prediction if running (without re-latching inhibit), and
+ * persist history before sleep. */
 static void handle_suspend_flush(void)
 {
     int64_t now_ts = current_epoch_ts();
     double boot_sec = current_boot_sec(now_ts);
+    release_all_sw_behaviour();
+    int prev_allow = sw_behaviour_allow_inhibit;
+    sw_behaviour_allow_inhibit = 0;
     if (adaptive_ctrl_ready) {
         (void)bat_ctrl_on_suspend(&adaptive_ctrl, now_ts, boot_sec);
         if (adaptive_ctrl.prediction_requested && charge_cfg.adaptive) {
@@ -1668,16 +1953,20 @@ static void handle_suspend_flush(void)
         }
         (void)save_ctrl_history(0);
     }
+    sw_behaviour_allow_inhibit = prev_allow;
     flush_all_pending(1, now_ts);
 }
 
-/* Shutdown / SIGTERM hook: flush low-power durations, persist history, and
- * release any active adaptive hold back to manual/saved baseline so the EC is
- * never left holding without a running service. */
+/* Shutdown / SIGTERM hook: release any software inhibit-charge (both adaptive
+ * and manual modes) and unlink its .charge-* baseline, flush low-power
+ * durations, persist history, and release any active adaptive HW hold back to
+ * manual/saved baseline so the EC is never left holding without a running
+ * service. */
 static void handle_shutdown(void)
 {
     int64_t now_ts = current_epoch_ts();
     double boot_sec = current_boot_sec(now_ts);
+    release_all_sw_behaviour();
     if (adaptive_ctrl_ready) {
         struct bat_ctrl_decision d = bat_ctrl_on_shutdown(&adaptive_ctrl, now_ts, boot_sec);
         (void)save_ctrl_history(0);
@@ -1686,18 +1975,21 @@ static void handle_shutdown(void)
                 struct slot_state *sl = &slots[j];
                 if (!sl->occupied || strcmp(sl->dev.pack_id, adaptive_ctrl_pack_id) != 0)
                     continue;
-                char path[560];
-                struct charge_baseline saved;
-                if (charge_baseline_path(&sl->dev, path, sizeof path) == 0 &&
-                    load_charge_baseline(&sl->dev, path, &saved) == 1 &&
-                    sl->dev.has_end_thresh && strcmp(saved.end_attr, sl->dev.end_attr) == 0 &&
-                    strcmp(saved.start_attr, sl->dev.has_start_thresh ? sl->dev.start_attr : "-") == 0 &&
-                    charge_identity_matches(&sl->dev)) {
-                    int start = charge_cfg.start >= 0 ? charge_cfg.start : saved.start;
-                    int end = charge_cfg.end >= 0 ? charge_cfg.end : saved.end;
-                    if (bat_apply_thresholds_to(&sl->dev, start, end) == 0) {
-                        (void)unlink(path);
-                        (void)sync_history_dir();
+                if (bat_charge_control_kind(&sl->dev) == BAT_CTL_HW_THRESHOLD) {
+                    char path[560];
+                    struct charge_baseline saved;
+                    if (charge_baseline_path(&sl->dev, path, sizeof path) == 0 &&
+                        load_charge_baseline(&sl->dev, path, &saved) == 1 &&
+                        !saved.is_behaviour &&
+                        sl->dev.has_end_thresh && strcmp(saved.end_attr, sl->dev.end_attr) == 0 &&
+                        strcmp(saved.start_attr, sl->dev.has_start_thresh ? sl->dev.start_attr : "-") == 0 &&
+                        charge_identity_matches(&sl->dev)) {
+                        int start = charge_cfg.start >= 0 ? charge_cfg.start : saved.start;
+                        int end = charge_cfg.end >= 0 ? charge_cfg.end : saved.end;
+                        if (bat_apply_thresholds_to(&sl->dev, start, end) == 0) {
+                            (void)unlink(path);
+                            (void)sync_history_dir();
+                        }
                     }
                 }
                 break;
@@ -1733,6 +2025,21 @@ static int cap_timeout_for_alarms(int timeout_ms)
     return timeout_ms;
 }
 
+static int compute_poll_timeout_ms(int sys_bats, int have_fds)
+{
+    int timeout_ms;
+    if (sys_bats <= 0) {
+        timeout_ms = have_fds ? -1 : BAT_POLL_IDLE_AC_MS;
+    } else if (sw_near_cap_poll && last_system_ac == BAT_AC_ONLINE) {
+        timeout_ms = BAT_POLL_SW_NEAR_CAP_MS;
+    } else if (all_packs_idle_ac && last_ac_online) {
+        timeout_ms = BAT_POLL_IDLE_AC_MS;
+    } else {
+        timeout_ms = BAT_POLL_ACTIVE_MS;
+    }
+    return cap_timeout_for_alarms(timeout_ms);
+}
+
 int main(int argc, char **argv)
 {
     int once = argc > 1 && strcmp(argv[1], "--once") == 0;
@@ -1749,13 +2056,17 @@ int main(int argc, char **argv)
     clear_charge_status();
     load_previous_slots();
     if (once) {
+        int prev_allow = sw_behaviour_allow_inhibit;
+        sw_behaviour_allow_inhibit = 0;
         record_snapshot(1);
+        sw_behaviour_allow_inhibit = prev_allow;
         adaptive_cleanup();
         clear_charge_status();
         close(lockfd);
         return 0;
     }
 
+    sw_behaviour_allow_inhibit = 1;
     daemon_mode = 1;
 
     sigset_t sigmask, oldmask;
@@ -1788,15 +2099,7 @@ int main(int argc, char **argv)
             { .fd = ufd, .events = POLLIN },
             { .fd = sfd, .events = POLLIN },
         };
-        int timeout_ms;
-        if (sys_bats <= 0) {
-            timeout_ms = (ufd >= 0 && sfd >= 0) ? -1 : BAT_POLL_IDLE_AC_MS;
-        } else if (all_packs_idle_ac && last_ac_online) {
-            timeout_ms = BAT_POLL_IDLE_AC_MS;
-        } else {
-            timeout_ms = BAT_POLL_ACTIVE_MS;
-        }
-        timeout_ms = cap_timeout_for_alarms(timeout_ms);
+        int timeout_ms = compute_poll_timeout_ms(sys_bats, ufd >= 0 && sfd >= 0);
         int r = poll(pfd, 2, timeout_ms);
         if (r > 0 && sfd >= 0) {
             if (pfd[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {

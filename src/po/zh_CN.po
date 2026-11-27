@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-27 14:51+0800\n"
+"POT-Creation-Date: 2026-11-27 18:54+0800\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -9797,7 +9797,8 @@ msgstr "GPU：直通 %s   未加载 NVIDIA 驱动（见 输入与输出 > NVIDIA
 #: progs/settings-compute.inc
 #, c-format
 msgid "Inventory: %d images   %d envs   %d/%d jobs running   %d/%d VMs running"
-msgstr "清单：%d 个镜像   %d 个环境   %d/%d 个任务运行中   %d/%d 台虚拟机运行中"
+msgstr ""
+"清单：%d 个镜像   %d 个环境   %d/%d 个任务运行中   %d/%d 台虚拟机运行中"
 
 #: progs/settings-compute.inc progs/view.c
 msgid "Overview"
@@ -9873,17 +9874,22 @@ msgstr "运行中"
 msgid ""
 "1-5/Tab: tabs   Enter: shell/create   x: reset   Delete: remove   r: "
 "refresh   Esc: back"
-msgstr "1-5/Tab: 切换标签   Enter: 进入终端/新建   x: 重置   Delete: 删除   r: 刷新   Esc: 返回"
+msgstr ""
+"1-5/Tab: 切换标签   Enter: 进入终端/新建   x: 重置   Delete: 删除   r: 刷"
+"新   Esc: 返回"
 
 #: progs/settings-compute.inc
 msgid "1-5/Tab: tabs   Enter: view log   s: stop job   r: refresh   Esc: back"
-msgstr "1-5/Tab: 切换标签   Enter: 查看日志   s: 停止任务   r: 刷新   Esc: 返回"
+msgstr ""
+"1-5/Tab: 切换标签   Enter: 查看日志   s: 停止任务   r: 刷新   Esc: 返回"
 
 #: progs/settings-compute.inc
 msgid ""
 "1-5/Tab: tabs   Enter: start/shell   s: stop   x: reset   Delete: remove   "
 "r: refresh   Esc: back"
-msgstr "1-5/Tab: 切换标签   Enter: 启动/终端   s: 停止   x: 重置   Delete: 删除   r: 刷新   Esc: 返回"
+msgstr ""
+"1-5/Tab: 切换标签   Enter: 启动/终端   s: 停止   x: 重置   Delete: 删除   r: "
+"刷新   Esc: 返回"
 
 #: progs/settings-compute.inc
 msgid "1-5/Tab: tabs   Enter: import   Delete: remove   r: refresh   Esc: back"
@@ -9893,7 +9899,9 @@ msgstr "1-5/Tab: 切换标签   Enter: 导入   Delete: 删除   r: 刷新   Esc
 msgid ""
 "1-5/Tab: tabs   Enter: run action   m: mount storage   c: SSH config   r: "
 "refresh   Esc: back"
-msgstr "1-5/Tab: 切换标签   Enter: 执行操作   m: 挂载存储   c: SSH 配置   r: 刷新   Esc: 返回"
+msgstr ""
+"1-5/Tab: 切换标签   Enter: 执行操作   m: 挂载存储   c: SSH 配置   r: 刷新   "
+"Esc: 返回"
 
 #: progs/settings-compute.inc
 #, c-format
@@ -10691,6 +10699,23 @@ msgid "Last handoff: %.104s"
 msgstr "最近切换：%.104s"
 
 #: progs/settings-power.inc
+msgid "Charge start threshold"
+msgstr "充电起始阈值"
+
+#: progs/settings-power.inc
+msgid "Charge stop threshold"
+msgstr "充电停止阈值"
+
+#: progs/settings-power.inc
+msgid "not set for manual charging"
+msgstr "未设置手动充电阈值"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%d%% saved for manual charging"
+msgstr "已保存手动充电阈值 %d%%"
+
+#: progs/settings-power.inc
 msgid "Plug in AC power first"
 msgstr "请先接上电源"
 
@@ -10698,6 +10723,11 @@ msgstr "请先接上电源"
 #, c-format
 msgid "Expected to resume charging to full at %s"
 msgstr "预计于 %s 恢复充电至满电"
+
+#: progs/settings-power.inc
+msgid ""
+"Software limit: applies while running; charging resumes in sleep or off."
+msgstr "软件限制：仅在系统运行时生效；睡眠或关机后恢复正常充电。"
 
 #: progs/settings-power.inc
 #, c-format
@@ -11156,6 +11186,24 @@ msgstr "充电阈值"
 msgid "start %d%%, stop %d%%"
 msgstr "起始 %d%%，停止 %d%%"
 
+#: progs/settings-power.inc progs/settings.c progs/view.c
+msgid "auto"
+msgstr "自动"
+
+#: progs/settings-power.inc
+msgid "inhibited"
+msgstr "已暂停充电"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "software %d%%–%d%% (%s, while running)"
+msgstr "软件限制 %d%%–%d%%（%s，仅运行时生效）"
+
+#: progs/settings-power.inc
+#, c-format
+msgid "software (%s, no cap)"
+msgstr "软件限制（%s，无上限）"
+
 #: progs/settings-power.inc
 #, c-format
 msgid "saved %d%%–%d%% (applied on insert)"
@@ -11326,6 +11374,10 @@ msgstr "性能"
 #: progs/settings.c
 msgid "Power saver"
 msgstr "省电"
+
+#: progs/settings.c
+msgid "Auto (by detected GPU)"
+msgstr "自动（按检测到的显卡）"
 
 #: progs/settings.c
 msgid "Open DKMS (new, RTX 20+)"
@@ -12829,10 +12881,6 @@ msgstr "再按一次 Delete：删除胁迫密码（胁迫同时关闭）。"
 msgid "Duress password removed; duress is off."
 msgstr "已删除胁迫密码，胁迫已关闭。"
 
-#: progs/settings.c progs/view.c
-msgid "auto"
-msgstr "自动"
-
 #: progs/settings.c
 #, c-format
 msgid "%s: no DRM cards found; keeping auto."
@@ -12933,6 +12981,99 @@ msgid "SSH public key removed."
 msgstr "已删除 SSH 公钥。"
 
 #: progs/settings.c
+#, c-format
+msgid "Cannot import SSH public key: %.120s"
+msgstr "无法导入 SSH 公钥：%.120s"
+
+#: progs/settings.c
+#, c-format
+msgid "Imported SSH public key (%.48s)."
+msgstr "已导入 SSH 公钥（%.48s）。"
+
+#: progs/settings.c
+msgid "Cannot read pending keys from ~/.ssh/authorized_keys."
+msgstr "无法从 ~/.ssh/authorized_keys 读取待批准公钥。"
+
+#: progs/settings.c
+msgid "Pending keys (approve)"
+msgstr "待批准公钥"
+
+#. TRANSLATORS: Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "Enter: approve selected key   Esc: back"
+msgstr "Enter: 批准选中公钥   Esc: 返回"
+
+#: progs/settings.c
+msgid "No pending keys in ~/.ssh/authorized_keys."
+msgstr "~/.ssh/authorized_keys 中没有待批准公钥。"
+
+#: progs/settings.c
+msgid "Cannot start SSH key receiver."
+msgstr "无法启动 SSH 公钥接收端。"
+
+#: progs/settings.c
+msgid "Receive SSH public key"
+msgstr "接收 SSH 公钥"
+
+#: progs/settings.c
+msgid "Run this command on the other computer to send its public key:"
+msgstr "在另一台电脑上运行以下命令以发送其公钥："
+
+#: progs/settings.c
+#, c-format
+msgid "Waiting for key upload (%d s left)..."
+msgstr "正在等待公钥上传（剩余 %d 秒）……"
+
+#: progs/settings.c
+msgid "Starting one-time receiver..."
+msgstr "正在启动一次性接收端……"
+
+#: progs/settings.c
+msgid "SSH key receive cancelled; no key added."
+msgstr "已取消接收 SSH 公钥；未添加任何公钥。"
+
+#: progs/settings.c
+msgid "SSH key receive timed out; no key added."
+msgstr "接收 SSH 公钥超时；未添加任何公钥。"
+
+#: progs/settings.c
+#, c-format
+msgid "SSH key receive failed: %.120s"
+msgstr "接收 SSH 公钥失败：%.120s"
+
+#: progs/settings.c
+msgid "Confirm received SSH public key"
+msgstr "确认收到的 SSH 公钥"
+
+#: progs/settings.c
+msgid "Verify this key before approving:"
+msgstr "批准前请核对此公钥："
+
+#: progs/settings.c
+#, c-format
+msgid "Peer IP:     %s"
+msgstr "对端 IP：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Key type:    %s"
+msgstr "密钥类型：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Comment:     %s"
+msgstr "备注：%s"
+
+#. TRANSLATORS: Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "Enter: approve and add key   Esc: reject"
+msgstr "Enter: 批准并添加公钥   Esc: 拒绝"
+
+#: progs/settings.c
+msgid "Received SSH public key rejected."
+msgstr "已拒绝收到的 SSH 公钥。"
+
+#: progs/settings.c
 msgid "No regular local user (uid 1000) found."
 msgstr "未找到普通本地用户（uid 1000）。"
 
@@ -12941,10 +13082,22 @@ msgstr "未找到普通本地用户（uid 1000）。"
 msgid "sshd AuthorizedKeys (%.40s)"
 msgstr "sshd 授权公钥（%.40s）"
 
-#. TRANSLATORS: a, Enter, Delete and Esc are key names; keep them.
+#. TRANSLATORS: Enter, a, Delete and Esc are key names; keep them.
 #: progs/settings.c
-msgid "a / Enter: add public key   Delete: remove selected   Esc: back"
-msgstr "a / Enter: 添加公钥   Delete: 删除选中项   Esc: 返回"
+msgid "Enter: run action   a: paste key   Delete: remove selected   Esc: back"
+msgstr "Enter: 执行操作   a: 粘贴公钥   Delete: 删除选中项   Esc: 返回"
+
+#: progs/settings.c
+msgid "[ Receive from another computer (one-time link) ]"
+msgstr "[ 从另一台电脑接收（一次性链接） ]"
+
+#: progs/settings.c
+msgid "[ Approve pending keys from ~/.ssh ]"
+msgstr "[ 批准 ~/.ssh 中的待批准公钥 ]"
+
+#: progs/settings.c
+msgid "[ Import public key file ]"
+msgstr "[ 导入公钥文件 ]"
 
 #: progs/settings.c
 msgid "[ + Add public key ]"
@@ -12959,6 +13112,18 @@ msgstr "尚未添加授权公钥。"
 msgid "sshd AuthorizedKeys: %d key."
 msgid_plural "sshd AuthorizedKeys: %d keys."
 msgstr[0] "sshd 授权公钥：%d 条。"
+
+#: progs/settings.c
+msgid "Path to SSH public key file (e.g. /home/user/.ssh/id_ed25519.pub): "
+msgstr "SSH 公钥文件路径（如 /home/user/.ssh/id_ed25519.pub）："
+
+#: progs/settings.c
+msgid "No key imported."
+msgstr "未导入公钥。"
+
+#: progs/settings.c
+msgid "Enter an absolute path to a public key file."
+msgstr "请输入公钥文件的绝对路径。"
 
 #: progs/settings.c
 msgid "Paste SSH public key (ssh-ed25519 / ssh-rsa ...): "
@@ -13999,6 +14164,12 @@ msgstr "已安装 %s  (Enter: 应用)"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
+#, c-format
+msgid "detected %.24s, rec %.12s (Enter: apply)"
+msgstr "检测到 %.24s，推荐 %.12s  (Enter: 应用)"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
 msgid "not installed  (Enter: apply)"
 msgstr "未安装  (Enter: 应用)"
 
@@ -14488,23 +14659,6 @@ msgstr "立即充满"
 #: progs/settings.c
 msgid "Enter: request full charge"
 msgstr "Enter：请求临时充满"
-
-#: progs/settings.c
-msgid "Charge start threshold"
-msgstr "充电起始阈值"
-
-#: progs/settings.c
-msgid "Charge stop threshold"
-msgstr "充电停止阈值"
-
-#: progs/settings.c
-msgid "not set for manual charging"
-msgstr "未设置手动充电阈值"
-
-#: progs/settings.c
-#, c-format
-msgid "%d%% saved for manual charging"
-msgstr "已保存手动充电阈值 %d%%"
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
@@ -15572,9 +15726,9 @@ msgstr "已保存至 %s 并生效。"
 
 #: progs/settings.c
 msgid ""
-"Choose Open DKMS (new, RTX 20+), 580xx DKMS (legacy / GSP off), or Off; "
-"Enter applies."
-msgstr "选择 Open DKMS（新版，RTX 20+）、580xx DKMS（旧版 / 可关 GSP）或关闭；按 Enter 应用。"
+"Choose Auto (by detected GPU), Open DKMS (new, RTX 20+), 580xx DKMS "
+"(legacy / GSP off), or Off; Enter applies."
+msgstr "选择自动（按检测到的显卡）、Open DKMS（新版，RTX 20+）、580xx DKMS（旧版 / 可关 GSP）或关闭；按 Enter 应用。"
 
 #: progs/settings.c
 msgid ""
@@ -15622,7 +15776,8 @@ msgstr "Left/Right: 选择计算存储卷   m: 挂载或卸载所选卷。"
 msgid ""
 "Enter: open interactive Compute Node Manager (storage, envs, jobs, VMs, "
 "images, pairing)."
-msgstr "Enter: 打开交互式计算节点管理（存储、环境、任务、虚拟机、镜像、配对）。"
+msgstr ""
+"Enter: 打开交互式计算节点管理（存储、环境、任务、虚拟机、镜像、配对）。"
 
 #: progs/settings.c
 msgid ""
@@ -17592,10 +17747,6 @@ msgstr "显示更多详情..."
 #~ "Keyboard: %s (Rescue and its target terminal; system settings are "
 #~ "unchanged)"
 #~ msgstr "键盘：%s（用于救援及其目标终端，不更改系统设置）"
-
-#, c-format
-#~ msgid "Code     %s"
-#~ msgstr "配对码   %s"
 
 #, c-format
 #~ msgid ""

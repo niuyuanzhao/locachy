@@ -76,12 +76,46 @@ states are:
   a regular file, has the wrong size, fails SHA-512, or does not parse. When one
   file is missing and the other is invalid, the state is `model-invalid`.
 - `unsupported`: the machine does not have exactly one inserted system battery
-  with a usable serial number (not empty, `0`, or `unknown`), or lacks the
+  with a usable serial number (not empty, `0`, or `unknown`), or lacks both the
   standard Linux `charge_control_end_threshold` (and, when a start threshold
-  exists, `charge_control_start_threshold`). Multiple packs are not assumed to
-  have independent controllers.
+  exists, `charge_control_start_threshold`) and a controllable
+  `charge_behaviour` attribute (offering both `auto` and `inhibit-charge`).
+  Multiple packs are not assumed to have independent controllers.
 - `error`: reading or writing the saved baseline, sysfs readback, the pack
-  identity check, or a threshold write failed.
+  identity check, or a threshold or `charge_behaviour` write failed. If
+  `charge_control_end_threshold` exists on sysfs but is unreadable or
+  malformed, the state is `error` and the service does not fall back to
+  `charge_behaviour`.
+
+## Hardware Thresholds vs. Software `charge_behaviour`
+
+`battery-history` checks hardware thresholds first:
+
+1. **Hardware thresholds (`charge_control_end_threshold`).** Always preferred
+   when present, even if the kernel also exposes `charge_behaviour`. The EC
+   enforces the written thresholds itself, including during sleep and power off.
+2. **Software `charge_behaviour` (`auto` / `inhibit-charge`).** Used only when
+   `charge_control_end_threshold` is absent and `charge_behaviour` exposes both
+   `auto` and `inhibit-charge` with a single active `[token]`. Both adaptive
+   charging and manual start/stop limits work through software hysteresis on AC:
+   - At or above the stop limit (`end`, 20–99%): writes `inhibit-charge` (after
+     saving a `-1 -1 <saved_behaviour> charge_behaviour` baseline marker).
+   - At or below the start limit (`start`, default `end - 5`): writes `auto`
+     and removes the baseline marker.
+   - Between `start` and `end`: keeps the current state so charging does not
+     chatter.
+   - **Fail-safe release.** Software limits apply only while `battery-history`
+     is running on AC. The service immediately releases `inhibit-charge` back
+     to `auto` when AC goes offline, first thing on pre-suspend (`SIGUSR1`), on
+     service shutdown (`SIGTERM`/`SIGINT`, for both adaptive and manual modes),
+     on **Charge to Full Now**, on adaptive `top-up` or fallback, and on
+     startup if an orphaned `inhibit-charge` is found when unmanaged or below
+     the start limit. `battery-history --once` never latches `inhibit-charge`.
+     Charging resumes normally while sleeping or powered off.
+   - **Low-wakeup polling.** While a software-capped pack is actively charging
+     on AC within 3% of its stop limit, the service polls every 15 seconds to
+     avoid overshooting; once inhibited (`Not charging`), polling returns to
+     every 5 minutes.
 
 ## Controller Criteria
 
@@ -146,7 +180,8 @@ existing manual controls remain available where supported.
 
 Software tests cover the pure-C inference engine (`test-battery-tflite.c`), the
 controller state machine (`test-battery-controller.c`), the manifest and
-downloader checks (`test-battery-model.py`), and the threshold writes, readbacks
-and restore path, using simulated power-supply devices. They do not establish
-that a specific laptop's firmware EC stops or resumes charging at the written
-threshold.
+downloader checks (`test-battery-model.py`), and the threshold and
+`charge_behaviour` writes, readbacks, hysteresis and fail-safe release paths,
+using simulated power-supply devices. They do not establish that a specific
+laptop's firmware EC stops or resumes charging at the written threshold or
+`charge_behaviour` state.

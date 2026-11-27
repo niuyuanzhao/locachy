@@ -26,6 +26,10 @@ if [ "$(uname -s)" = Linux ]; then
     if pkg-config --exists libva libva-drm; then
         va_flags="-DCONFIG_EXTDISPLAY_VAAPI $(pkg-config --cflags libva libva-drm)"
         va_libs="$(pkg-config --libs libva libva-drm)"
+        if pkg-config --exists gbm; then
+            va_flags="$va_flags -DCONFIG_EXTDISPLAY_GBM $(pkg-config --cflags gbm)"
+            va_libs="$va_libs $(pkg-config --libs gbm)"
+        fi
     fi
     cc $cflags -O3 -DCONFIG_EXTDISPLAY_FFMPEG $va_flags $(pkg-config --cflags $pkgs) "$src/progs/extdisplay-worker.c" \
         "$src/progs/extdisplay-protocol.c" "$src/progs/extdisplay-decode.c" $(pkg-config --libs $pkgs) $va_libs -lm -o "$out/extdisplay-worker"
@@ -217,6 +221,12 @@ EOF
         -I"$src/base/include" -I"$src/base" "$out/raw.c" "$src/base/keys.c" "$src/base/input-raw.c" \
         "$src/base/key-action.c" -Wl,--gc-sections -lm -o "$out/raw"
     "$out/raw"
+    cc $cflags -DCONFIG_EXTDISPLAY_FFMPEG -DEXTDISPLAY_DECODE_TEST -ffunction-sections -fdata-sections \
+        -I"$src/base/include" -I"$src/base" $(pkg-config --cflags $pkgs) \
+        "$src/tools/test-extdisplay-dmabuf.c" "$src/progs/extdisplay-decode.c" "$src/progs/extdisplay-protocol.c" \
+        "$src/base/key-action.c" "$src/base/help.c" \
+        $(pkg-config --libs $pkgs) -lm -Wl,--gc-sections -o "$out/test-extdisplay-dmabuf"
+    "$out/test-extdisplay-dmabuf"
 else
     echo "SKIP: extdisplay-worker, extdisplay-client and the IPC cases need Linux (Landlock, seccomp, memfd seals)"
 fi

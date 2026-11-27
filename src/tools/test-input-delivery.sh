@@ -30,13 +30,13 @@ gcc "${flags[@]}" -U_GNU_SOURCE "$src/tools/test-seat.c" "$out/proto/virtual-key
     "$out/proto/wlr-virtual-pointer-unstable-v1-protocol.c" -Wl,--gc-sections \
     -lwayland-client -lxkbcommon -o "$out/bin/seat"
 gcc "${flags[@]}" $(pkg-config --cflags gio-2.0) "$src/tools/test-bar-keyboard.c" "$src/base/keys.c" \
-    "$src/base/control.c" "$out"/proto/*-protocol.c -Wl,--gc-sections $(pkg-config --libs gio-2.0) \
+    "$src/base/control.c" "$src/base/key-action.c" "$out"/proto/*-protocol.c -Wl,--gc-sections $(pkg-config --libs gio-2.0) \
     -lwayland-client -lwayland-cursor -lxkbcommon -o "$out/bin/bar-driver"
 
 rime=0
 if [ -f "$runtime/usr/include/rime_api.h" ] && [ -f "$runtime/usr/lib/librime.so" ] && command -v bwrap >/dev/null; then
     gcc "${flags[@]}" -DCONFIG_IME -I"$runtime/usr/include" $(pkg-config --cflags gio-2.0) \
-        "$src/tools/test-bar-keyboard.c" "$src/base/keys.c" "$src/base/control.c" "$src/base/ime.c" "$out"/proto/*-protocol.c \
+        "$src/tools/test-bar-keyboard.c" "$src/base/keys.c" "$src/base/control.c" "$src/base/key-action.c" "$src/base/ime.c" "$out"/proto/*-protocol.c \
         -Wl,--gc-sections -Wl,-rpath-link,"$runtime/usr/lib" -L"$runtime/usr/lib" \
         $(pkg-config --libs gio-2.0) -lwayland-client -lwayland-cursor -lxkbcommon -lrime -o "$out/bin/rime-driver"
     # The input method's modes and its key_ime_width_cn, with the runtime's Rime.
@@ -44,7 +44,7 @@ if [ -f "$runtime/usr/include/rime_api.h" ] && [ -f "$runtime/usr/lib/librime.so
         -Wl,--gc-sections -Wl,-rpath-link,"$runtime/usr/lib" -L"$runtime/usr/lib" -lrime -o "$out/bin/ime-modes"
     for mode in enabled disabled; do
         bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
-            --bind "$out" /work /work/bin/ime-modes "$mode"
+            --bind "$out" /tmp/work /tmp/work/bin/ime-modes "$mode"
     done
     # Chinese mode's punctuation (test-ime-width) and Rime's Lua beside
     # libinput (test-ime), linked as the programs are (build-check.sh's
@@ -63,7 +63,7 @@ if [ -f "$runtime/usr/include/rime_api.h" ] && [ -f "$runtime/usr/lib/librime.so
            "$src/base/rime/rime_frost.custom.yaml" "$out/$test-user/"
         rm -f "$out/$test-user/build/default.yaml"
         bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
-            --bind "$out" /work /work/bin/$test /work/$test-user
+            --bind "$out" /tmp/work /tmp/work/bin/$test /tmp/work/$test-user
     done
     gcc "${flags[@]}" -DCONFIG_IME -I"$runtime/usr/include" "$src/tools/test-caps-ime.c" "$src/base/ime.c" \
         -Wl,--gc-sections "${ime_libs[@]}" -o "$out/bin/caps-ime"
@@ -124,13 +124,13 @@ timeout 10 "$out/bin/click" 640 360 2560 720 left
 timeout 25 "$out/bin/bar-driver" --headless >"$out/bar.log" 2>&1
 if [ "$rime" = 1 ]; then
     bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
-        --bind "$out" /work --setenv HOME /work --setenv XDG_RUNTIME_DIR /work/runtime \
+        --bind "$out" /tmp/work --setenv HOME /tmp/work --setenv XDG_RUNTIME_DIR /tmp/work/runtime \
         --setenv WAYLAND_DISPLAY wayland-0 --setenv XKB_DEFAULT_LAYOUT us \
-        /usr/bin/timeout 35 /work/bin/rime-driver --headless /work/rime-schema /work/rime-user >"$out/rime.log" 2>&1
+        /usr/bin/timeout 35 /tmp/work/bin/rime-driver --headless /tmp/work/rime-schema /tmp/work/rime-user >"$out/rime.log" 2>&1
     bwrap --unshare-all --die-with-parent --ro-bind "$runtime" / --proc /proc --dev /dev --tmpfs /tmp \
-        --bind "$out" /work --setenv HOME /work --setenv LC_ALL C.UTF-8 \
-        /usr/bin/timeout 35 /work/bin/caps-ime /work/bin/keytable /work/caps-tables \
-        /work/rime-schema /work/rime-user >"$out/caps-direct.log" 2>&1
+        --bind "$out" /tmp/work --setenv HOME /tmp/work --setenv LC_ALL C.UTF-8 \
+        /usr/bin/timeout 35 /tmp/work/bin/caps-ime /tmp/work/bin/keytable /tmp/work/caps-tables \
+        /tmp/work/rime-schema /tmp/work/rime-user >"$out/caps-direct.log" 2>&1
 fi
 sleep 0.3
 kill -0 "$comp"

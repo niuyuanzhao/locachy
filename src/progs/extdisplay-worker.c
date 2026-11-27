@@ -209,6 +209,11 @@ static int prepare_dmabuf_slot(void)
 {
     if (session.dmabuf_off || !session.decoder) return 0;
     int slot = session.ready_slot;
+    if (slot >= 0 && session.slot_busy[slot]) {
+        /* Defensive guard: never write into a slot owned by the frontend. */
+        slot = -1;
+        session.ready_slot = -1;
+    }
     if (slot < 0) {
         for (int s = 0; s < (int)EXTDISPLAY_DMABUF_SLOTS; s++) {
             if (!session.slot_busy[s]) {
@@ -459,8 +464,10 @@ static int sandbox(int hw)
 #else
     /* The FFmpeg decoder at 4096x4096 with VA-API/FFmpeg surface pools, the
      * picture and the sealed copy: 2.5 GiB virtual address headroom. VA-API
-     * keeps DRM surface fds open. */
-    struct rlimit memory = { 2560ul << 20, 2560ul << 20 }, files = { hw ? 64 : 16, hw ? 64 : 16 },
+     * keeps DRM surface fds open. Hardware decode also holds one PRIME fd per
+     * GBM scanout slot plus dup'd exports to the frontend, so it gets 256
+     * descriptors rather than 64 to avoid EMFILE during slot exports. */
+    struct rlimit memory = { 2560ul << 20, 2560ul << 20 }, files = { hw ? 256 : 16, hw ? 256 : 16 },
                   none = { 0, 0 }, frame = { 64ul << 20, 64ul << 20 };
     if (!getuid() || getuid() != geteuid() || getgid() != getegid() || getgroups(0, NULL) != 0 ||
         prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 || prctl(PR_SET_DUMPABLE, 0) < 0 ||
@@ -537,6 +544,8 @@ static int frontend(void)
             if (target >= 0) {
                 session.ready_slot = target;
                 if (send_ready_slot() < 0) return fail_with("frontend-err");
+            } else if (send_latest() < 0) {
+                return fail_with("frontend-err");
             }
             break;
         }

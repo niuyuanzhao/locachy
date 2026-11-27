@@ -42,6 +42,8 @@ static size_t frame_bytes;
 static uint32_t frame_w, frame_h;
 static int dmabuf_active;
 static int flip_ack_pending;
+static int shm_flip_ack_pending;
+static int shm_flip_needs_ack;
 static double flip_sent_at;
 static int scanning_slot = -1, pending_slot = -1;
 static uint32_t peer_input;
@@ -200,6 +202,20 @@ static void draw(void)
 {
     viewport();
     if (frame && frame_w && frame_h) {
+        if (!shm_flip_ack_pending) {
+            int flipped = screen_present_shm_flip(frame, frame_w, frame_h);
+            if (flipped >= 0) {
+                if (flipped == 1) {
+                    shm_flip_ack_pending = 1;
+                    flip_sent_at = uptime();
+                }
+                return;
+            }
+        } else {
+            /* A double-buffered SHM flip is already in flight; avoid writing
+             * into the live front scanout buffer while waiting for vblank. */
+            return;
+        }
         if (vw == (int)frame_w && vh == (int)frame_h) {
             if (vx > 0) {
                 screen_fill_px(0, 0, vx, panel_h, 0x000000);
@@ -470,21 +486,37 @@ static int release_remote(pid_t *worker, int *inhibited)
         while (pointer_raw_next(&discard)) { }
         touch_frame.count = 0;
     }
-    if (flip_ack_pending && ipc >= 0) {
+    if ((flip_ack_pending || shm_flip_ack_pending) && ipc >= 0) {
         if (screen_flip_complete() > 0) {
-            int retired = scanning_slot;
-            scanning_slot = pending_slot;
-            pending_slot = -1;
-            flip_ack_pending = 0;
-            uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
-            struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
-            (void)extdisplay_ipc_send(ipc, &ack);
+            if (flip_ack_pending) {
+                int retired = scanning_slot;
+                scanning_slot = pending_slot;
+                pending_slot = -1;
+                flip_ack_pending = 0;
+                uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
+                struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
+                (void)extdisplay_ipc_send(ipc, &ack);
+            } else {
+                int send_ack = shm_flip_needs_ack;
+                shm_flip_ack_pending = 0;
+                shm_flip_needs_ack = 0;
+                if (send_ack) {
+                    struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                    (void)extdisplay_ipc_send(ipc, &ack);
+                }
+            }
         } else if (screen_flip_fd() < 0) {
+            int send_ack = flip_ack_pending || shm_flip_needs_ack;
+            uint32_t released = flip_ack_pending ? EXTDISPLAY_DMABUF_RELEASE_ALL : 0u;
             flip_ack_pending = 0;
+            shm_flip_ack_pending = 0;
+            shm_flip_needs_ack = 0;
             scanning_slot = -1;
             pending_slot = -1;
-            struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = EXTDISPLAY_DMABUF_RELEASE_ALL };
-            (void)extdisplay_ipc_send(ipc, &ack);
+            if (send_ack) {
+                struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
+                (void)extdisplay_ipc_send(ipc, &ack);
+            }
         }
     }
     if (*worker > 0 && ipc >= 0) {
@@ -655,6 +687,19 @@ static int handle_worker(int *inhibited, double *started)
             set_state(N_("Disconnected"), N_("The decoder sent an invalid picture."));
             return -1;
         }
+        /* Reap any completed flip before presenting the new CPU frame. */
+        if ((flip_ack_pending || shm_flip_ack_pending) && screen_flip_complete() > 0) {
+            int send_ack = shm_flip_needs_ack && !flip_ack_pending;
+            flip_ack_pending = 0;
+            shm_flip_ack_pending = 0;
+            shm_flip_needs_ack = 0;
+            scanning_slot = -1;
+            pending_slot = -1;
+            if (send_ack && ipc >= 0) {
+                struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                (void)ipc_send_reliable(&ack, 250);
+            }
+        }
         if (frame) munmap(frame, frame_bytes);
         dmabuf_active = 0;
         flip_ack_pending = 0;
@@ -664,13 +709,27 @@ static int handle_worker(int *inhibited, double *started)
         frame_bytes = (size_t)m.bytes;
         frame_w = m.width;
         frame_h = m.height;
+        viewport();
+        /* Present via double-buffered DRM PAGE_FLIP with EVENT when available.
+         * Defer FRAME_ACK until DRM_EVENT_FLIP_COMPLETE so we never overwrite
+         * the back buffer while its flip is still in flight. */
+        int flipped = screen_present_shm_flip(frame, frame_w, frame_h);
+        if (flipped == 1) {
+            shm_flip_ack_pending = 1;
+            shm_flip_needs_ack = 1;
+            flip_sent_at = uptime();
+            return 0;
+        }
+        shm_flip_ack_pending = 0;
+        shm_flip_needs_ack = 0;
+        int need_draw = flipped < 0;
         struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
         if (ipc_send_reliable(&ack, 250) < 0) {
             say("extdisplay: frame ack send failed (%s)", strerror(errno));
             set_state(N_("Disconnected"), N_("The decoder channel ended."));
             return -1;
         }
-        return 1;
+        return need_draw ? 1 : 0;
     }
     case EXTDISPLAY_IPC_DMABUF: {
         struct extdisplay_dmabuf info;
@@ -694,14 +753,24 @@ static int handle_worker(int *inhibited, double *started)
         }
         /* Reap any completed DRM flip before presenting so screen_present_dmabuf_planes()
          * never silently consumes DRM_EVENT_FLIP_COMPLETE behind our slot tracker's back. */
-        if (flip_ack_pending && screen_flip_complete() > 0) {
-            int retired = scanning_slot;
-            scanning_slot = pending_slot;
-            pending_slot = -1;
-            flip_ack_pending = 0;
-            if (retired >= 0 && retired != scanning_slot && ipc >= 0) {
-                struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = (uint32_t)(retired + 1) };
-                (void)ipc_send_reliable(&ack, 250);
+        if ((flip_ack_pending || shm_flip_ack_pending) && screen_flip_complete() > 0) {
+            if (flip_ack_pending) {
+                int retired = scanning_slot;
+                scanning_slot = pending_slot;
+                pending_slot = -1;
+                flip_ack_pending = 0;
+                if (retired >= 0 && retired != scanning_slot && ipc >= 0) {
+                    struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = (uint32_t)(retired + 1) };
+                    (void)ipc_send_reliable(&ack, 250);
+                }
+            } else {
+                int send_ack = shm_flip_needs_ack;
+                shm_flip_ack_pending = 0;
+                shm_flip_needs_ack = 0;
+                if (send_ack && ipc >= 0) {
+                    struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                    (void)ipc_send_reliable(&ack, 250);
+                }
             }
         }
         errno = 0;
@@ -843,14 +912,17 @@ static void session_run(int transport)
 
     double started = uptime();
     while (!stop && !leaving) {
-        int drm_fd = flip_ack_pending ? screen_flip_fd() : -1;
-        if (flip_ack_pending && drm_fd < 0) {
+        int drm_fd = (flip_ack_pending || shm_flip_ack_pending) ? screen_flip_fd() : -1;
+        if ((flip_ack_pending || shm_flip_ack_pending) && drm_fd < 0) {
             /* DRM flip completed or was cleared during a lease/flush transition:
              * release worker frame_pending and all busy slots so it never deadlocks. */
+            int send_ack = flip_ack_pending || shm_flip_needs_ack;
             flip_ack_pending = 0;
+            shm_flip_ack_pending = 0;
+            shm_flip_needs_ack = 0;
             scanning_slot = -1;
             pending_slot = -1;
-            if (ipc >= 0) {
+            if (send_ack && ipc >= 0) {
                 struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = EXTDISPLAY_DMABUF_RELEASE_ALL };
                 if (ipc_send_reliable(&ack, 250) < 0) {
                     say("extdisplay: frame ack send failed (%s)", strerror(errno));
@@ -865,32 +937,55 @@ static void session_run(int transport)
         int redraw = 0;
         /* Poll non-blocking flip completion even when key_poll_many returned early
          * on queued input so typing bursts cannot starve DRM flip ACKs. */
-        if (flip_ack_pending && drm_fd >= 0 && ((p[3].revents & POLLIN) || key != 0 || uptime() - flip_sent_at >= 0.5)) {
+        if ((flip_ack_pending || shm_flip_ack_pending) && drm_fd >= 0 &&
+            ((p[3].revents & POLLIN) || key != 0 || uptime() - flip_sent_at >= 0.5)) {
             if (screen_flip_complete() > 0 && ipc >= 0) {
-                int retired = scanning_slot;
-                scanning_slot = pending_slot;
-                pending_slot = -1;
-                flip_ack_pending = 0;
-                uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
-                struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
-                if (ipc_send_reliable(&ack, 250) < 0) {
-                    say("extdisplay: frame ack send failed (%s)", strerror(errno));
-                    set_state(N_("Disconnected"), N_("The decoder channel ended."));
-                    break;
+                if (flip_ack_pending) {
+                    int retired = scanning_slot;
+                    scanning_slot = pending_slot;
+                    pending_slot = -1;
+                    flip_ack_pending = 0;
+                    uint32_t released = retired >= 0 && retired != scanning_slot ? (uint32_t)(retired + 1) : 0u;
+                    struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK, .width = released };
+                    if (ipc_send_reliable(&ack, 250) < 0) {
+                        say("extdisplay: frame ack send failed (%s)", strerror(errno));
+                        set_state(N_("Disconnected"), N_("The decoder channel ended."));
+                        break;
+                    }
+                } else {
+                    /* The CPU frame's back buffer is now scanned out: its slot is free. */
+                    int send_ack = shm_flip_needs_ack;
+                    shm_flip_ack_pending = 0;
+                    shm_flip_needs_ack = 0;
+                    if (send_ack) {
+                        struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                        if (ipc_send_reliable(&ack, 250) < 0) {
+                            say("extdisplay: frame ack send failed (%s)", strerror(errno));
+                            set_state(N_("Disconnected"), N_("The decoder channel ended."));
+                            break;
+                        }
+                    }
                 }
-            } else if (flip_ack_pending && uptime() - flip_sent_at >= 0.5 && ipc >= 0) {
+            } else if ((flip_ack_pending || shm_flip_ack_pending) && uptime() - flip_sent_at >= 0.5 && ipc >= 0) {
                 /* Stalled flip event (e.g. lost across modeset/PSR): force a refresh
                  * so video never stays frozen indefinitely. */
                 say("extdisplay: DRM flip completion timed out; refreshing dma-buf slots");
                 screen_flip_reset();
+                int was_shm = shm_flip_ack_pending && !flip_ack_pending;
+                int send_ack = flip_ack_pending || shm_flip_needs_ack;
                 flip_ack_pending = 0;
+                shm_flip_ack_pending = 0;
+                shm_flip_needs_ack = 0;
                 scanning_slot = -1;
                 pending_slot = -1;
-                struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
-                if (ipc_send_reliable(&ref, 250) < 0) {
-                    say("extdisplay: refresh send failed (%s)", strerror(errno));
-                    set_state(N_("Disconnected"), N_("The decoder channel ended."));
-                    break;
+                if (send_ack) {
+                    struct extdisplay_ipc ref = { .op = was_shm ? EXTDISPLAY_IPC_FRAME_ACK : EXTDISPLAY_IPC_REFRESH };
+                    if (was_shm) ref.width = EXTDISPLAY_DMABUF_RELEASE_ALL;
+                    if (ipc_send_reliable(&ref, 250) < 0) {
+                        say("extdisplay: refresh send failed (%s)", strerror(errno));
+                        set_state(N_("Disconnected"), N_("The decoder channel ended."));
+                        break;
+                    }
                 }
             }
         }
@@ -959,8 +1054,18 @@ static void session_run(int transport)
                 scanning_slot = -1;
                 pending_slot = -1;
                 flip_ack_pending = 0;
+                shm_flip_ack_pending = 0;
+                shm_flip_needs_ack = 0;
                 struct extdisplay_ipc ref = { .op = EXTDISPLAY_IPC_REFRESH };
                 (void)ipc_send_reliable(&ref, 250);
+            } else if (shm_flip_ack_pending) {
+                int send_ack = shm_flip_needs_ack;
+                shm_flip_ack_pending = 0;
+                shm_flip_needs_ack = 0;
+                if (send_ack && ipc >= 0) {
+                    struct extdisplay_ipc ack = { .op = EXTDISPLAY_IPC_FRAME_ACK };
+                    (void)ipc_send_reliable(&ack, 250);
+                }
             }
             redraw = 1;
         }
@@ -980,6 +1085,8 @@ static void session_run(int transport)
     peer_input = 0;
     keys_caps_owner(0);
     flip_ack_pending = 0;
+    shm_flip_ack_pending = 0;
+    shm_flip_needs_ack = 0;
     scanning_slot = -1;
     pending_slot = -1;
     screen_cursor(CURSOR_ARROW);

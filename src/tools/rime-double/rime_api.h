@@ -87,6 +87,7 @@ typedef struct rime_api_t {
     Bool (*select_schema)(RimeSessionId session_id, const char *schema_id);
     const char *(*get_input)(RimeSessionId session_id);
     Bool (*select_candidate_on_current_page)(RimeSessionId session_id, size_t index);
+    const char *(*get_version)(void);
 } RimeApi;
 
 RimeApi *rime_get_api(void);

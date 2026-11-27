@@ -39,7 +39,13 @@ not required for NVIDIA experiments.
    console as an administrator (replace `USER` and the source filename):
 
    ```sh
+   sudo /usr/local/lib/locachy/tailnet-ssh-client --keys-add USER /path/to/operator.pub
+   # or from stdin:
    sudo /usr/local/lib/locachy/tailnet-ssh-client --keys-add USER < /path/to/operator.pub
+   # inspect keys staged in ~/.ssh/authorized_keys (e.g. via ssh-copy-id) without trusting them:
+   /usr/local/lib/locachy/tailnet-ssh-client --keys-pending USER
+   # open a one-shot ephemeral receive URL for curl -T ~/.ssh/id_ed25519.pub:
+   sudo /usr/local/lib/locachy/tailnet-ssh-client --receive-key USER --timeout 120
    # or replace the whole file directly:
    sudo install -o root -g root -m 0644 /path/to/operator.pub \
      /etc/locachy/tailnet-ssh/authorized_keys/USER
@@ -47,9 +53,15 @@ not required for NVIDIA experiments.
 
    Only root may write `/etc/locachy/tailnet-ssh/authorized_keys/USER`; the
    unprivileged key lookup needs to read it. Remove keys via Settings or
-   `--keys-remove USER INDEX` (or delete the file) to deny future logins. The
-   service never reads the user's `~/.ssh/authorized_keys`. Keep the private
-   key on the client.
+   `--keys-remove USER INDEX` (or delete the file) to deny future logins.
+   `sshd` keeps `AuthorizedKeysFile none` and never trusts `~/.ssh/authorized_keys`
+   automatically: `--keys-pending` only lists safely read candidate keys for
+   explicit operator approval, and `--receive-key` listens on an ephemeral port
+   on the active listen addresses (never `0.0.0.0`/`::`, using a short-lived
+   `nobody` worker and dedicated `ssh_enroll_v4`/`ssh_enroll_v6` nftables sets
+   in `lan` mode) and prints the received key and SHA-256 fingerprint for
+   confirmation without writing `authorized_keys`. Keep the private key on the
+   client.
 4. First start creates the node's persistent Ed25519 host key if absent. It
    does not replace an existing key unless you explicitly regenerate it in
    Settings (**sshd host key**) or with `--host-key-regen` (in which case
@@ -177,11 +189,11 @@ scp locachy-gpu:/srv/storage/experiments/work/probe-001/out/probe.txt .
 | File | Role |
 |---|---|
 | `link/locachy-compute` | CLI and daemon: images, environments, native containers, jobs, KVM micro-VMs, `serve`, and `remote` (the client). |
-| `link/tailnet-ssh-client` | Managed OpenSSH server (`sshd`) in `locachy-net`: Tailscale-only or LAN & Tailscale, configurable port, optional password auth, managed `authorized_keys`, and host key lifecycle. |
+| `link/tailnet-ssh-client` | Managed OpenSSH server (`sshd`) in `locachy-net`: Tailscale-only or LAN & Tailscale, configurable port, optional password auth, managed `authorized_keys` (including `.pub` import, `--keys-pending` staging review, and one-shot `--receive-key`), and host key lifecycle. |
 | `link/compute-client` | Optional `service_compute` launcher. Runs `locachy-compute serve` with `nsenter --net` into `locachy-net`. |
 | `link/locachy-pair` | Once-forever pairing: add, list, show, revoke, and token export for paired devices. |
 | `link/locachy_peers.py` | The shared peer store (`/etc/locachy/peers`), used by `locachy-pair`, `locachy-compute`, and `extdisplay-broker`. |
-| `link/network-client` | Inbound filter for `locachy-net`, including the Thunderbolt allow-lists (`tb_ifaces`, `tb_tcp_ports`, `tb_udp_ports`). |
+| `link/network-client` | Inbound filter for `locachy-net`, including the Thunderbolt allow-lists (`tb_ifaces`, `tb_tcp_ports`, `tb_udp_ports`) and LAN SSH / key-enrollment sets (`ssh_lan_v4`, `ssh_lan_v6`, `ssh_enroll_v4`, `ssh_enroll_v6`). |
 | `progs/extdisplay-broker*.c`, `progs/extdisplay-advertise.c` | Extended-display broker: persistent peer PSKs, paired-only mode, and shared-link mode. |
 
 ## Native containers
@@ -382,6 +394,7 @@ LOCachy workflows over real Tailscale and Thunderbolt remain unverified.
 ```sh
 src/tools/test-peers.sh        # peer store, pairing permissions, broker PSK, shared Thunderbolt link, shipped filter
 src/tools/test-compute.sh      # image import, native containers with zero Wayland/compositor env leakage, host data bind-mounts and path-policy rejection, instant upperdir reset, GPU device/library probe and wildcard bind rejection, KVM micro-VM config, qcow2 CoW overlay creation, reset and QEMU argv verification, mTLS HTTPS control plane (paired, unpaired, extdisplay-only and revoked peers; remote job run, log and reset)
+src/tools/test-sshd-config.py  # managed sshd rc.conf/config/nftables rules, authorized_keys CRUD, .pub import, --keys-pending safety checks, and one-shot --receive-key HTTP flow
 src/tools/test-thunderbolt-backend.sh # isolated Open MPI TCP split-sum fixture; not physical Thunderbolt or GPU
 src/tools/test-extdisplay-broker.sh
 ```

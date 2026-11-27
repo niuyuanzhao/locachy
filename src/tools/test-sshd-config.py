@@ -7,13 +7,17 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 SOURCE = Path(__file__).resolve().parents[1] / "link/tailnet-ssh-client"
 SCRATCH = sys.argv.pop(1) if len(sys.argv) > 1 else None
@@ -411,6 +415,296 @@ class SshdConfigTests(unittest.TestCase):
                     patch.object(mod.os, "kill") as kill_mock:
                 self.assertTrue(mod.signal_reload())
                 kill_mock.assert_called_once_with(os.getpid(), mod.signal.SIGHUP)
+
+    def test_keys_pending_staging_dedup_and_safety(self):
+        base = self.root / "pending-base"
+        keys = base / "authorized_keys"
+        home = self.root / "home-alice"
+        ssh_dir = home / ".ssh"
+        ssh_dir.mkdir(parents=True, mode=0o700)
+        _, pub1 = self._gen_keypair("p1", comment="alice@existing")
+        _, pub2 = self._gen_keypair("p2", comment="alice@new-laptop")
+        _, pub3 = self._gen_keypair("p3", comment="alice\twith\ttabs")
+        fake_pw = types.SimpleNamespace(pw_dir=str(home), pw_uid=os.geteuid())
+
+        with patch.object(mod, "BASE", base), \
+                patch.object(mod, "KEYS", keys), \
+                patch.object(mod, "owned", side_effect=fake_owned), \
+                patch.object(mod.pwd, "getpwnam", return_value=fake_pw):
+            # Missing ~/.ssh/authorized_keys returns empty cleanly.
+            self.assertEqual(mod.keys_pending("alice"), [])
+
+            # Enroll pub1 as already authorized.
+            fp1 = mod.keys_add("alice", pub1)
+            self.assertTrue(fp1.startswith("SHA256:"))
+
+            # Stage existing key, duplicate pending key, options-bearing line,
+            # malformed line, comment, and a key with tabs in comment.
+            auth_file = ssh_dir / "authorized_keys"
+            auth_file.write_text(
+                "# staged by ssh-copy-id\n"
+                "\n"
+                + pub1 + "\n"
+                + 'command="/bin/sh" ' + pub2 + "\n"
+                + "not-a-key garbage\n"
+                + pub2 + "\n"
+                + pub2 + " duplicate-comment\n"
+                + pub3 + "\n",
+                encoding="utf-8",
+            )
+            auth_file.chmod(0o600)
+
+            pending = mod.keys_pending("alice")
+            self.assertEqual(len(pending), 2)
+            self.assertEqual(pending[0]["comment"], "alice@new-laptop")
+            self.assertTrue(pending[0]["fingerprint"].startswith("SHA256:"))
+            self.assertNotIn("\t", pending[1]["comment"])
+            self.assertNotIn("\t", pending[1]["line"])
+            self.assertEqual(pending[1]["comment"], "alice with tabs")
+            # Authorized store must remain untouched (still only pub1).
+            self.assertEqual([e["fingerprint"] for e in mod.keys_list("alice")], [fp1])
+
+            # World-writable authorized_keys must be ignored.
+            auth_file.chmod(0o666)
+            self.assertEqual(mod.keys_pending("alice"), [])
+            auth_file.chmod(0o600)
+
+            # Oversized (> 64 KiB) authorized_keys must be ignored.
+            auth_file.write_text((pub2 + "\n") * 2000, encoding="utf-8")
+            self.assertGreater(auth_file.stat().st_size, mod.PENDING_MAX_BYTES)
+            self.assertEqual(mod.keys_pending("alice"), [])
+
+            # Symlinked authorized_keys must be rejected (O_NOFOLLOW).
+            target = self.root / "real_keys"
+            target.write_text(pub2 + "\n", encoding="utf-8")
+            auth_file.unlink()
+            auth_file.symlink_to(target)
+            self.assertEqual(mod.keys_pending("alice"), [])
+
+            # Symlinked .ssh directory must be rejected (O_DIRECTORY|O_NOFOLLOW).
+            real_ssh = self.root / "real_ssh"
+            real_ssh.mkdir(mode=0o700)
+            (real_ssh / "authorized_keys").write_text(pub2 + "\n", encoding="utf-8")
+            auth_file.unlink()
+            ssh_dir.rmdir()
+            ssh_dir.symlink_to(real_ssh)
+            self.assertEqual(mod.keys_pending("alice"), [])
+
+            # Unknown user returns empty; invalid user name raises ValueError.
+            with patch.object(mod.pwd, "getpwnam", side_effect=KeyError("nobody")):
+                self.assertEqual(mod.keys_pending("ghost"), [])
+            with self.assertRaises(ValueError):
+                mod.keys_pending("root")
+
+    def test_keys_add_file_import_and_rejections(self):
+        base = self.root / "file-import-base"
+        keys = base / "authorized_keys"
+        _, pub1 = self._gen_keypair("f1", comment="alice@usb")
+        _, pub2 = self._gen_keypair("f2", comment="alice@second")
+        pub_file = self.root / "operator.pub"
+        pub_file.write_text(f"# header\n{pub1}\n", encoding="utf-8")
+
+        with patch.object(mod, "BASE", base), \
+                patch.object(mod, "KEYS", keys), \
+                patch.object(mod, "owned", side_effect=fake_owned):
+            fp1 = mod.keys_add_file("alice", str(pub_file))
+            self.assertTrue(fp1.startswith("SHA256:"))
+            self.assertEqual(len(mod.keys_list("alice")), 1)
+
+            # Multi-key file is refused.
+            multi = self.root / "multi.pub"
+            multi.write_text(f"{pub1}\n{pub2}\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                mod.keys_add_file("alice", str(multi))
+
+            # Symlinked .pub file is refused (O_NOFOLLOW).
+            link = self.root / "link.pub"
+            link.symlink_to(pub_file)
+            with self.assertRaises(OSError):
+                mod.keys_add_file("alice", str(link))
+
+    def test_enroll_filter_rules_and_url_selection(self):
+        self.assertEqual(
+            mod.enroll_filter_rules(()),
+            "flush set inet locachy-filter ssh_enroll_v4\n"
+            "flush set inet locachy-filter ssh_enroll_v6\n",
+        )
+        bound = (
+            ("tailscale0", ipaddress.ip_address("100.64.17.1"), 41234),
+            ("eth0", ipaddress.ip_address("192.168.1.20"), 41235),
+            ("eth0", ipaddress.ip_address("2001:db8::20"), 41236),
+            ("lo", ipaddress.ip_address("127.0.0.1"), 41237),
+        )
+        rules = mod.enroll_filter_rules(bound)
+        self.assertIn('add element inet locachy-filter ssh_enroll_v4 { "eth0" . 192.168.1.20 . 41235 }\n', rules)
+        self.assertIn('add element inet locachy-filter ssh_enroll_v6 { "eth0" . 2001:db8::20 . 41236 }\n', rules)
+        self.assertNotIn("tailscale0", rules)
+        self.assertNotIn('"lo"', rules)
+
+        url = mod._select_receive_url([(i, a, p, None) for i, a, p in bound], "ABCDEF")
+        self.assertEqual(url, "http://100.64.17.1:41234/ABCDEF")
+        lan_only = [
+            ("eth0", ipaddress.ip_address("2001:db8::20"), 41236, None),
+            ("eth0", ipaddress.ip_address("192.168.1.20"), 41235, None),
+        ]
+        self.assertEqual(mod._select_receive_url(lan_only, "ABCDEF"), "http://192.168.1.20:41235/ABCDEF")
+        v6_only = [("eth0", ipaddress.ip_address("2001:db8::20"), 41236, None)]
+        self.assertEqual(mod._select_receive_url(v6_only, "ABCDEF"), "http://[2001:db8::20]:41236/ABCDEF")
+
+    def _raw_http(self, host, port, req_bytes, body_after_100=None):
+        with socket.create_connection((host, port), timeout=5) as conn:
+            conn.settimeout(5)
+            conn.sendall(req_bytes)
+            chunks = []
+            if body_after_100 is not None:
+                prelim = b""
+                while b"\r\n\r\n" not in prelim:
+                    data = conn.recv(4096)
+                    if not data:
+                        break
+                    prelim += data
+                self.assertTrue(prelim.startswith(b"HTTP/1.1 100 Continue\r\n\r\n"), prelim)
+                rest = prelim.split(b"\r\n\r\n", 1)[1]
+                if rest:
+                    chunks.append(rest)
+                conn.sendall(body_after_100)
+            while True:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+            return b"".join(chunks).decode("utf-8", errors="replace")
+
+    def _spawn_receive(self, base, rc_path, timeout=15):
+        env = os.environ.copy()
+        env["LOCACHY_SSH_BASE"] = str(base)
+        env["LOCACHY_SSH_RC"] = str(rc_path)
+        env["LOCACHY_SSH_NO_NETNS"] = "1"
+        env["LOCACHY_SSH_BIND_ADDR"] = "127.0.0.1"
+        proc = subprocess.Popen(
+            [sys.executable, "-I", str(SOURCE), "--receive-key", "alice", "--timeout", str(timeout)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        ready = proc.stdout.readline().strip()
+        return proc, ready
+
+    def test_receive_key_http_flow_rejections_and_no_autowrite(self):
+        base = self.root / "recv-base"
+        keys = base / "authorized_keys"
+        rc_path = self.root / "recv-rc.conf"
+        rc_path.write_text('ssh_listen="tailscale"\n', encoding="utf-8")
+        _, pub = self._gen_keypair("r1", comment="macbook@studio")
+
+        proc, ready = self._spawn_receive(base, rc_path, timeout=15)
+        try:
+            parts = ready.split("\t")
+            self.assertEqual(len(parts), 3, f"unexpected READY line: {ready!r}")
+            self.assertEqual(parts[0], "READY")
+            self.assertEqual(parts[2], "15")
+            parsed_url = urlparse(parts[1])
+            self.assertEqual(parsed_url.scheme, "http")
+            self.assertEqual(parsed_url.hostname, "127.0.0.1")
+            self.assertTrue(parsed_url.port and parsed_url.port > 0)
+            token = parsed_url.path.lstrip("/")
+            self.assertEqual(len(token), mod.RECEIVE_TOKEN_LEN)
+            for ch in token:
+                self.assertIn(ch, mod.RECEIVE_TOKEN_ALPHABET)
+
+            host, port = parsed_url.hostname, parsed_url.port
+
+            # 1. Wrong token rejected with 403.
+            bad_tok = self._raw_http(
+                host, port,
+                f"PUT /WRONG1 HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: {len(pub)}\r\n\r\n{pub}".encode("utf-8"),
+            )
+            self.assertTrue(bad_tok.startswith("HTTP/1.1 403 "), bad_tok)
+
+            # 2. Oversized body (> 4096) rejected with 413.
+            big_len = mod.RECEIVE_MAX_BODY + 1
+            oversized = self._raw_http(
+                host, port,
+                f"PUT /{token} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: {big_len}\r\n\r\n".encode("ascii"),
+            )
+            self.assertTrue(oversized.startswith("HTTP/1.1 413 "), oversized)
+
+            # 3. Chunked transfer encoding rejected with 411.
+            chunked = self._raw_http(
+                host, port,
+                f"PUT /{token} HTTP/1.1\r\nHost: {host}:{port}\r\nTransfer-Encoding: chunked\r\n\r\n".encode("ascii"),
+            )
+            self.assertTrue(chunked.startswith("HTTP/1.1 411 "), chunked)
+
+            # 4. Invalid public key rejected with 400.
+            bad_body = b"not-a-valid-ssh-key\n"
+            invalid = self._raw_http(
+                host, port,
+                f"PUT /{token} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: {len(bad_body)}\r\n\r\n".encode("ascii") + bad_body,
+            )
+            self.assertTrue(invalid.startswith("HTTP/1.1 400 "), invalid)
+
+            # 5. Valid curl-style PUT with Expect: 100-continue succeeds with 200 OK.
+            good_body = (pub + "\n").encode("utf-8")
+            ok_resp = self._raw_http(
+                host, port,
+                (
+                    f"PUT /{token} HTTP/1.1\r\n"
+                    f"Host: {host}:{port}\r\n"
+                    f"Expect: 100-continue\r\n"
+                    f"Content-Length: {len(good_body)}\r\n\r\n"
+                ).encode("ascii"),
+                body_after_100=good_body,
+            )
+            self.assertTrue(ok_resp.startswith("HTTP/1.1 200 OK\r\n"), ok_resp)
+            self.assertIn("SHA256:", ok_resp)
+
+            key_line = proc.stdout.readline().strip()
+            rc_code = proc.wait(timeout=5)
+            self.assertEqual(rc_code, 0, proc.stderr.read())
+            kparts = key_line.split("\t")
+            self.assertEqual(len(kparts), 6, f"unexpected KEY line: {key_line!r}")
+            self.assertEqual(kparts[0], "KEY")
+            self.assertEqual(kparts[1], "127.0.0.1")
+            self.assertEqual(kparts[2], "ssh-ed25519")
+            self.assertTrue(kparts[3].startswith("SHA256:"))
+            self.assertIn(kparts[3], ok_resp)
+            self.assertEqual(kparts[4], "macbook@studio")
+            self.assertEqual(kparts[5], pub)
+
+            # Receiving a key must NEVER auto-write authorized_keys.
+            self.assertFalse((keys / "alice").exists())
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=5)
+
+    def test_receive_key_timeout_and_sigterm(self):
+        base = self.root / "recv-timeout-base"
+        rc_path = self.root / "recv-timeout-rc.conf"
+        rc_path.write_text('ssh_listen="tailscale"\n', encoding="utf-8")
+
+        proc, ready = self._spawn_receive(base, rc_path, timeout=1)
+        try:
+            self.assertTrue(ready.startswith("READY\thttp://127.0.0.1:"), ready)
+            rc_code = proc.wait(timeout=5)
+            self.assertEqual(rc_code, 124)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+        proc2, ready2 = self._spawn_receive(base, rc_path, timeout=30)
+        try:
+            self.assertTrue(ready2.startswith("READY\thttp://127.0.0.1:"), ready2)
+            proc2.send_signal(signal.SIGTERM)
+            rc_code2 = proc2.wait(timeout=5)
+            self.assertNotEqual(rc_code2, 0)
+        finally:
+            if proc2.poll() is None:
+                proc2.kill()
+                proc2.wait(timeout=5)
 
 
 if __name__ == "__main__":

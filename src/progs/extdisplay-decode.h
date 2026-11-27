@@ -13,7 +13,8 @@ int extdisplay_decoder_push(struct extdisplay_decoder *, const void *, size_t, e
 int extdisplay_decoder_step(struct extdisplay_decoder *, const void *, size_t);
 int extdisplay_decoder_size(const struct extdisplay_decoder *, uint32_t *width, uint32_t *height);
 /* Pipelined 3-slot VA-API VPP + DRM PRIME export: prepare_dmabuf runs VPP into
- * slot (0..EXTDISPLAY_DMABUF_SLOTS-1) without blocking CPU sync; export_slot
+ * slot (0..EXTDISPLAY_DMABUF_SLOTS-1) and syncs VPP completion (vaSyncSurface)
+ * before returning so DRM never scans out an unfinished frame; export_slot
  * exports that slot's PRIME fds once so the frontend can cache the DRM FB. */
 int extdisplay_decoder_prepare_dmabuf(struct extdisplay_decoder *, uint32_t slot);
 int extdisplay_decoder_export_slot(struct extdisplay_decoder *, uint32_t slot, int *fds, struct extdisplay_dmabuf *info);

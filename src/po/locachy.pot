@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-27 14:51+0800\n"
+"POT-Creation-Date: 2026-11-27 18:54+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -10643,12 +10643,34 @@ msgid "Last handoff: %.104s"
 msgstr ""
 
 #: progs/settings-power.inc
+msgid "Charge start threshold"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "Charge stop threshold"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "not set for manual charging"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "%d%% saved for manual charging"
+msgstr ""
+
+#: progs/settings-power.inc
 msgid "Plug in AC power first"
 msgstr ""
 
 #: progs/settings-power.inc
 #, c-format
 msgid "Expected to resume charging to full at %s"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid ""
+"Software limit: applies while running; charging resumes in sleep or off."
 msgstr ""
 
 #: progs/settings-power.inc
@@ -11108,6 +11130,24 @@ msgstr ""
 msgid "start %d%%, stop %d%%"
 msgstr ""
 
+#: progs/settings-power.inc progs/settings.c progs/view.c
+msgid "auto"
+msgstr ""
+
+#: progs/settings-power.inc
+msgid "inhibited"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "software %d%%–%d%% (%s, while running)"
+msgstr ""
+
+#: progs/settings-power.inc
+#, c-format
+msgid "software (%s, no cap)"
+msgstr ""
+
 #: progs/settings-power.inc
 #, c-format
 msgid "saved %d%%–%d%% (applied on insert)"
@@ -11275,6 +11315,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Power saver"
+msgstr ""
+
+#: progs/settings.c
+msgid "Auto (by detected GPU)"
 msgstr ""
 
 #: progs/settings.c
@@ -12774,10 +12818,6 @@ msgstr ""
 msgid "Duress password removed; duress is off."
 msgstr ""
 
-#: progs/settings.c progs/view.c
-msgid "auto"
-msgstr ""
-
 #: progs/settings.c
 #, c-format
 msgid "%s: no DRM cards found; keeping auto."
@@ -12877,6 +12917,99 @@ msgid "SSH public key removed."
 msgstr ""
 
 #: progs/settings.c
+#, c-format
+msgid "Cannot import SSH public key: %.120s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Imported SSH public key (%.48s)."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cannot read pending keys from ~/.ssh/authorized_keys."
+msgstr ""
+
+#: progs/settings.c
+msgid "Pending keys (approve)"
+msgstr ""
+
+#. TRANSLATORS: Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "Enter: approve selected key   Esc: back"
+msgstr ""
+
+#: progs/settings.c
+msgid "No pending keys in ~/.ssh/authorized_keys."
+msgstr ""
+
+#: progs/settings.c
+msgid "Cannot start SSH key receiver."
+msgstr ""
+
+#: progs/settings.c
+msgid "Receive SSH public key"
+msgstr ""
+
+#: progs/settings.c
+msgid "Run this command on the other computer to send its public key:"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Waiting for key upload (%d s left)..."
+msgstr ""
+
+#: progs/settings.c
+msgid "Starting one-time receiver..."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH key receive cancelled; no key added."
+msgstr ""
+
+#: progs/settings.c
+msgid "SSH key receive timed out; no key added."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "SSH key receive failed: %.120s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Confirm received SSH public key"
+msgstr ""
+
+#: progs/settings.c
+msgid "Verify this key before approving:"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Peer IP:     %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Key type:    %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Comment:     %s"
+msgstr ""
+
+#. TRANSLATORS: Enter and Esc are key names; keep them.
+#: progs/settings.c
+msgid "Enter: approve and add key   Esc: reject"
+msgstr ""
+
+#: progs/settings.c
+msgid "Received SSH public key rejected."
+msgstr ""
+
+#: progs/settings.c
 msgid "No regular local user (uid 1000) found."
 msgstr ""
 
@@ -12885,9 +13018,21 @@ msgstr ""
 msgid "sshd AuthorizedKeys (%.40s)"
 msgstr ""
 
-#. TRANSLATORS: a, Enter, Delete and Esc are key names; keep them.
+#. TRANSLATORS: Enter, a, Delete and Esc are key names; keep them.
 #: progs/settings.c
-msgid "a / Enter: add public key   Delete: remove selected   Esc: back"
+msgid "Enter: run action   a: paste key   Delete: remove selected   Esc: back"
+msgstr ""
+
+#: progs/settings.c
+msgid "[ Receive from another computer (one-time link) ]"
+msgstr ""
+
+#: progs/settings.c
+msgid "[ Approve pending keys from ~/.ssh ]"
+msgstr ""
+
+#: progs/settings.c
+msgid "[ Import public key file ]"
 msgstr ""
 
 #: progs/settings.c
@@ -12904,6 +13049,18 @@ msgid "sshd AuthorizedKeys: %d key."
 msgid_plural "sshd AuthorizedKeys: %d keys."
 msgstr[0] ""
 msgstr[1] ""
+
+#: progs/settings.c
+msgid "Path to SSH public key file (e.g. /home/user/.ssh/id_ed25519.pub): "
+msgstr ""
+
+#: progs/settings.c
+msgid "No key imported."
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter an absolute path to a public key file."
+msgstr ""
 
 #: progs/settings.c
 msgid "Paste SSH public key (ssh-ed25519 / ssh-rsa ...): "
@@ -13944,6 +14101,12 @@ msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
 #: progs/settings.c
+#, c-format
+msgid "detected %.24s, rec %.12s (Enter: apply)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
 msgid "not installed  (Enter: apply)"
 msgstr ""
 
@@ -14434,23 +14597,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Enter: request full charge"
-msgstr ""
-
-#: progs/settings.c
-msgid "Charge start threshold"
-msgstr ""
-
-#: progs/settings.c
-msgid "Charge stop threshold"
-msgstr ""
-
-#: progs/settings.c
-msgid "not set for manual charging"
-msgstr ""
-
-#: progs/settings.c
-#, c-format
-msgid "%d%% saved for manual charging"
 msgstr ""
 
 #. TRANSLATORS: Enter is the Enter key; keep it.
@@ -15491,8 +15637,8 @@ msgstr ""
 
 #: progs/settings.c
 msgid ""
-"Choose Open DKMS (new, RTX 20+), 580xx DKMS (legacy / GSP off), or Off; "
-"Enter applies."
+"Choose Auto (by detected GPU), Open DKMS (new, RTX 20+), 580xx DKMS "
+"(legacy / GSP off), or Off; Enter applies."
 msgstr ""
 
 #: progs/settings.c

@@ -614,8 +614,11 @@ int main(void)
     nssh_keys = -1;
     item_text(ssh_index() + 3, line, sizeof line);
     assert(nssh_keys == 0 && strstr(line, "sshd AuthorizedKeys") && strstr(line, "0 keys   (Enter)"));
-    /* Open modal, press Enter on "[ + Add public key ]", paste an ed25519 key, then Esc back. */
+    /* Open modal, move down to "[ + Add public key ]" (row 3), paste an ed25519 key, then Esc back. */
     nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = K_DOWN;
     fake_keys[nfake_keys++] = '\n';
     const char *sample_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyData user@host";
     for (size_t i = 0; sample_key[i]; i++) fake_keys[nfake_keys++] = (unsigned char)sample_key[i];
@@ -628,8 +631,11 @@ int main(void)
            !strcmp(ssh_keys[0].fingerprint, "SHA256:addedkey1"));
     item_text(ssh_index() + 3, line, sizeof line);
     assert(strstr(line, "1 key   (Enter)"));
-    /* Open modal, move down to key 1, press Delete twice to remove, then q (cancel) back. */
+    /* Open modal, move down to key 1 (row 4), press Delete twice to remove, then q (cancel) back. */
     nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = K_DOWN;
     fake_keys[nfake_keys++] = K_DOWN;
     fake_keys[nfake_keys++] = K_DEL;
     fake_keys[nfake_keys++] = K_DEL;
@@ -1046,29 +1052,43 @@ int main(void)
     gpu_unlock_job = gpu_power_job = gpu_driver_job = 0;
     puts("PASS adopt_jobs follows winmaint-*, tb-sync, gpu-driver-*, gpu-unlock-*, and gpu-power* jobs");
 
-    /* 7b. NVIDIA DKMS driver (new -> old: open, 580xx, off) and GSP firmware rows. */
+    /* 7b. NVIDIA DKMS driver (auto -> open -> 580xx -> off) and GSP firmware rows. */
     assert(category_of(gpu_driver_index()) == CAT_INPUT && category_of(gpu_gsp_index()) == CAT_INPUT);
     assert(picker_row(gpu_driver_index()) && enter_row(gpu_driver_index()));
-    fake_nvidia_status = "configured\toff\ninstalled\toff\ndkms_version\t\ngsp_policy\tauto\ngsp_disabled\t0\n";
+    fake_nvidia_status = "configured\toff\ninstalled\toff\nrecommended\toff\ngpu_family\tnone\ndkms_version\t\ngsp_policy\tauto\ngsp_disabled\t0\n";
     gpu_driver_cfg = NVD_OFF;
-    gpu_driver_choice = NVD_OPEN;
+    gpu_driver_choice = NVD_AUTO;
     load_gpu_driver_status();
     item_text(gpu_driver_index(), line, sizeof line);
-    assert(strstr(line, "Open DKMS (new, RTX 20+)") && strstr(line, "not installed"));
+    assert(strstr(line, "Auto (by detected GPU)") && strstr(line, "not installed"));
 
-    /* Picker cycles new -> old (open -> 580xx -> off) without submitting until Enter (gpu_driver_apply_row). */
+    /* Detected GPU family + recommendation shown while not installed; auto+rec=open marks GSP mandatory. */
+    fake_nvidia_status = "configured\tauto\ninstalled\toff\nrecommended\topen\ngpu_family\tampere\ndkms_version\t\ngsp_policy\tauto\ngsp_disabled\t0\n";
+    gpu_driver_cfg = NVD_AUTO;
+    load_gpu_driver_status();
+    assert(gpu_driver_choice == NVD_AUTO);
+    item_text(gpu_driver_index(), line, sizeof line);
+    assert(strstr(line, "Auto (by detected GPU)") && strstr(line, "detected ampere, rec open (Enter: apply)"));
+    item_text(gpu_gsp_index(), line, sizeof line);
+    assert(strstr(line, "open requires GSP"));
+
+    /* Picker cycles auto -> open -> 580xx -> off without submitting until Enter (gpu_driver_apply_row). */
     selected = gpu_driver_index();
     jobs_double_last[0] = '\0';
     adjust(+1);
-    assert(gpu_driver_choice == NVD_580XX && gpu_driver_job == 0 && !jobs_double_last[0]);
+    assert(gpu_driver_choice == NVD_OPEN && gpu_driver_job == 0 && !jobs_double_last[0]);
+    adjust(+1);
+    assert(gpu_driver_choice == NVD_580XX && gpu_driver_job == 0);
     adjust(+1);
     assert(gpu_driver_choice == NVD_OFF && gpu_driver_job == 0);
+    adjust(+1);
+    assert(gpu_driver_choice == NVD_AUTO && gpu_driver_job == 0);
     adjust(+1);
     assert(gpu_driver_choice == NVD_OPEN && gpu_driver_job == 0);
     jobs_double_ended = 0;
     gpu_driver_apply_row();
     assert(gpu_driver_job != 0 && !strcmp(jobs_double_last, "gpu-driver-set open"));
-    fake_nvidia_status = "configured\topen\ninstalled\topen\ndkms_version\t595.45.04-1\ngsp_policy\tauto\ngsp_disabled\t0\n";
+    fake_nvidia_status = "configured\topen\ninstalled\topen\nrecommended\topen\ngpu_family\tampere\ndkms_version\t595.45.04-1\ngsp_policy\tauto\ngsp_disabled\t0\n";
     assert(rc_set("nvidia_driver", "open") == 0);
     jobs_double_ended = 1;
     gpu_driver_check();
@@ -1090,7 +1110,7 @@ int main(void)
     jobs_double_last[0] = '\0';
     gpu_driver_apply_row();
     assert(gpu_driver_job != 0 && !strcmp(jobs_double_last, "gpu-driver-set 580xx"));
-    fake_nvidia_status = "configured\t580xx\ninstalled\t580xx\ndkms_version\t580.126.25-1\ngsp_policy\tauto\ngsp_disabled\t1\n";
+    fake_nvidia_status = "configured\t580xx\ninstalled\t580xx\nrecommended\topen\ngpu_family\tampere\ndkms_version\t580.126.25-1\ngsp_policy\tauto\ngsp_disabled\t1\n";
     assert(rc_set("nvidia_driver", "580xx") == 0);
     jobs_double_ended = 1;
     gpu_driver_check();
@@ -1109,7 +1129,7 @@ int main(void)
     jobs_double_ended = 1;
     gpu_driver_check();
     assert(gpu_driver_job == 0 && gpu_gsp_mode == NVGSP_OFF);
-    puts("PASS NVIDIA DKMS driver (open/580xx/off) picker and GSP firmware settings rows");
+    puts("PASS NVIDIA DKMS driver (auto/open/580xx/off) picker and GSP firmware settings rows");
 
     /* 8. NVIDIA GPU unlock (one-keypress GitHub fetch/toggle/double-Delete remove)
      * and machine GPU power mode + Dynamic Boost (nvidia-powerd). */

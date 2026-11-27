@@ -61,9 +61,37 @@ FlatBuffer 与预处理器 protobuf 都能在受支持的子集内解析（FLOAT
 - `model-invalid`：模型文件或模型目录是符号链接、不是普通文件、大小不符、SHA-512 不符，
   或无法解析。若一个文件缺失而另一个无效，状态为 `model-invalid`。
 - `unsupported`：机器上并非恰好有一块已插入的系统电池，或电池没有可用的序列号（为空、
-  `0` 或 `unknown`），或缺少 Linux 标准的 `charge_control_end_threshold`（若存在启动阈值，
-  还需要标准的 `charge_control_start_threshold`）。多块电池不会被假定拥有独立的控制器。
-- `error`：读取或写入保存的基线、sysfs 读回、电池身份核对或阈值写入失败。
+  `0` 或 `unknown`），或既缺少 Linux 标准的 `charge_control_end_threshold`（若存在启动阈
+  值，还需要标准的 `charge_control_start_threshold`），也缺少可控制的 `charge_behaviour`
+  属性（同时提供 `auto` 与 `inhibit-charge`）。多块电池不会被假定拥有独立的控制器。
+- `error`：读取或写入保存的基线、sysfs 读回、电池身份核对，或阈值与 `charge_behaviour`
+  写入失败。若 sysfs 中存在 `charge_control_end_threshold` 但无法读取或格式异常，状态直
+  接为 `error`，不会回退到 `charge_behaviour`。
+
+## 硬件阈值与软件 `charge_behaviour`
+
+`battery-history` 优先使用硬件阈值：
+
+1. **硬件阈值（`charge_control_end_threshold`）。** 只要存在就始终优先使用，即使内核同
+   时暴露了 `charge_behaviour` 也不改变原有行为。写入的阈值由 EC 自身执行，睡眠和关机期间
+   同样有效。
+2. **软件 `charge_behaviour`（`auto` / `inhibit-charge`）。** 仅在不存在
+   `charge_control_end_threshold`，且 `charge_behaviour` 同时暴露 `auto` 与
+   `inhibit-charge`（并有且仅有一个带方括号的当前项）时使用。自适应充电和手动启停限制都通
+   过插电时的软件滞回区间实现：
+   - 电量达到或高于停止上限（`end`，20–99%）：先保存 `-1 -1 <原状态> charge_behaviour` 基
+     线文件，再写入 `inhibit-charge`。
+   - 电量降至或低于启动下限（`start`，默认为 `end - 5`）：写入 `auto` 并删除基线文件。
+   - 电量介于 `start` 与 `end` 之间：保持当前状态，避免频繁切换。
+   - **安全释放。** 软件限制只在 `battery-history` 运行且接通电源时生效。遇到拔电、休眠前
+     通知（`SIGUSR1`）、服务退出（`SIGTERM`/`SIGINT`，手动与自适应模式均如此）、**立即充
+     满**、自适应 `top-up` 或保守回退时，服务会立即把 `inhibit-charge` 释放回 `auto`；启
+     动时若发现遗留的 `inhibit-charge` 处于未托管、未插电或电量不高于启动下限的状态，也会
+     自动恢复为 `auto`。`battery-history --once` 从不锁存 `inhibit-charge`。机器睡眠或
+     关机后，充电会恢复正常进行。
+   - **低唤醒轮询。** 仅当采用软件限制的电池正在插电充电且距离停止上限不超过 3% 时，服务
+     才会每 15 秒轮询一次以减少过充；进入 `Not charging`（已暂停充电）后，轮询间隔自动回
+     落到 5 分钟。
 
 ## 控制器条件
 
@@ -116,5 +144,5 @@ FlatBuffer 与预处理器 protobuf 都能在受支持的子集内解析（FLOAT
 
 软件测试覆盖纯 C 推理引擎（`test-battery-tflite.c`）、控制器状态机
 （`test-battery-controller.c`）、清单与下载校验（`test-battery-model.py`），以及用模拟电源
-设备检查的阈值写入、读回和恢复路径。这些测试不能代替对具体笔记本固件 EC 实际停充、恢复
-充电行为的验证。
+设备检查的阈值与 `charge_behaviour` 写入、读回、滞回控制和安全释放路径。这些测试不能代替对
+具体笔记本固件 EC 实际停充、恢复充电行为的验证。

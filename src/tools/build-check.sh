@@ -226,6 +226,10 @@ if pkg-config --exists $extdisplay_pkgs; then
     if pkg-config --exists libva libva-drm; then
         va_cflags="-DCONFIG_EXTDISPLAY_VAAPI $(pkg-config --cflags libva libva-drm)"
         va_libs="$(pkg-config --libs libva libva-drm)"
+        if pkg-config --exists gbm; then
+            va_cflags="$va_cflags -DCONFIG_EXTDISPLAY_GBM $(pkg-config --cflags gbm)"
+            va_libs="$va_libs $(pkg-config --libs gbm)"
+        fi
     fi
     gcc -O3 $sec_flags $lto_flags -Wall -Wextra -Werror -D_GNU_SOURCE -DCONFIG_EXTDISPLAY_FFMPEG $va_cflags \
         $(pkg-config --cflags $extdisplay_pkgs) -c "$src/progs/extdisplay-decode.c" -o "$out/obj/extdisplay-decode.o"

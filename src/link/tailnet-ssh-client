@@ -1,13 +1,17 @@
 #!/usr/bin/python3 -I
 """Native OpenSSH in locachy-net. The listener and sessions share a cgroup."""
 
+import ctypes
 import errno
 import fcntl
+import hmac
 import ipaddress
 import json
 import os
 from pathlib import Path
+import pwd
 import re
+import secrets
 import select
 import shutil
 import signal
@@ -45,6 +49,16 @@ KEY_TYPE_RE = re.compile(r"^[a-z0-9@._-]+$")
 KEY_BODY_RE = re.compile(r"^[A-Za-z0-9+/=]+$")
 RC_LINE_RE = re.compile(r'^[ \t]*([A-Za-z0-9_]+)="([^"\n]*)"[ \t]*(?:#.*)?$')
 EXCLUDED_LAN_IFACES = frozenset(("lo", DEVICE, "mihomo"))
+PENDING_MAX_BYTES = 65536
+RECEIVE_TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+RECEIVE_TOKEN_LEN = 6
+RECEIVE_DEFAULT_TIMEOUT = 120
+RECEIVE_MAX_TIMEOUT = 600
+RECEIVE_MAX_HEADERS = 8192
+RECEIVE_MAX_BODY = 4096
+RECEIVE_MAX_FAILURES = 5
+RECEIVE_CONN_TIMEOUT = 5.0
+PR_SET_NO_NEW_PRIVS = 38
 
 
 def log(message):
@@ -163,8 +177,9 @@ def _parse_pubkey_line(line, allow_tab=False):
         raise ValueError("unsupported or malformed SSH public key")
     fingerprint = _fingerprint_pubkey(stripped)
     comment = tokens[2].replace("\t", " ") if len(tokens) > 2 else ""
+    canonical = f"{key_type} {key_body} {comment}" if comment else f"{key_type} {key_body}"
     return {
-        "line": stripped,
+        "line": canonical,
         "type": key_type,
         "body": key_body,
         "fingerprint": fingerprint,
@@ -257,6 +272,40 @@ def keys_add(user, raw_input):
     return parsed["fingerprint"]
 
 
+def keys_add_file(user, file_path):
+    if not valid_user(user):
+        raise ValueError(f"invalid SSH user: {user!r}")
+    if not file_path:
+        raise ValueError("empty SSH public key file path")
+    fd = os.open(file_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"SSH public key path is not a regular file: {file_path}")
+        if info.st_size > PENDING_MAX_BYTES:
+            raise ValueError("SSH public key file is too large")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(fd, min(8192, PENDING_MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > PENDING_MAX_BYTES:
+                raise ValueError("SSH public key file is too large")
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("SSH public key file is not valid UTF-8") from exc
+    key_lines = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if len(key_lines) != 1:
+        raise ValueError("SSH public key file must contain exactly one public key")
+    return keys_add(user, key_lines[0])
+
+
 def keys_remove(user, index):
     if not valid_user(user):
         raise ValueError(f"invalid SSH user: {user!r}")
@@ -268,6 +317,533 @@ def keys_remove(user, index):
         raise ValueError(f"SSH key index out of range: {index}")
     remaining = [entry["line"] for i, entry in enumerate(existing, start=1) if i != index]
     _write_user_keys_atomic(user, remaining)
+
+
+def _safe_read_user_file(home_dir, rel_parts, allowed_uids, max_bytes=PENDING_MAX_BYTES):
+    """Walk directory components with O_DIRECTORY|O_NOFOLLOW and read a regular file safely."""
+    home = os.path.normpath(str(home_dir))
+    if not os.path.isabs(home):
+        return None
+    home_parts = [part for part in home.split(os.sep) if part]
+    parts = home_parts + list(rel_parts)
+    if not parts:
+        return None
+    check_dir_from = max(0, len(home_parts) - 1)
+    dir_fd = -1
+    file_fd = -1
+    try:
+        dir_fd = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY)
+        for idx, comp in enumerate(parts[:-1]):
+            next_fd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = next_fd
+            if idx >= check_dir_from:
+                dinfo = os.fstat(dir_fd)
+                if dinfo.st_uid not in allowed_uids or bool(dinfo.st_mode & 0o002):
+                    return None
+        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+        info = os.fstat(file_fd)
+        if (not stat.S_ISREG(info.st_mode)
+                or info.st_uid not in allowed_uids
+                or bool(info.st_mode & 0o002)
+                or info.st_size > max_bytes):
+            return None
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(file_fd, min(8192, max_bytes + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        if dir_fd >= 0:
+            os.close(dir_fd)
+
+
+def keys_pending(user):
+    if not valid_user(user):
+        raise ValueError(f"invalid SSH user: {user!r}")
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        return []
+    raw = _safe_read_user_file(pw.pw_dir, (".ssh", "authorized_keys"), {pw.pw_uid, 0})
+    if raw is None:
+        return []
+    seen = set()
+    try:
+        for entry in keys_list(user):
+            seen.add((entry["type"], entry["body"]))
+    except (OSError, RuntimeError):
+        pass
+    pending = []
+    for raw_line in raw.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            parsed = _parse_pubkey_line(stripped, allow_tab=True)
+        except (ValueError, subprocess.SubprocessError):
+            continue
+        ident = (parsed["type"], parsed["body"])
+        if ident in seen:
+            continue
+        seen.add(ident)
+        pending.append(parsed)
+    return pending
+
+
+def _format_host_port(addr, port):
+    host = str(addr) if addr.version == 4 else f"[{addr}]"
+    return f"{host}:{port}"
+
+
+def enroll_filter_rules(bound=()):
+    lines = [
+        f"flush set inet {FILTER_TABLE} ssh_enroll_v4\n",
+        f"flush set inet {FILTER_TABLE} ssh_enroll_v6\n",
+    ]
+    v4 = []
+    v6 = []
+    for ifname, addr, port in bound:
+        if ifname in (DEVICE, "lo"):
+            continue
+        if IFNAME_RE.fullmatch(ifname) is None:
+            raise ValueError(f"unsafe interface name: {ifname!r}")
+        _check_port(port)
+        elem = f'"{ifname}" . {addr} . {port}'
+        if addr.version == 4:
+            v4.append(elem)
+        else:
+            v6.append(elem)
+    if v4:
+        lines.append(f"add element inet {FILTER_TABLE} ssh_enroll_v4 {{ {', '.join(v4)} }}\n")
+    if v6:
+        lines.append(f"add element inet {FILTER_TABLE} ssh_enroll_v6 {{ {', '.join(v6)} }}\n")
+    return "".join(lines)
+
+
+def _enroll_sets_exist():
+    for name in ("ssh_enroll_v4", "ssh_enroll_v6"):
+        try:
+            proc = subprocess.run(("nft", "list", "set", "inet", FILTER_TABLE, name),
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=5, check=False)
+        except OSError:
+            return False
+        if proc.returncode != 0:
+            return False
+    return True
+
+
+def enroll_firewall(bound=()):
+    if _enroll_sets_exist():
+        checked("nft", "-f", "-", input=enroll_filter_rules(bound), text=True)
+
+
+def _select_receive_url(bound_sockets, token):
+    # Prefer tailscale0 IPv4, then any IPv4, then tailscale0 IPv6, then any IPv6.
+    ranked = sorted(
+        bound_sockets,
+        key=lambda item: (
+            0 if item[0] == DEVICE and item[1].version == 4 else
+            1 if item[1].version == 4 else
+            2 if item[0] == DEVICE else 3,
+            item[0],
+            int(item[1]),
+        ),
+    )
+    _ifname, addr, port, _sock = ranked[0]
+    return f"http://{_format_host_port(addr, port)}/{token}"
+
+
+def _receive_bind_targets(listen_mode):
+    override = os.environ.get("LOCACHY_SSH_BIND_ADDR", "").strip()
+    if override:
+        targets = []
+        for raw in override.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            addr = ipaddress.ip_address(raw)
+            if addr.is_unspecified or addr.is_multicast:
+                raise ValueError(f"unsafe bind address for SSH key receive: {addr}")
+            if os.geteuid() != 0 and not addr.is_loopback:
+                raise RuntimeError("non-loopback SSH key receive requires root privileges")
+            targets.append(("lo" if addr.is_loopback else DEVICE, addr))
+        return tuple(targets)
+    return addresses(listen_mode)
+
+
+def _drop_worker_privileges():
+    if os.geteuid() == 0:
+        try:
+            os.setgroups([])
+        except OSError:
+            pass
+        os.setgid(65534)
+        os.setuid(65534)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        prctl = libc.prctl
+        prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        prctl.restype = ctypes.c_int
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _http_reply(conn, status, body):
+    data = body.encode("utf-8")
+    payload = (
+        f"HTTP/1.1 {status}\r\n"
+        f"Content-Type: text/plain; charset=utf-8\r\n"
+        f"Content-Length: {len(data)}\r\n"
+        f"Connection: close\r\n\r\n"
+    ).encode("ascii") + data
+    try:
+        conn.sendall(payload)
+    except OSError:
+        pass
+
+
+def _read_http_request(conn, expected_path):
+    conn.settimeout(RECEIVE_CONN_TIMEOUT)
+    buf = bytearray()
+    header_end = -1
+    while header_end < 0:
+        chunk = conn.recv(4096)
+        if not chunk:
+            return None, "400 Bad Request", "Incomplete HTTP request.\n"
+        buf.extend(chunk)
+        header_end = buf.find(b"\r\n\r\n")
+        if header_end < 0 and len(buf) > RECEIVE_MAX_HEADERS:
+            return None, "431 Request Header Fields Too Large", "Request headers too large.\n"
+    if header_end > RECEIVE_MAX_HEADERS:
+        return None, "431 Request Header Fields Too Large", "Request headers too large.\n"
+
+    head_bytes = bytes(buf[:header_end])
+    body_buf = bytearray(buf[header_end + 4:])
+    try:
+        head_lines = head_bytes.decode("iso-8859-1").split("\r\n")
+    except UnicodeDecodeError:
+        return None, "400 Bad Request", "Invalid HTTP headers.\n"
+    if not head_lines:
+        return None, "400 Bad Request", "Empty HTTP request.\n"
+    req_parts = head_lines[0].split(" ")
+    if len(req_parts) != 3 or not req_parts[2].startswith("HTTP/1."):
+        return None, "400 Bad Request", "Malformed HTTP request line.\n"
+    method, target, _version = req_parts
+    headers = {}
+    for line in head_lines[1:]:
+        if ":" not in line:
+            return None, "400 Bad Request", "Malformed HTTP header.\n"
+        name, value = line.split(":", 1)
+        lname = name.strip().lower()
+        val = value.strip()
+        if lname == "content-length" and lname in headers:
+            return None, "400 Bad Request", "Duplicate Content-Length header.\n"
+        headers[lname] = val
+
+    if method not in ("PUT", "POST"):
+        return None, "405 Method Not Allowed", "Use PUT or POST.\n"
+
+    req_path = target.split("?", 1)[0]
+    if not hmac.compare_digest(req_path, expected_path):
+        return None, "403 Forbidden", "Invalid token.\n"
+
+    if "transfer-encoding" in headers:
+        return None, "411 Length Required", "Chunked transfer encoding is not supported.\n"
+    raw_len = headers.get("content-length")
+    if raw_len is None or not (raw_len.isascii() and raw_len.isdecimal()):
+        return None, "411 Length Required", "Content-Length header is required.\n"
+    content_length = int(raw_len)
+    if content_length > RECEIVE_MAX_BODY:
+        return None, "413 Payload Too Large", "Public key payload exceeds 4096 bytes.\n"
+
+    expect = headers.get("expect", "").lower()
+    if "100-continue" in expect and len(body_buf) < content_length:
+        try:
+            conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+        except OSError:
+            return None, None, None
+
+    while len(body_buf) < content_length:
+        chunk = conn.recv(min(4096, content_length - len(body_buf)))
+        if not chunk:
+            return None, "400 Bad Request", "Incomplete request body.\n"
+        body_buf.extend(chunk)
+    body = bytes(body_buf[:content_length])
+    return (method, target, body), None, None
+
+
+def _receive_worker(listeners, token, to_parent_fd, from_parent_fd, deadline):
+    _drop_worker_privileges()
+    failures = 0
+    expected_path = "/" + token
+    try:
+        with os.fdopen(to_parent_fd, "w", encoding="utf-8", buffering=1) as to_parent, \
+                os.fdopen(from_parent_fd, "r", encoding="utf-8") as from_parent:
+            while failures < RECEIVE_MAX_FAILURES:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                try:
+                    ready, _, _ = select.select(listeners, [], [], min(remaining, 0.5))
+                except InterruptedError:
+                    continue
+                except OSError:
+                    return
+                for sock in ready:
+                    try:
+                        conn, peer = sock.accept()
+                    except OSError:
+                        continue
+                    peer_ip = peer[0]
+                    with conn:
+                        try:
+                            req, err_status, err_body = _read_http_request(conn, expected_path)
+                        except (socket.timeout, OSError):
+                            failures += 1
+                            if failures >= RECEIVE_MAX_FAILURES:
+                                return
+                            continue
+                        if req is None:
+                            if err_status:
+                                _http_reply(conn, err_status, err_body)
+                            failures += 1
+                            if failures >= RECEIVE_MAX_FAILURES:
+                                return
+                            continue
+                        _method, _target, body_bytes = req
+                        try:
+                            body_text = body_bytes.decode("utf-8")
+                        except UnicodeDecodeError:
+                            _http_reply(conn, "400 Bad Request", "Invalid UTF-8 public key.\n")
+                            failures += 1
+                            if failures >= RECEIVE_MAX_FAILURES:
+                                return
+                            continue
+                        msg = json.dumps({"peer_ip": peer_ip, "body": body_text}) + "\n"
+                        try:
+                            to_parent.write(msg)
+                            to_parent.flush()
+                            reply_line = from_parent.readline()
+                        except OSError:
+                            return
+                        if not reply_line:
+                            return
+                        reply = json.loads(reply_line)
+                        _http_reply(conn, reply["status"], reply["body"])
+                        if reply.get("accepted"):
+                            return
+                        failures += 1
+                        if failures >= RECEIVE_MAX_FAILURES:
+                            return
+    finally:
+        for sock in listeners:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def _parse_received_pubkey(raw_body):
+    lines = [line.strip() for line in raw_body.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if len(lines) != 1:
+        raise ValueError("expected exactly one SSH public key")
+    return _parse_pubkey_line(lines[0], allow_tab=True)
+
+
+def receive_key(user, timeout=RECEIVE_DEFAULT_TIMEOUT):
+    if not valid_user(user):
+        raise ValueError(f"invalid SSH user: {user!r}")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= RECEIVE_MAX_TIMEOUT:
+        raise ValueError(f"invalid receive timeout: {timeout!r}")
+
+    listen_mode, _port, _password_auth = read_rc()
+    targets = _receive_bind_targets(listen_mode)
+    if not targets:
+        raise RuntimeError(f"no listen addresses available for SSH key receive ({listen_mode})")
+    use_enroll_fw = listen_mode == "lan" and os.environ.get("LOCACHY_SSH_NO_NETNS") != "1"
+
+    bound_sockets = []
+    seen_addrs = set()
+    try:
+        for ifname, addr in targets:
+            if addr in seen_addrs:
+                continue
+            family = socket.AF_INET if addr.version == 4 else socket.AF_INET6
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                if family == socket.AF_INET6:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                sock.bind((str(addr), 0))
+                sock.listen(4)
+                port = sock.getsockname()[1]
+                bound_sockets.append((ifname, addr, port, sock))
+                seen_addrs.add(addr)
+            except OSError:
+                sock.close()
+                if not bound_sockets and addr == targets[-1][1]:
+                    raise
+        if not bound_sockets:
+            raise RuntimeError("failed to bind any SSH key receive socket")
+
+        token = "".join(secrets.choice(RECEIVE_TOKEN_ALPHABET) for _ in range(RECEIVE_TOKEN_LEN))
+        enroll_tuples = tuple((ifname, addr, port) for ifname, addr, port, _sock in bound_sockets)
+        if use_enroll_fw:
+            enroll_firewall(enroll_tuples)
+
+        p2c_r, p2c_w = os.pipe()
+        c2p_r, c2p_w = os.pipe()
+        deadline = time.monotonic() + timeout
+        sys.stdout.flush()
+        sys.stderr.flush()
+        try:
+            pid = os.fork()
+        except OSError:
+            for fd in (p2c_r, p2c_w, c2p_r, c2p_w):
+                os.close(fd)
+            raise
+        if pid == 0:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            os.close(p2c_w)
+            os.close(c2p_r)
+            listeners = [sock for _ifname, _addr, _port, sock in bound_sockets]
+            try:
+                _receive_worker(listeners, token, c2p_w, p2c_r, deadline)
+            finally:
+                os._exit(0)
+
+        os.close(p2c_r)
+        os.close(c2p_w)
+        for _ifname, _addr, _port, sock in bound_sockets:
+            sock.close()
+        bound_sockets.clear()
+
+        url = _select_receive_url([(ifname, addr, port, None) for ifname, addr, port in enroll_tuples], token)
+        print(f"READY\t{url}\t{timeout}", flush=True)
+
+        interrupted = False
+
+        def _on_stop(_signum, _frame):
+            nonlocal interrupted
+            interrupted = True
+
+        old_term = signal.signal(signal.SIGTERM, _on_stop)
+        old_int = signal.signal(signal.SIGINT, _on_stop)
+        try:
+            with os.fdopen(c2p_r, "r", encoding="utf-8") as from_child, \
+                    os.fdopen(p2c_w, "w", encoding="utf-8", buffering=1) as to_child:
+                while not interrupted:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return 124
+                    try:
+                        ready, _, _ = select.select([from_child], [], [], min(remaining, 0.1))
+                    except InterruptedError:
+                        continue
+                    if not ready:
+                        done_pid, _status = os.waitpid(pid, os.WNOHANG)
+                        if done_pid == pid:
+                            pid = -1
+                            return 124 if time.monotonic() >= deadline else 1
+                        continue
+                    line = from_child.readline()
+                    if not line:
+                        return 124 if time.monotonic() >= deadline else 1
+                    req = json.loads(line)
+                    peer_ip = str(req.get("peer_ip", "")).replace("\t", " ").replace("\n", " ")
+                    raw_body = req.get("body", "")
+                    try:
+                        parsed = _parse_received_pubkey(raw_body)
+                    except (ValueError, subprocess.SubprocessError) as exc:
+                        reply = {
+                            "accepted": False,
+                            "status": "400 Bad Request",
+                            "body": f"Invalid SSH public key: {exc}\n",
+                        }
+                        to_child.write(json.dumps(reply) + "\n")
+                        to_child.flush()
+                        continue
+                    reply = {
+                        "accepted": True,
+                        "status": "200 OK",
+                        "body": f"Received {parsed['fingerprint']} — confirm on LOCachy screen.\n",
+                    }
+                    try:
+                        to_child.write(json.dumps(reply) + "\n")
+                        to_child.flush()
+                    except OSError:
+                        pass
+                    # Wait briefly for the worker to flush its HTTP 200 reply before tearing down.
+                    flush_deadline = time.monotonic() + 1.0
+                    while time.monotonic() < flush_deadline:
+                        try:
+                            done_pid, _status = os.waitpid(pid, os.WNOHANG)
+                        except ChildProcessError:
+                            pid = -1
+                            break
+                        if done_pid == pid:
+                            pid = -1
+                            break
+                        time.sleep(0.01)
+                    print(
+                        f"KEY\t{peer_ip}\t{parsed['type']}\t{parsed['fingerprint']}"
+                        f"\t{parsed['comment']}\t{parsed['line']}",
+                        flush=True,
+                    )
+                    return 0
+                return 130
+        finally:
+            signal.signal(signal.SIGTERM, old_term)
+            signal.signal(signal.SIGINT, old_int)
+            if pid > 0:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                wait_deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        done_pid, _status = os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if done_pid == pid:
+                        break
+                    if time.monotonic() >= wait_deadline:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            os.waitpid(pid, 0)
+                        except ChildProcessError:
+                            pass
+                        break
+                    time.sleep(0.02)
+    finally:
+        for _ifname, _addr, _port, sock in bound_sockets:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if use_enroll_fw:
+            try:
+                enroll_firewall(())
+            except (OSError, subprocess.SubprocessError):
+                pass
 
 
 def host_key_fingerprint():
@@ -709,6 +1285,34 @@ def reload_handler(_signum, _frame):
     reloading = True
 
 
+def _need_netns_reexec():
+    if os.environ.get("LOCACHY_SSH_NO_NETNS") == "1":
+        return False
+    net_id = identity(NS)
+    if not net_id:
+        raise RuntimeError(f"network namespace not available: {NS}")
+    return net_id != identity(Path("/proc/self/ns/net"))
+
+
+def _parse_receive_args(argv):
+    if len(argv) < 2 or argv[0] != "--receive-key":
+        raise ValueError("usage: --receive-key USER [--timeout SECS]")
+    user = argv[1]
+    timeout = RECEIVE_DEFAULT_TIMEOUT
+    rest = argv[2:]
+    if len(rest) == 2 and rest[0] == "--timeout":
+        if not (rest[1].isascii() and rest[1].isdecimal()):
+            raise ValueError(f"invalid receive timeout: {rest[1]!r}")
+        timeout = int(rest[1])
+    elif rest:
+        raise ValueError("usage: --receive-key USER [--timeout SECS]")
+    if not valid_user(user):
+        raise ValueError(f"invalid SSH user: {user!r}")
+    if not 1 <= timeout <= RECEIVE_MAX_TIMEOUT:
+        raise ValueError(f"invalid receive timeout: {timeout!r}")
+    return user, timeout
+
+
 def main(argv):
     if len(argv) == 3 and argv[0] == "--authorized-keys":
         authorized_keys(argv[1], argv[2])
@@ -717,19 +1321,38 @@ def main(argv):
         for idx, entry in enumerate(keys_list(argv[1]), start=1):
             print(f"{idx}\t{entry['type']}\t{entry['fingerprint']}\t{entry['comment']}")
         return 0
+    if len(argv) == 2 and argv[0] == "--keys-pending":
+        for idx, entry in enumerate(keys_pending(argv[1]), start=1):
+            print(f"{idx}\t{entry['type']}\t{entry['fingerprint']}\t{entry['comment']}\t{entry['line']}")
+        return 0
     if len(argv) == 1 and argv[0] == "--host-key-fingerprint":
         fp = host_key_fingerprint()
         if fp:
             print(fp)
         return 0
-    if os.geteuid() != 0:
+    if os.geteuid() != 0 and not (
+        os.environ.get("LOCACHY_SSH_NO_NETNS") == "1"
+        and os.environ.get("LOCACHY_SSH_BIND_ADDR", "").strip()
+    ):
         raise RuntimeError("this operation requires root privileges")
     os.umask(0o077)
-    if len(argv) == 2 and argv[0] == "--keys-add":
-        raw_key = sys.stdin.read(65537)
-        if len(raw_key) > 65536:
-            raise ValueError("SSH public key input is too large")
-        fp = keys_add(argv[1], raw_key)
+    if len(argv) >= 2 and argv[0] == "--receive-key":
+        user, timeout = _parse_receive_args(argv)
+        if _need_netns_reexec():
+            exe = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else CLIENT
+            os.execvp("nsenter", ("nsenter", f"--net={NS}", "--", exe, "--receive-key",
+                                  user, "--timeout", str(timeout)))
+        return receive_key(user, timeout=timeout)
+    if os.geteuid() != 0:
+        raise RuntimeError("this operation requires root privileges")
+    if len(argv) in (2, 3) and argv[0] == "--keys-add":
+        if len(argv) == 3:
+            fp = keys_add_file(argv[1], argv[2])
+        else:
+            raw_key = sys.stdin.read(65537)
+            if len(raw_key) > 65536:
+                raise ValueError("SSH public key input is too large")
+            fp = keys_add(argv[1], raw_key)
         print(fp)
         return 0
     if len(argv) == 3 and argv[0] == "--keys-remove":

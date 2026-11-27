@@ -44,12 +44,19 @@ static int bat_model_remove_asked;
 int rc_bat_start = -1, rc_bat_end = -1;
 
 static void power_format_handoff(const struct bat_handoff_event *ev, char *out, size_t size);
+static int power_charge_managed(void);
 
 static int power_thresh_bat_index(void)
 {
     for (int i = 0; i < npower_devs; i++) {
         if (!power_devs[i].is_peripheral && !power_devs[i].is_offline_pack &&
             (power_devs[i].has_start_thresh || power_devs[i].has_end_thresh)) {
+            return i;
+        }
+    }
+    for (int i = 0; i < npower_devs; i++) {
+        if (!power_devs[i].is_peripheral && !power_devs[i].is_offline_pack &&
+            bat_charge_control_kind(&power_devs[i]) == BAT_CTL_SW_BEHAVIOUR) {
             return i;
         }
     }
@@ -157,8 +164,52 @@ static int power_thresh_count(void)
     if (!power_loaded) power_refresh_devices();
     int bi = power_thresh_bat_index();
     if (bi < 0) return 0;
-    return (power_devs[bi].has_start_thresh ? 1 : 0) +
-           (power_devs[bi].has_end_thresh ? 1 : 0);
+    const struct bat_device *b = &power_devs[bi];
+    if (b->has_start_thresh || b->has_end_thresh) {
+        return (b->has_start_thresh ? 1 : 0) + (b->has_end_thresh ? 1 : 0);
+    }
+    if (bat_charge_control_kind(b) == BAT_CTL_SW_BEHAVIOUR) return 2;
+    return 0;
+}
+
+static int power_thresh_is_end(const struct bat_device *b, int which)
+{
+    if (!b) return 1;
+    if (b->has_start_thresh || b->has_end_thresh)
+        return which == 1 || !b->has_start_thresh;
+    return which == 1;
+}
+
+static inline int power_thresh_display_val(const struct bat_device *b, int is_end)
+{
+    if (!b) return is_end ? 100 : 95;
+    if (bat_charge_control_kind(b) == BAT_CTL_SW_BEHAVIOUR) {
+        int end = rc_bat_end >= 20 ? rc_bat_end : 100;
+        if (is_end) return end;
+        int start = (rc_bat_start >= 0 && rc_bat_start < end)
+                    ? rc_bat_start : (end >= 5 ? end - 5 : 0);
+        return start;
+    }
+    return is_end ? b->end_thresh : b->start_thresh;
+}
+
+/* Format a manual threshold row (settings.c item_text(), see the report snippet). */
+static inline void power_thresh_item_text(int which, char *line, size_t size)
+{
+    int bi = power_thresh_bat_index();
+    const struct bat_device *b = bi >= 0 ? &power_devs[bi] : NULL;
+    int is_end = power_thresh_is_end(b, which);
+    const char *name = is_end ? _("Charge stop threshold") : _("Charge start threshold");
+    char label[96], vbuf[128];
+    if (power_charge_managed()) {
+        int saved = is_end ? rc_bat_end : rc_bat_start;
+        if (saved < 0) snprintf(vbuf, sizeof vbuf, "%s", _("not set for manual charging"));
+        else snprintf(vbuf, sizeof vbuf, _("%d%% saved for manual charging"), saved);
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, name, 32), vbuf);
+    } else {
+        snprintf(line, size, "%.95s < %d%% >", ui_pad(label, sizeof label, name, 32),
+                 power_thresh_display_val(b, is_end));
+    }
 }
 
 static int power_can_manage_charge(void)
@@ -170,9 +221,21 @@ static int power_can_manage_charge(void)
         if (pack) return 0;
         pack = b;
     }
-    return pack && pack->has_end_thresh && !strcmp(pack->end_attr, "charge_control_end_threshold") &&
-           (!pack->has_start_thresh || !strcmp(pack->start_attr, "charge_control_start_threshold")) &&
-           pack->serial[0] && strcmp(pack->serial, "0") && strcasecmp(pack->serial, "unknown");
+    if (!pack || !pack->serial[0] || !strcmp(pack->serial, "0") || !strcasecmp(pack->serial, "unknown"))
+        return 0;
+    if (pack->has_end_thresh) {
+        return !strcmp(pack->end_attr, "charge_control_end_threshold") &&
+               (!pack->has_start_thresh || !strcmp(pack->start_attr, "charge_control_start_threshold"));
+    }
+    /* Do not fall back to charge_behaviour when charge_control_end_threshold
+     * exists on sysfs but was unreadable or malformed. */
+    char path[512];
+    int n = snprintf(path, sizeof path, "%s/%s/charge_control_end_threshold",
+                     bat_supply_root(), pack->name);
+    struct stat st;
+    if (n <= 0 || (size_t)n >= sizeof path) return 0;
+    if (stat(path, &st) == 0 || errno != ENOENT) return 0;
+    return bat_charge_control_kind(pack) == BAT_CTL_SW_BEHAVIOUR;
 }
 
 
@@ -215,8 +278,18 @@ static void power_charge_release_note(const struct bat_charge_slot_status *s)
 
 static void power_charge_notes(void)
 {
+    int any_sw = 0;
+    for (int i = 0; i < npower_devs; i++) {
+        const struct bat_device *b = &power_devs[i];
+        if (!b->is_peripheral && !b->is_offline_pack &&
+            bat_charge_control_kind(b) == BAT_CTL_SW_BEHAVIOUR) {
+            any_sw = 1;
+            break;
+        }
+    }
     if (!power_charge_known) {
         if (power_can_manage_charge()) add_entry(E_NOTE, _("Charging status unavailable"));
+        if (any_sw) add_entry(E_NOTE, _("Software limit: applies while running; charging resumes in sleep or off."));
         return;
     }
     int nslots = 0;
@@ -245,6 +318,7 @@ static void power_charge_notes(void)
         power_charge_release_note(s);
     }
     if (!nslots && power_can_manage_charge()) add_entry(E_NOTE, _("Charging status unavailable"));
+    if (any_sw) add_entry(E_NOTE, _("Software limit: applies while running; charging resumes in sleep or off."));
 }
 
 static int power_charge_managed(void)
@@ -605,12 +679,23 @@ static void adjust_power_threshold(int which, int dir)
     int bi = power_thresh_bat_index();
     if (bi < 0) return;
     const struct bat_device *b = &power_devs[bi];
-    int is_end = which == 1 || !b->has_start_thresh;
-    int start = rc_bat_start >= 0 ? rc_bat_start : b->start_thresh;
-    int end = rc_bat_end >= 0 ? rc_bat_end : b->end_thresh;
+    int is_sw = bat_charge_control_kind(b) == BAT_CTL_SW_BEHAVIOUR;
+    int is_end = power_thresh_is_end(b, which);
+    int end = rc_bat_end >= 0 ? rc_bat_end : (is_sw ? 100 : b->end_thresh);
+    int start;
+    if (rc_bat_start >= 0) {
+        start = rc_bat_start;
+    } else if (is_sw) {
+        start = end >= 5 ? end - 5 : 0;
+    } else {
+        start = b->start_thresh;
+    }
+    int has_start = is_sw || b->has_start_thresh;
+    int has_end = is_sw || b->has_end_thresh;
     int current = is_end ? end : start;
-    int lo = is_end ? (b->has_start_thresh && start + 5 > 20 ? start + 5 : 20) : 0;
-    int hi = is_end ? 100 : (b->has_end_thresh ? end - 5 : 95);
+    int lo = is_end ? (has_start && start + 5 > 20 ? start + 5 : 20) : 0;
+    int hi = is_end ? 100 : (has_end ? end - 5 : 95);
+    if (is_sw && is_end && rc_bat_start < 0) lo = 20;
     if (lo > hi) return;
     int next = current + dir * 5;
     if (next < lo) next = lo;
@@ -720,8 +805,20 @@ static void power_format_eta(const struct bat_device *b, char *out, size_t size)
         hours = b->energy_now_wh / b->power_w;
     } else if (strcmp(b->status, "Charging") == 0 && b->energy_full_wh > b->energy_now_wh) {
         double target_wh = b->energy_full_wh;
+        int cap_pct = -1;
         if (b->has_end_thresh && b->end_thresh > 0 && b->end_thresh < 100) {
-            double capped = b->energy_full_wh * (b->end_thresh / 100.0);
+            cap_pct = b->end_thresh;
+        } else if (bat_charge_control_kind(b) == BAT_CTL_SW_BEHAVIOUR) {
+            int si = power_charge_slot_for(b);
+            if (si >= 0 && power_charge.slots[si].actual_end > 0 &&
+                power_charge.slots[si].actual_end < 100) {
+                cap_pct = power_charge.slots[si].actual_end;
+            } else if (!power_charge_managed() && rc_bat_end >= 20 && rc_bat_end < 100) {
+                cap_pct = rc_bat_end;
+            }
+        }
+        if (cap_pct > 0 && cap_pct < 100) {
+            double capped = b->energy_full_wh * (cap_pct / 100.0);
             if (capped > b->energy_now_wh) target_wh = capped;
         }
         hours = (target_wh - b->energy_now_wh) / b->power_w;
@@ -1301,6 +1398,22 @@ static void power_curves_draw(void)
         if (sel_bat->has_start_thresh || sel_bat->has_end_thresh) {
             snprintf(g3[n3].v, sizeof g3[0].v, _("start %d%%, stop %d%%"),
                      sel_bat->start_thresh, sel_bat->has_end_thresh ? sel_bat->end_thresh : 100);
+            g3[n3].col = FG;
+        } else if (bat_charge_control_kind(sel_bat) == BAT_CTL_SW_BEHAVIOUR) {
+            int si = power_charge_slot_for(sel_bat);
+            int eff_end = (si >= 0 && power_charge.slots[si].actual_end > 0)
+                          ? power_charge.slots[si].actual_end
+                          : (rc_bat_end >= 20 ? rc_bat_end : 100);
+            int eff_start = (rc_bat_start >= 0 && rc_bat_start < eff_end)
+                            ? rc_bat_start : (eff_end >= 5 ? eff_end - 5 : 0);
+            const char *mode = sel_bat->charge_behaviour == BAT_BEHAV_INHIBIT
+                               ? _("inhibited") : _("auto");
+            if (eff_end < 100) {
+                snprintf(g3[n3].v, sizeof g3[0].v, _("software %d%%–%d%% (%s, while running)"),
+                         eff_start, eff_end, mode);
+            } else {
+                snprintf(g3[n3].v, sizeof g3[0].v, _("software (%s, no cap)"), mode);
+            }
             g3[n3].col = FG;
         } else if (rc_bat_start >= 0 || rc_bat_end >= 0) {
             snprintf(g3[n3].v, sizeof g3[0].v, _("saved %d%%–%d%% (applied on insert)"),

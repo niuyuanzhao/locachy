@@ -229,6 +229,14 @@ int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc
  * screen_flip_fd() and call screen_flip_complete()), 0 if already presented
  * synchronously, or -1 on error (errno set). */
 int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t w, uint32_t h);
+/* Tear-free double-buffered CPU pixel presentation for single-output mirrored
+ * mode: writes pixels directly into the inactive back dumb framebuffer (skipping
+ * shadow/present_diff) and flips to it via DRM_IOCTL_MODE_PAGE_FLIP with
+ * DRM_MODE_PAGE_FLIP_EVENT. Returns 1 if an async page flip is in flight (wait
+ * on screen_flip_fd() and call screen_flip_complete() before presenting again),
+ * 0 if presented synchronously, or -1 on error (errno=EBUSY while a flip is in
+ * flight, or ENOTSUP/EINVAL when double-buffered presentation is unavailable). */
+int screen_present_shm_flip(const uint32_t *pixels, uint32_t w, uint32_t h);
 /* DRM fd to poll for POLLIN while an async flip is pending; -1 if none pending. */
 int screen_flip_fd(void);
 /* Drain DRM flip completion events; returns 1 when a pending flip completed, 0

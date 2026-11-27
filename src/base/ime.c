@@ -158,6 +158,45 @@ static struct timespec deploy_time(const char *user_dir)
     return stat(path, &st) == 0 ? st.st_mtim : (struct timespec){ 0 };
 }
 
+static int rime_version_matches(const char *user_dir, const char *ver)
+{
+    char path[256], saved[64];
+    int n = snprintf(path, sizeof path, "%s/build/.librime-version", user_dir);
+    if (n < 0 || (size_t)n >= sizeof path) {
+        return 0;
+    }
+    FILE *in = fopen(path, "r");
+    if (!in) {
+        return 0;
+    }
+    int ok = fgets(saved, sizeof saved, in) != NULL;
+    fclose(in);
+    if (!ok) {
+        return 0;
+    }
+    saved[strcspn(saved, "\r\n")] = '\0';
+    return strcmp(saved, ver) == 0;
+}
+
+static void write_rime_version(const char *user_dir, const char *ver)
+{
+    char tmp[280], dst[256];
+    int dn = snprintf(dst, sizeof dst, "%s/build/.librime-version", user_dir);
+    int tn = snprintf(tmp, sizeof tmp, "%s/build/.librime-version.tmp.%ld", user_dir, (long)getpid());
+    if (dn < 0 || (size_t)dn >= sizeof dst || tn < 0 || (size_t)tn >= sizeof tmp) {
+        return;
+    }
+    FILE *out = fopen(tmp, "w");
+    if (!out) {
+        return;
+    }
+    int ok = fprintf(out, "%s\n", ver) > 0 && fflush(out) == 0;
+    (void)fchmod(fileno(out), 0644);
+    if (fclose(out) != 0 || !ok || rename(tmp, dst) != 0) {
+        unlink(tmp);
+    }
+}
+
 int ime_init(const char *shared_dir, const char *user_dir)
 {
     chinese_enabled = 1;
@@ -199,9 +238,20 @@ int ime_init(const char *shared_dir, const char *user_dir)
     char build_default[256];
     snprintf(build_default, sizeof build_default, "%s/build/default.yaml",
              traits.user_data_dir);
-    if (access(build_default, R_OK) != 0) {
-        rime->start_maintenance(False);
+    const char *rime_ver = rime->get_version ? rime->get_version() : NULL;
+    int need_default = access(build_default, R_OK) != 0;
+    int stale_ver = rime_ver && rime_ver[0] &&
+                    !rime_version_matches(traits.user_data_dir, rime_ver);
+    if ((need_default || stale_ver) && access(traits.user_data_dir, W_OK) == 0) {
+        /* Full maintenance when librime itself upgraded (or before the engine
+         * version was recorded) rebuilds incompatible binary prism files such
+         * as Prism/4.0 -> Prism/5.0 even when default.yaml already exists. */
+        rime->start_maintenance(stale_ver ? True : False);
         rime->join_maintenance_thread();
+        if (rime_ver && rime_ver[0] && access(build_default, R_OK) == 0) {
+            write_rime_version(traits.user_data_dir, rime_ver);
+        }
+        started_deploy = deploy_time(user_dir);
     }
 
     session = rime->create_session();

@@ -15,13 +15,19 @@
 3. 操作者的**公钥**可以在设置（**网络 → SSH 服务器（sshd）→ sshd 授权公钥**）中登记，也可以由管理员在节点控制台上登记（将 `USER` 和源文件名替换为实际值）：
 
    ```sh
+   sudo /usr/local/lib/locachy/tailnet-ssh-client --keys-add USER /path/to/operator.pub
+   # 或从标准输入传入：
    sudo /usr/local/lib/locachy/tailnet-ssh-client --keys-add USER < /path/to/operator.pub
+   # 查看暂存在 ~/.ssh/authorized_keys 中（例如通过 ssh-copy-id 写入）的候选公钥，不自动信任：
+   /usr/local/lib/locachy/tailnet-ssh-client --keys-pending USER
+   # 开启一次性临时接收地址，供对端用 curl -T ~/.ssh/id_ed25519.pub 发送：
+   sudo /usr/local/lib/locachy/tailnet-ssh-client --receive-key USER --timeout 120
    # 或直接整体替换文件：
    sudo install -o root -g root -m 0644 /path/to/operator.pub \
      /etc/locachy/tailnet-ssh/authorized_keys/USER
    ```
 
-   只有 root 能写入 `/etc/locachy/tailnet-ssh/authorized_keys/USER`；非特权的公钥查询需要读取它。删除密钥可以在设置中进行，也可以使用 `--keys-remove USER 序号`（或删除文件），之后即禁止登录。服务不会读取用户的 `~/.ssh/authorized_keys`；私钥留在客户端。
+   只有 root 能写入 `/etc/locachy/tailnet-ssh/authorized_keys/USER`；非特权的公钥查询需要读取它。删除密钥可以在设置中进行，也可以使用 `--keys-remove USER 序号`（或删除文件），之后即禁止登录。`sshd` 始终保持 `AuthorizedKeysFile none`，绝不自动信任用户的 `~/.ssh/authorized_keys`：`--keys-pending` 只以安全方式读取候选公钥供操作者显式批准，`--receive-key` 仅在当前监听地址上绑定临时端口（绝不绑定 `0.0.0.0`/`::`，由降权为 `nobody` 的短生命周期子进程接收，`lan` 模式下使用专用的 `ssh_enroll_v4`/`ssh_enroll_v6` nftables 集合），收到后只输出公钥与 SHA-256 指纹等待人工确认，不会自动写入 `authorized_keys`。私钥始终留在客户端。
 4. 服务首次启动时会生成持久的 Ed25519 主机密钥；已有密钥不会被替换，除非你在设置（**sshd 主机密钥**）中或使用 `--host-key-regen` 明确重新生成（此时客户端需删除 `known_hosts` 中的旧条目）。在客户端接受前，先核对 SHA-256 指纹：
 
    ```sh
@@ -120,11 +126,11 @@ scp locachy-gpu:/srv/storage/experiments/work/probe-001/out/probe.txt .
 | 文件 | 作用 |
 |---|---|
 | `link/locachy-compute` | 命令行工具和守护进程：镜像、环境、原生容器、作业、KVM 微型虚拟机、`serve`，以及作为客户端的 `remote`。 |
-| `link/tailnet-ssh-client` | 受管 OpenSSH 服务（`sshd`），运行在 `locachy-net` 中：仅 Tailscale 或局域网与 Tailscale、可配置端口、可选密码认证、受管 `authorized_keys`，以及主机密钥生命周期。 |
+| `link/tailnet-ssh-client` | 受管 OpenSSH 服务（`sshd`），运行在 `locachy-net` 中：仅 Tailscale 或局域网与 Tailscale、可配置端口、可选密码认证、受管 `authorized_keys`（支持 `.pub` 文件导入、`--keys-pending` 候选审核与一次性 `--receive-key` 接收），以及主机密钥生命周期。 |
 | `link/compute-client` | 可选的 `service_compute` 启动脚本。用 `nsenter --net` 进入 `locachy-net`，再运行 `locachy-compute serve`。 |
 | `link/locachy-pair` | 一次配对、永久信任：添加、列出、查看、撤销已配对设备，并导出令牌。 |
 | `link/locachy_peers.py` | 共享的对端存储（`/etc/locachy/peers`），由 `locachy-pair`、`locachy-compute` 和 `extdisplay-broker` 共用。 |
-| `link/network-client` | `locachy-net` 的入站过滤规则，包括雷电（Thunderbolt）允许名单（`tb_ifaces`、`tb_tcp_ports`、`tb_udp_ports`）。 |
+| `link/network-client` | `locachy-net` 的入站过滤规则，包括雷电（Thunderbolt）允许名单（`tb_ifaces`、`tb_tcp_ports`、`tb_udp_ports`）以及局域网 SSH 与密钥接收集合（`ssh_lan_v4`、`ssh_lan_v6`、`ssh_enroll_v4`、`ssh_enroll_v6`）。 |
 | `progs/extdisplay-broker*.c`、`progs/extdisplay-advertise.c` | 扩展显示代理：持久对端 PSK、仅已配对模式、共享链路模式。 |
 
 ## 原生容器
@@ -318,6 +324,7 @@ LOCachy 通过真实 Tailscale 和 Thunderbolt 的完整工作流仍未验收。
 ```sh
 src/tools/test-peers.sh        # 对端存储、配对权限、代理 PSK、共享雷电链路、过滤规则
 src/tools/test-compute.sh      # 镜像导入；原生容器（无 Wayland/合成器环境泄漏）；主机数据绑定挂载与路径策略拒绝；瞬时清空上层目录的重置；GPU 设备与库探测及通配绑定拒绝；KVM 微型虚拟机配置、qcow2 写时复制覆盖层的创建与重置、QEMU 参数校验；mTLS HTTPS 控制接口（已配对、未配对、仅扩展显示与已撤销的对端；远程作业的运行、日志与重置）
+src/tools/test-sshd-config.py  # 受管 sshd 的 rc.conf/配置/nftables 规则、授权公钥增删、.pub 文件导入、`--keys-pending` 安全校验与一次性 `--receive-key` HTTP 接收流程
 src/tools/test-thunderbolt-backend.sh # 隔离的 Open MPI TCP 分割求和夹具；不是实机雷电或 GPU
 src/tools/test-extdisplay-broker.sh
 ```

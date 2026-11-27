@@ -14,6 +14,10 @@
  *   6. ChargeHistory persistence: mode 0600 atomic write, reload, corrupt rejection
  *   7. Opt-out isolation: adaptive=0 leaves manual limits untouched and creates no
  *      controller history file
+ *   8. Software charge_behaviour (no charge_control_end_threshold): token parsing,
+ *      hardware-threshold precedence, unreadable-threshold error without fallback,
+ *      manual and adaptive hysteresis, fail-safe release (AC unplug, suspend,
+ *      shutdown, startup self-heal, --once), and near-cap polling intervals
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -27,6 +31,33 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* Emulate kernel sysfs charge_behaviour readback formatting on plain fixture
+ * files after bat_write_charge_behaviour() performs the real write. */
+static int g_behav_write_count;
+static int g_behav_fail_readback;
+static char g_behav_extra_tokens[64];
+
+static void test_emulate_kernel_behaviour_write(const char *path, const char *mode)
+{
+    g_behav_write_count++;
+    if (g_behav_fail_readback)
+        return; /* Leave raw unbracketed write or wrong value to verify readback failure. */
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    if (strcmp(mode, "auto") == 0) {
+        fprintf(f, "[auto] inhibit-charge%s%s\n",
+                g_behav_extra_tokens[0] ? " " : "", g_behav_extra_tokens);
+    } else if (strcmp(mode, "inhibit-charge") == 0) {
+        fprintf(f, "auto [inhibit-charge]%s%s\n",
+                g_behav_extra_tokens[0] ? " " : "", g_behav_extra_tokens);
+    } else {
+        fprintf(f, "%s\n", mode);
+    }
+    fclose(f);
+}
+
+#define BAT_CHARGE_BEHAVIOUR_AFTER_WRITE(path, mode) test_emulate_kernel_behaviour_write((path), (mode))
 
 #define main battery_history_main
 #include "../progs/battery-history.c"
@@ -116,6 +147,11 @@ static void setup_case(const char *sub)
     active_dis_pack[0] = '\0';
     active_dis_dpct = 0;
     daemon_mode = 0;
+    sw_behaviour_allow_inhibit = 1;
+    sw_near_cap_poll = 0;
+    g_behav_write_count = 0;
+    g_behav_fail_readback = 0;
+    g_behav_extra_tokens[0] = '\0';
     last_full_scan_ts = 0;
     last_ac_online = 0;
     last_system_ac = BAT_AC_UNKNOWN;
@@ -170,16 +206,41 @@ static int case_get_int(const char *rel)
     return atoi(b);
 }
 
-static void case_unlink(const char *rel)
+static bool case_get_line(const char *rel, char *out, size_t cap)
 {
     char p[1500];
+    snprintf(p, sizeof p, "%s/%s", g_case, rel);
+    FILE *f = fopen(p, "r");
+    if (!f || !fgets(out, (int)cap, f)) {
+        if (f) fclose(f);
+        out[0] = '\0';
+        return false;
+    }
+    fclose(f);
+    out[strcspn(out, "\r\n")] = '\0';
+    return true;
+}
+
+static void create_single_pack(int ac_online, int pct, const char *status_str,
+                               int start_thresh, int end_thresh);
+
+static void create_sw_pack(int ac_online, int pct, const char *status_str,
+                           const char *behaviour_line)
+{
+    create_single_pack(ac_online, pct, status_str, -1, -1);
+    case_put_txt("sys/BAT0/charge_behaviour", behaviour_line);
+}
+
+static void case_unlink(const char *rel)
+{
+    char p[2800];
     snprintf(p, sizeof p, "%s/%s", g_case, rel);
     (void)unlink(p);
 }
 
 static int case_exists(const char *rel)
 {
-    char p[1500];
+    char p[2800];
     snprintf(p, sizeof p, "%s/%s", g_case, rel);
     struct stat st;
     return lstat(p, &st) == 0;
@@ -1266,8 +1327,428 @@ static bool test_history_persistence_and_corruption(void)
     return true;
 }
 
+/* ---- Test 10: software charge_behaviour (BAT_CTL_SW_BEHAVIOUR) ---- */
+
+static bool test_sw_parse_and_precedence(void)
+{
+    enum bat_charge_behaviour bh = BAT_BEHAV_UNKNOWN;
+    char active[32] = "";
+    CHECK(bat_parse_charge_behaviour("[auto] inhibit-charge force-discharge", &bh, active, sizeof active) == 0);
+    CHECK(bh == BAT_BEHAV_AUTO && strcmp(active, "auto") == 0);
+    CHECK(bat_parse_charge_behaviour("auto [inhibit-charge]", &bh, active, sizeof active) == 0);
+    CHECK(bh == BAT_BEHAV_INHIBIT && strcmp(active, "inhibit-charge") == 0);
+    CHECK(bat_parse_charge_behaviour("[force-discharge] auto inhibit-charge", &bh, active, sizeof active) == 0);
+    CHECK(bh == BAT_BEHAV_OTHER && strcmp(active, "force-discharge") == 0);
+    CHECK(bat_parse_charge_behaviour("[auto] force-discharge", &bh, active, sizeof active) == 1);
+    CHECK(bat_parse_charge_behaviour("[auto] [inhibit-charge]", &bh, active, sizeof active) == -1);
+    CHECK(bat_parse_charge_behaviour("auto inhibit-charge", &bh, active, sizeof active) == -1);
+    CHECK(bat_parse_charge_behaviour("[]", &bh, active, sizeof active) == -1);
+    CHECK(bat_parse_charge_behaviour("[auto", &bh, active, sizeof active) == -1);
+    CHECK(bat_parse_charge_behaviour("auto]", &bh, active, sizeof active) == -1);
+    CHECK(bat_parse_charge_behaviour("[auto] inhibit$charge", &bh, active, sizeof active) == -1);
+    CHECK(bat_parse_charge_behaviour("", &bh, active, sizeof active) == -1);
+    CHECK(bat_parse_charge_behaviour(NULL, &bh, active, sizeof active) == -1);
+
+    struct bat_device hw = { 0 }, sw = { 0 }, none = { 0 };
+    hw.has_end_thresh = 1;
+    hw.has_charge_behaviour = 1;
+    sw.has_charge_behaviour = 1;
+    CHECK(bat_charge_control_kind(&hw) == BAT_CTL_HW_THRESHOLD);
+    CHECK(bat_charge_control_kind(&sw) == BAT_CTL_SW_BEHAVIOUR);
+    CHECK(bat_charge_control_kind(&none) == BAT_CTL_NONE);
+
+    /* A live scan: a pack exposing both files keeps the hardware threshold path. */
+    setup_case("sw-precedence");
+    create_single_pack(1, 60, "Charging", 55, 85);
+    case_put_txt("sys/BAT0/charge_behaviour", "[auto] inhibit-charge\n");
+    struct bat_device devs[4];
+    struct bat_ac_info ac;
+    CHECK(bat_scan_live(devs, 4, &ac) == 1);
+    CHECK(devs[0].has_end_thresh && devs[0].has_charge_behaviour);
+    CHECK(bat_charge_control_kind(&devs[0]) == BAT_CTL_HW_THRESHOLD);
+    CHECK(devs[0].charge_behaviour == BAT_BEHAV_AUTO && strcmp(devs[0].charge_behaviour_active, "auto") == 0);
+
+    /* A pack without thresholds but with a valid charge_behaviour is software-controllable. */
+    setup_case("sw-scan");
+    create_sw_pack(1, 60, "Charging", "[auto] inhibit-charge\n");
+    CHECK(bat_scan_live(devs, 4, &ac) == 1);
+    CHECK(!devs[0].has_end_thresh && devs[0].has_charge_behaviour);
+    CHECK(bat_charge_control_kind(&devs[0]) == BAT_CTL_SW_BEHAVIOUR);
+    return true;
+}
+
+static bool test_sw_unreadable_no_fallback(void)
+{
+    const int64_t t0 = 1769817600LL;
+    char line[64];
+    struct bat_charge_slot_status ss;
+
+    /* charge_control_end_threshold present but unreadable: error, never a charge_behaviour fallback. */
+    setup_case("sw-nofallback");
+    create_sw_pack(1, 85, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("sys/BAT0/charge_control_end_threshold", "nan\n");
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "error") == 0);
+    CHECK(g_behav_write_count == 0);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+
+    /* Present but malformed charge_behaviour under adaptive: error, not unsupported. */
+    setup_case("sw-malformed");
+    create_sw_pack(1, 60, "Charging", "[auto] [inhibit-charge]\n");
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "error") == 0);
+
+    /* Neither threshold nor charge_behaviour exists: unsupported. */
+    setup_case("sw-absent");
+    create_single_pack(1, 60, "Charging", -1, -1);
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "unsupported") == 0);
+
+    /* A valid charge_behaviour on a pack without a usable serial: unsupported, no writes. */
+    setup_case("sw-serial");
+    create_sw_pack(1, 60, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("sys/BAT0/serial_number", "0\n");
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "unsupported") == 0);
+    CHECK(g_behav_write_count == 0);
+    return true;
+}
+
+static bool test_sw_manual_hysteresis(void)
+{
+    const int64_t t0 = 1769817600LL;
+    char line[64], baseline[1500];
+    struct bat_charge_slot_status ss;
+    snprintf(baseline, sizeof baseline, "hist/.charge-BAT0.Lenovo_5B10W139_4242");
+
+    setup_case("sw-manual");
+    create_sw_pack(1, 78, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_start=\"75\"\nbattery_charge_end=\"80\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "manual") == 0);
+    CHECK(ss.requested_end == 80 && ss.actual_end == 80);
+    CHECK(g_behav_write_count == 0);
+    CHECK(!case_exists(baseline));
+
+    /* Reaching the end limit inhibits charging and records the baseline first. */
+    case_put_txt("sys/BAT0/energy_now", "40000000\n"); /* 80% */
+    set_clock(t0 + 60, 160.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(g_behav_write_count == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+    CHECK(case_exists(baseline));
+    CHECK(case_get_int("sys/BAT0/charge_control_end_threshold") == -999);
+
+    /* Inside the deadband the inhibit is preserved with no further writes. */
+    case_put_txt("sys/BAT0/energy_now", "39000000\n"); /* 78% */
+    case_put_txt("sys/BAT0/status", "Not charging\n");
+    set_clock(t0 + 120, 220.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(g_behav_write_count == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "manual") == 0 && ss.actual_end == 80);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+
+    /* Falling to the start limit releases to auto and removes the baseline. */
+    case_put_txt("sys/BAT0/energy_now", "37500000\n"); /* 75% */
+    set_clock(t0 + 180, 280.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(g_behav_write_count == 2);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists(baseline));
+
+    /* A readback that does not confirm the write leaves the slot in error; the baseline stays for release. */
+    setup_case("sw-readback");
+    create_sw_pack(1, 85, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_end=\"80\"\n");
+    g_behav_fail_readback = 1;
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "error") == 0 && ss.actual_end == -1);
+    CHECK(case_exists(baseline));
+    g_behav_fail_readback = 0;
+    return true;
+}
+
+static bool test_sw_adaptive_and_fail_closed(void)
+{
+    const int64_t t0 = 1769817600LL;
+    char line[64];
+    struct bat_charge_slot_status ss;
+    struct fixture_model fm;
+
+    setup_case("sw-adaptive");
+    create_sw_pack(1, 60, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    install_fixture_model(&fm, 8);
+    write_history_for_pack("Lenovo_5B10W139_4242", 15, 6, 4, 12, t0, 1000.0);
+
+    /* Bucket 5 = 1.0 -> target 5 h, release_at = +3 h; hold at 80% while pct=60 stays auto. */
+    memset(g_override_probs, 0, sizeof g_override_probs);
+    g_override_probs[5] = 1.0;
+    g_override_fail = 0;
+    g_override_calls = 0;
+    bat_predict_override = test_predict_cb;
+
+    set_clock(t0, 1000.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL));
+    CHECK(strcmp(ss.state, "hold") == 0 && ss.requested_end == 80 && ss.actual_end == 80);
+    CHECK(ss.release_ts == t0 + 3 * 3600);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+
+    /* Charge reaches 80% -> inhibits charging and creates .charge-* baseline. */
+    case_put_txt("sys/BAT0/energy_now", "40000000\n"); /* 80% */
+    set_clock(t0 + 600, 1600.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "hold") == 0);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+    CHECK(case_exists("hist/.charge-BAT0.Lenovo_5B10W139_4242"));
+
+    /* Charge to Full Now while inhibited -> releases to auto immediately and enters "full". */
+    char rc[128];
+    int64_t until = t0 + 3600;
+    snprintf(rc, sizeof rc, "battery_charge_adaptive=\"1\"\nbattery_charge_full_until=\"%lld\"\n",
+             (long long)until);
+    case_put_txt("rc.conf", rc);
+    set_clock(t0 + 660, 1660.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL));
+    CHECK(strcmp(ss.state, "full") == 0 && ss.requested_end == 100 && ss.actual_end == 100);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists("hist/.charge-BAT0.Lenovo_5B10W139_4242"));
+
+    /* Unplug + replug at 80% with bucket 5 -> holds and inhibits; advancing to release -> top-up releases. */
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    case_put_txt("sys/AC/online", "0\n");
+    case_put_txt("sys/BAT0/status", "Discharging\n");
+    set_clock(t0 + 4000, 5000.0);
+    CHECK(record_snapshot(1) == 1);
+
+    case_put_txt("sys/AC/online", "1\n");
+    case_put_txt("sys/BAT0/status", "Charging\n");
+    case_put_txt("sys/BAT0/energy_now", "40000000\n"); /* 80% */
+    set_clock(t0 + 4100, 5100.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "hold") == 0);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+
+    set_clock(t0 + 4100 + 3 * 3600, 5100.0 + 3.0 * 3600.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL));
+    CHECK(strcmp(ss.state, "top-up") == 0 && ss.requested_end == 100 && ss.actual_end == 100);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists("hist/.charge-BAT0.Lenovo_5B10W139_4242"));
+
+    /* Prediction failure while holding -> releases to auto and removes baseline. */
+    case_put_txt("sys/AC/online", "0\n");
+    case_put_txt("sys/BAT0/status", "Discharging\n");
+    set_clock(t0 + 20000, 21000.0);
+    CHECK(record_snapshot(0) == 1);
+
+    memset(g_override_probs, 0, sizeof g_override_probs);
+    g_override_probs[8] = 1.0;
+    case_put_txt("sys/AC/online", "1\n");
+    case_put_txt("sys/BAT0/status", "Charging\n");
+    case_put_txt("sys/BAT0/energy_now", "40000000\n");
+    set_clock(t0 + 20100, 21100.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+
+    g_override_fail = 1;
+    set_clock(t0 + 20100 + 1800, 21100.0 + 1800.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "inactive") == 0);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists("hist/.charge-BAT0.Lenovo_5B10W139_4242"));
+
+    /* Model missing/invalid while inhibited -> releases to auto (fail closed). */
+    g_override_fail = 0;
+    case_put_txt("sys/AC/online", "0\n");
+    case_put_txt("sys/BAT0/status", "Discharging\n");
+    set_clock(t0 + 23000, 24000.0);
+    CHECK(record_snapshot(0) == 1);
+    case_put_txt("sys/AC/online", "1\n");
+    case_put_txt("sys/BAT0/status", "Charging\n");
+    set_clock(t0 + 23100, 24100.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+
+    case_unlink("hist/model/" BAT_MODEL_PREPROC_NAME);
+    set_clock(t0 + 23200, 24200.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(read_slot_status("BAT0", &ss, NULL) && strcmp(ss.state, "model-missing") == 0);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists("hist/.charge-BAT0.Lenovo_5B10W139_4242"));
+
+    free_fixture_model(&fm);
+    return true;
+}
+
+static bool test_sw_lifecycle_and_polling(void)
+{
+    const int64_t t0 = 1769817600LL;
+    char line[64];
+    const char *baseline = "hist/.charge-BAT0.Lenovo_5B10W139_4242";
+
+    /* 1. Manual mode AC unplug releases inhibit-charge immediately. */
+    setup_case("sw-unplug");
+    create_sw_pack(1, 82, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_end=\"80\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+    CHECK(case_exists(baseline));
+
+    case_put_txt("sys/AC/online", "0\n");
+    case_put_txt("sys/BAT0/status", "Discharging\n");
+    set_clock(t0 + 60, 160.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists(baseline));
+
+    /* 2. Suspend (SIGUSR1) releases inhibit-charge FIRST and does not re-latch. */
+    struct fixture_model fm;
+    setup_case("sw-suspend");
+    create_sw_pack(1, 82, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    install_fixture_model(&fm, 8);
+    write_history_for_pack("Lenovo_5B10W139_4242", 15, 6, 4, 12, t0, 1000.0);
+    memset(g_override_probs, 0, sizeof g_override_probs);
+    g_override_probs[8] = 1.0;
+    g_override_fail = 0;
+    bat_predict_override = test_predict_cb;
+    set_clock(t0, 1000.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+    handle_suspend_flush();
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists(baseline));
+    free_fixture_model(&fm);
+
+    /* 3. Shutdown (SIGTERM) releases inhibit-charge in BOTH manual AND adaptive modes. */
+    setup_case("sw-shutdown-manual");
+    create_sw_pack(1, 82, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_end=\"80\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+    CHECK(case_exists(baseline));
+    handle_shutdown();
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists(baseline));
+
+    setup_case("sw-shutdown-adaptive");
+    create_sw_pack(1, 82, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"1\"\n");
+    install_fixture_model(&fm, 8);
+    write_history_for_pack("Lenovo_5B10W139_4242", 15, 6, 4, 12, t0, 1000.0);
+    set_clock(t0, 1000.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+    handle_shutdown();
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists(baseline));
+    free_fixture_model(&fm);
+
+    /* 4. Startup self-heal of orphaned inhibit-charge (no cap configured / AC off / pct <= start). */
+    setup_case("sw-selfheal-unmanaged");
+    create_sw_pack(1, 85, "Not charging", "auto [inhibit-charge]\n");
+    case_put_txt("rc.conf", "battery_charge_adaptive=\"0\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+
+    setup_case("sw-selfheal-ac-off");
+    create_sw_pack(0, 85, "Discharging", "auto [inhibit-charge]\n");
+    case_put_txt("rc.conf", "battery_charge_end=\"80\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+
+    setup_case("sw-selfheal-below-start");
+    create_sw_pack(1, 70, "Not charging", "auto [inhibit-charge]\n");
+    case_put_txt("rc.conf", "battery_charge_start=\"75\"\nbattery_charge_end=\"80\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+
+    /* 5. --once mode never latches inhibit-charge, and releases any orphaned inhibit. */
+    setup_case("sw-once");
+    create_sw_pack(1, 85, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_end=\"80\"\n");
+    set_clock(t0, 100.0);
+    char *once_argv[] = { "battery-history", "--once", NULL };
+    CHECK(battery_history_main(2, once_argv) == 0);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+    CHECK(!case_exists(baseline));
+
+    case_put_txt("sys/BAT0/charge_behaviour", "auto [inhibit-charge]\n");
+    CHECK(battery_history_main(2, once_argv) == 0);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "[auto] inhibit-charge") == 0);
+
+    /* 6. Low-wakeup near-cap polling: 60s far from cap, 15s within 3% while Charging, 5 min when idle. */
+    setup_case("sw-polling");
+    create_sw_pack(1, 70, "Charging", "[auto] inhibit-charge\n");
+    case_put_txt("rc.conf", "battery_charge_end=\"80\"\n");
+    set_clock(t0, 100.0);
+    CHECK(record_snapshot(1) == 1);
+    CHECK(!sw_near_cap_poll && compute_poll_timeout_ms(1, 1) == BAT_POLL_ACTIVE_MS);
+
+    case_put_txt("sys/BAT0/energy_now", "38500000\n"); /* 77% (within 3% of 80%) */
+    set_clock(t0 + 60, 160.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(sw_near_cap_poll && compute_poll_timeout_ms(1, 1) == BAT_POLL_SW_NEAR_CAP_MS);
+
+    /* Hits 80% -> inhibited, EC reports Not charging -> poll drops back to 5 min. */
+    case_put_txt("sys/BAT0/energy_now", "40000000\n"); /* 80% */
+    case_put_txt("sys/BAT0/status", "Not charging\n");
+    set_clock(t0 + 75, 175.0);
+    CHECK(record_snapshot(0) == 1);
+    CHECK(case_get_line("sys/BAT0/charge_behaviour", line, sizeof line) &&
+          strcmp(line, "auto [inhibit-charge]") == 0);
+    CHECK(!sw_near_cap_poll && all_packs_idle_ac);
+    CHECK(compute_poll_timeout_ms(1, 1) == BAT_POLL_IDLE_AC_MS);
+    return true;
+}
+
 int main(void)
 {
+
     char tmpl[] = "/tmp/test-battery-adaptive-XXXXXX";
     char *dir = mkdtemp(tmpl);
     if (!dir) {
@@ -1293,6 +1774,16 @@ int main(void)
              test_manual_unsupported_error_and_optout);
     run_test("ChargeHistory persistence: 0600 atomic write, reload, corrupt rejection, and shutdown restore",
              test_history_persistence_and_corruption);
+    run_test("charge_behaviour parsing, HW threshold precedence, and live scan classification",
+             test_sw_parse_and_precedence);
+    run_test("charge_behaviour support checks: unreadable threshold error no-fallback, malformed, serial",
+             test_sw_unreadable_no_fallback);
+    run_test("charge_behaviour manual hysteresis: inhibit at end, deadband, release at start, readback error",
+             test_sw_manual_hysteresis);
+    run_test("charge_behaviour adaptive hold, full-now, top-up, prediction failure, and model-missing fail-closed",
+             test_sw_adaptive_and_fail_closed);
+    run_test("charge_behaviour fail-safe lifecycle (unplug, suspend, shutdown, self-heal, --once) and near-cap polling",
+             test_sw_lifecycle_and_polling);
 
     adaptive_cleanup();
     rm_rf_dir(g_root);

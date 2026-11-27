@@ -269,6 +269,62 @@ int main(int argc, char **argv)
     }
     printf("PASS English: Tab moves to a completion (%s), Space commits it and is typed\n", word);
     ime_done();
+
+    /* Regression: an engine upgrade (librime 1.17 -> 1.18 changed the prism
+     * format) leaves build/ from the old engine. ime_init must notice that
+     * .librime-version no longer matches rime->get_version() and rebuild with
+     * full maintenance, so Chinese mode still gets candidates; afterwards the
+     * recorded version must be the engine's. On librime 1.18+, also downgrade
+     * rime_frost.prism.bin to Prism/4.0 so the binary-incompatibility path is
+     * directly exercised. */
+    char prism_path[512], ver_path[512];
+    snprintf(prism_path, sizeof prism_path, "%s/build/rime_frost.prism.bin", argv[1]);
+    snprintf(ver_path, sizeof ver_path, "%s/build/.librime-version", argv[1]);
+    FILE *pf = fopen(prism_path, "r+b");
+    if (pf) {
+        char hdr[64];
+        size_t nr = fread(hdr, 1, sizeof hdr, pf);
+        for (size_t i = 0; i + 15 <= nr; i++) {
+            if (memcmp(hdr + i, "Rime::Prism/5.0", 15) == 0) {
+                hdr[i + 12] = '4';
+                fseek(pf, (long)i, SEEK_SET);
+                (void)fwrite(hdr + i, 1, 15, pf);
+                break;
+            }
+        }
+        fclose(pf);
+    }
+    FILE *vf = fopen(ver_path, "w");
+    if (!vf || fputs("0.0.0-stale\n", vf) < 0 || fclose(vf) != 0) {
+        fputs("FAIL cannot write a stale .librime-version for the upgrade check\n", stderr);
+        fail();
+    }
+    if (ime_init(NULL, argv[1]) != 0) {
+        fputs("FAIL ime_init after an engine upgrade\n", stderr);
+        fail();
+    }
+    ime_set_mode(IME_MODE_CN);
+    ime_process_key('n');
+    ime_process_key('i');
+    if (!ime_get_overlay(row1, row2, sizeof row1) || strstr(row1, "1") == NULL) {
+        fprintf(stderr, "FAIL Chinese mode has no candidates after an engine upgrade: [%s]\n", row1);
+        fail();
+    }
+    ime_done();
+    char recorded[64] = "";
+    vf = fopen(ver_path, "r");
+    if (!vf || !fgets(recorded, sizeof recorded, vf)) {
+        fputs("FAIL .librime-version not recorded after the rebuild\n", stderr);
+        fail();
+    }
+    fclose(vf);
+    recorded[strcspn(recorded, "\r\n")] = '\0';
+    if (strcmp(recorded, "0.0.0-stale") == 0) {
+        fputs("FAIL .librime-version still the stale value after ime_init\n", stderr);
+        fail();
+    }
+    printf("PASS engine upgrade rebuilds the user build (recorded %s)\n", recorded);
+
     libinput_unref(li);
     puts("ALL PASSED");
     return 0;

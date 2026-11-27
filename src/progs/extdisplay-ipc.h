@@ -19,7 +19,7 @@
 #define EXTDISPLAY_IPC_TEXT 1024u
 #define EXTDISPLAY_IPC_FD 3        /* the worker's: this channel */
 #define EXTDISPLAY_TRANSPORT_FD 4  /* the worker's: the paired stream */
-#define EXTDISPLAY_RENDER_FD 5     /* optional DRM render node for VA-API */
+#define EXTDISPLAY_RENDER_FD 5     /* optional DRM render node for VA-API (the only DRM fd the worker gets) */
 #define EXTDISPLAY_CANCEL_WAIT_MS 150 /* session.h's owner waits 250 ms for the ACK */
 
 enum extdisplay_ipc_op {

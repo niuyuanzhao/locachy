@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""locachy-nvidia: Arch Wiki DKMS NVIDIA driver manager (new open -> legacy 580xx -> off).
+"""locachy-nvidia: Arch Wiki DKMS NVIDIA driver manager (auto -> open -> 580xx -> off).
 
-Manages both supported Arch/CachyOS DKMS NVIDIA driver branches cleanly through
-LOCachy's package manifest (/etc/locachy/packages), kernel headers, native
-/etc/modprobe.d/ drop-ins (read by src/base/modload.c), nvidia-powerd service
-wiring, and unified kernel image rebuilds (locachy-boot):
+Detects installed NVIDIA GPUs via PCI sysfs + /usr/share/hwdata/pci.ids (with
+lspci fallback) and classifies them against the Arch Wiki NVIDIA GPU family
+table so driver branch selection works automatically without per-machine rules:
 
-  1. open   (new, default for Turing RTX 20+ / Ampere / Ada / Blackwell):
+  1. auto   Automatically select and install the recommended DKMS branch for the
+            detected GPU family (Blackwell+ -> open; Ada/Ampere/Turing -> open;
+            Volta/Pascal/Maxwell -> 580xx; Kepler and older -> unsupported/off).
+  2. open   (new, Arch Wiki default for Turing RTX 20+ / Ampere / Ada / Blackwell+):
             nvidia-open-dkms + nvidia-utils + dkms + active kernel headers
-            (GSP-RM firmware is mandatory on open kernel modules).
-  2. 580xx  (legacy proprietary 580xx: Maxwell/Pascal/Volta, and Turing/Ampere/Ada
-            laptops needing GSP off via NVreg_EnableGpuFirmware=0, e.g. with
-            Zagitta/gpu-unlock speed selector persistence):
+            (GSP-RM firmware is mandatory on open kernel modules; works with
+            Zagitta/gpu-unlock on branch 615+ where NVreg_GpuInitOnProbe defaults
+            back to probe-time AUTO).
+  3. 580xx  (legacy proprietary 580xx: Maxwell/Pascal/Volta, and manual fallback
+            for Turing/Ampere/Ada laptops needing GSP off via
+            NVreg_EnableGpuFirmware=0 for troubleshooting):
             nvidia-580xx-dkms + nvidia-580xx-utils + dkms + active kernel headers.
-  3. off    Remove NVIDIA driver packages and modprobe drop-in.
+  4. off    Remove NVIDIA driver packages and modprobe drop-in.
 
 Commands:
   locachy-nvidia status [--json | --tsv]
-  locachy-nvidia set open|580xx|off
+  locachy-nvidia set auto|open|580xx|off [--force]
   locachy-nvidia gsp auto|off|on
   locachy-nvidia sync-dropin
 """
@@ -34,7 +38,8 @@ import sys
 
 sys.dont_write_bytecode = True
 
-BRANCHES = ("open", "580xx", "off")
+BRANCHES = ("auto", "open", "580xx", "off")
+CONCRETE_BRANCHES = ("open", "580xx")
 GSP_MODES = ("auto", "off", "on")
 
 BRANCH_PACKAGES = {
@@ -51,6 +56,55 @@ ALL_DRIVER_PACKAGES = (
 
 PCI_BDF_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$")
 MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+PCI_DEV_LINE_RE = re.compile(r"^\t([0-9a-fA-F]{4})[ \t]+(.+?)\s*$")
+PCI_VENDOR_LINE_RE = re.compile(r"^([0-9a-fA-F]{4})[ \t]+")
+LSPCI_DEV_RE = re.compile(r"\[10de:([0-9a-fA-F]{4})\]")
+
+# Arch Wiki NVIDIA GPU codename -> family classification (ordered newest -> oldest).
+# Codename prefixes come from /usr/share/hwdata/pci.ids NVIDIA (10de) descriptions.
+CODENAME_FAMILY_RULES = (
+    # Blackwell / Hopper and newer: open kernel modules only (580xx does not support Blackwell).
+    ("blackwell", re.compile(r"\b(?:GB\d+[A-Z0-9-]*|GH\d+[A-Z0-9-]*)\b")),
+    # Ada Lovelace / Ampere / Turing: supported by both open and 580xx.
+    ("ada", re.compile(r"\bAD\d+[A-Z0-9-]*\b")),
+    ("ampere", re.compile(r"\bGA\d+[A-Z0-9-]*\b")),
+    ("turing", re.compile(r"\bTU\d+[A-Z0-9-]*\b")),
+    # Volta / Pascal / Maxwell: proprietary 580xx only (no GSP -> unsupported by open).
+    ("volta", re.compile(r"\bGV\d+[A-Z0-9-]*\b")),
+    ("pascal", re.compile(r"\bGP\d+[A-Z0-9-]*\b")),
+    ("maxwell", re.compile(r"\bGM\d+[A-Z0-9-]*\b")),
+    # Kepler / Fermi / Tesla / Curie: unsupported by open and 580xx.
+    ("kepler", re.compile(r"\bGK\d+[A-Z0-9-]*\b")),
+    ("fermi", re.compile(r"\bGF\d+[A-Z0-9-]*\b")),
+    ("tesla", re.compile(r"\b(?:G8[046]|G9[2468]|GT2\d+)[A-Z0-9-]*\b|\b(?:ION|C7[79]|MCP7[79]|MCP89)\b")),
+    ("curie", re.compile(r"\b(?:G7\d+|NV4\d+)[A-Z0-9-]*\b|\b(?:C51|C6[178]|MCP6[178])\b")),
+    ("legacy", re.compile(r"\bNV[0-3]\d[A-Z0-9-]*\b")),
+)
+
+# Product-name fallback when a pci.ids description omits the chip codename.
+NAME_FAMILY_RULES = (
+    ("blackwell", re.compile(r"\b(?:RTX\s*50\d{2}|RTX\s+PRO\s+\d+\s+Blackwell|B[12]00)\b", re.I)),
+    ("ada", re.compile(r"\b(?:RTX\s*40\d{2}|RTX\s+\d+\s+Ada|L40S?|L4)\b", re.I)),
+    ("ampere", re.compile(r"\b(?:RTX\s*30\d{2}|RTX\s+A\d{3,4}|A100|A40|A30|A16|A10G?|A2)\b", re.I)),
+    ("turing", re.compile(r"\b(?:RTX\s*20\d{2}|GTX\s*16\d{2}|T[456]00|T1[02]00|T2000|Quadro\s+RTX|Tesla\s+T4)\b", re.I)),
+    ("volta", re.compile(r"\b(?:TITAN\s+V|Quadro\s+GV100|Tesla\s+V100)\b", re.I)),
+    ("pascal", re.compile(r"\b(?:GTX\s*10\d{2}|GT\s*10\d{2}|MX[1234]50|MX130|MX230|MX330|TITAN\s+X(?:p)?|Quadro\s+P\d+|Tesla\s+P\d+)\b", re.I)),
+    ("maxwell", re.compile(r"\b(?:GTX\s*(?:9\d{2}|750|745|860M|850M)|GT\s*9\d{2}M?|MX110|Quadro\s+M\d+|Tesla\s+M\d+)\b", re.I)),
+    ("kepler", re.compile(r"\b(?:GTX\s*(?:6\d{2}|7[678]\d|TITAN(?:\s+Black|\s+Z)?)|GT\s*(?:6[34]0|7[1234]0)|Quadro\s+K\d+|Tesla\s+K\d+)\b", re.I)),
+    ("fermi", re.compile(r"\b(?:GTX\s*(?:4\d{2}|5\d{2})|GT\s*(?:4\d{2}|5\d{2}|6[12]0)|Quadro\s+[2456]000|Tesla\s+[CM]20\d{2})\b", re.I)),
+)
+
+# DMI chassis_type values corresponding to portable/laptop form factors (SMBIOS 3.x).
+LAPTOP_CHASSIS_TYPES = frozenset({8, 9, 10, 11, 14, 30, 31, 32})
+
+# Shown when gpu-unlock is active and the branch is open (or open is the recommendation).
+# GSP-RM does not block the unlock; the 595 regression was NVreg_GpuInitOnProbe=0 (upstream #135).
+UNLOCK_OPEN_ADVISORY = (
+    "gpu-unlock is active with nvidia-open-dkms: GSP-RM does not block the unlock. "
+    "On an affected 595-series build the unlock can be lost (Zagitta/gpu-unlock #135, "
+    "NVreg_GpuInitOnProbe); branch 615+ restores probe-time init. If this machine loses the unlock "
+    "or GSP is unstable, set NVreg_GpuInitOnProbe=1 or switch manually to 580xx (GSP off)."
+)
 
 MODPROBE_NAME = "40-locachy-nvidia.conf"
 DOMAIN_LOCK_PATH = "/run/locachy/pkg.lock"
@@ -87,6 +141,26 @@ def sys_pci_path():
 
 def sys_module_path():
     return env_path("LOCACHY_NVIDIA_SYS_MODULE", "/sys/module/nvidia")
+
+
+def pci_ids_path():
+    raw = os.environ.get("LOCACHY_NVIDIA_PCI_IDS", "").strip()
+    if raw:
+        return Path(raw)
+    root = root_path()
+    candidates = [
+        root / "usr/share/hwdata/pci.ids",
+        Path("/usr/share/hwdata/pci.ids"),
+        Path("/usr/share/misc/pci.ids"),
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    return candidates[0]
+
+
+def dmi_chassis_type_path():
+    return env_path("LOCACHY_NVIDIA_DMI_CHASSIS", "/sys/class/dmi/id/chassis_type")
 
 
 def boot_cmd_path():
@@ -208,11 +282,168 @@ def installed_pkg_version(name):
     return ""
 
 
+def normalize_pci_hex4(raw):
+    text = (raw or "").strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if not re.fullmatch(r"[0-9a-f]{1,4}", text):
+        return ""
+    return text.zfill(4)
+
+
+def load_nvidia_pci_ids(path=None):
+    """Parse vendor 10de (NVIDIA) device names from pci.ids."""
+    p = Path(path) if path is not None else pci_ids_path()
+    if not p.is_file():
+        return {}
+    mapping = {}
+    in_nvidia = False
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line or line[0] in ("#", "\n", "\r"):
+                    continue
+                if line[0] == "C" and line.startswith("C "):
+                    if in_nvidia:
+                        break
+                    continue
+                if line[0] != "\t":
+                    if in_nvidia:
+                        break
+                    vm = PCI_VENDOR_LINE_RE.match(line)
+                    if vm and vm.group(1).lower() == "10de":
+                        in_nvidia = True
+                    continue
+                if not in_nvidia or line.startswith("\t\t"):
+                    continue
+                dm = PCI_DEV_LINE_RE.match(line)
+                if dm:
+                    mapping[dm.group(1).lower()] = dm.group(2).strip()
+    except OSError:
+        return {}
+    return mapping
+
+
+def lspci_nvidia_names():
+    """Fallback device description lookup via `lspci -nn -d 10de:` when pci.ids is absent."""
+    if os.environ.get("LOCACHY_NVIDIA_NO_LSPCI") == "1":
+        return {}
+    if not shutil.which("lspci"):
+        return {}
+    try:
+        res = subprocess.run(
+            ["lspci", "-nn", "-d", "10de:"],
+            capture_output=True,
+            text=True,
+            env=dict(os.environ, LC_ALL="C"),
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if res.returncode != 0:
+        return {}
+    names = {}
+    for line in (res.stdout or "").splitlines():
+        m = LSPCI_DEV_RE.search(line)
+        if not m:
+            continue
+        dev_id = m.group(1).lower()
+        body = line
+        if ": " in body:
+            body = body.split(": ", 1)[1]
+        body = re.sub(r"^NVIDIA\s+Corporation\s+", "", body, flags=re.I)
+        body = re.sub(r"\s*\[10de:[0-9a-fA-F]{4}\].*$", "", body).strip()
+        if body:
+            names[dev_id] = body
+    return names
+
+
+def is_laptop_chassis():
+    p = dmi_chassis_type_path()
+    try:
+        val = int(p.read_text(encoding="utf-8", errors="replace").strip())
+        return val in LAPTOP_CHASSIS_TYPES
+    except (OSError, ValueError):
+        return False
+
+
+def classify_nvidia_gpu(device_id, name="", laptop_chassis=None):
+    """Classify one NVIDIA PCI device according to the Arch Wiki NVIDIA family table."""
+    dev_hex = normalize_pci_hex4(device_id)
+    desc = (name or "").strip()
+    if laptop_chassis is None:
+        laptop_chassis = is_laptop_chassis()
+
+    family = "unknown"
+    codename = ""
+    for fam, pat in CODENAME_FAMILY_RULES:
+        m = pat.search(desc)
+        if m:
+            family = fam
+            codename = m.group(0)
+            break
+    if family == "unknown" and desc:
+        for fam, pat in NAME_FAMILY_RULES:
+            if pat.search(desc):
+                family = fam
+                break
+
+    ampere_laptop = False
+    if family == "ampere":
+        if re.search(r"\bGA\d+[A-Z]*M\b", desc) or re.search(r"\b(?:Laptop|Mobile)\b", desc, re.I) or laptop_chassis:
+            ampere_laptop = True
+
+    note = ""
+    reason = ""
+    if family == "blackwell":
+        supported = ["open"]
+        recommended = "open"
+        reason = "Blackwell/Hopper requires open kernel modules (580xx unsupported)"
+    elif family in ("ada", "ampere", "turing"):
+        supported = ["open", "580xx"]
+        recommended = "open"
+        reason = f"{family.capitalize()} defaults to open kernel modules (Arch Wiki)"
+        if ampere_laptop:
+            note = (
+                "Ampere laptop GPU: on some Ampere laptops GSP-RM causes complete failure (ArchWiki); "
+                "if this machine is affected, switch manually to 580xx with GSP off."
+            )
+    elif family in ("volta", "pascal", "maxwell"):
+        supported = ["580xx"]
+        recommended = "580xx"
+        reason = f"{family.capitalize()} lacks GSP and requires legacy 580xx"
+    elif family in ("kepler", "fermi", "tesla", "curie", "legacy"):
+        supported = []
+        recommended = "off"
+        reason = f"{family.capitalize()} is unsupported by open and 580xx"
+        note = "legacy unsupported by open/580xx; use nouveau or AUR 470xx/390xx"
+    else:
+        supported = ["open", "580xx"]
+        recommended = "open"
+        reason = f"unknown NVIDIA PCI ID (0x{dev_hex or '????'}); defaulting to open kernel modules"
+
+    return {
+        "family": family,
+        "codename": codename,
+        "name": desc,
+        "supported_branches": supported,
+        "recommended_branch": recommended,
+        "recommend_reason": reason,
+        "ampere_laptop_gsp_note": ampere_laptop,
+        "note": note,
+    }
+
+
 def detect_nvidia_gpus():
     gpus = []
     pci = sys_pci_path()
     if not pci.is_dir():
         return gpus
+
+    pci_names = load_nvidia_pci_ids()
+    lspci_names = None
+    laptop = is_laptop_chassis()
+
     for dev in sorted(pci.iterdir()):
         bdf = dev.name.lower()
         if not PCI_BDF_RE.fullmatch(bdf):
@@ -229,8 +460,118 @@ def detect_nvidia_gpus():
         drv_link = dev / "driver"
         if drv_link.is_symlink():
             driver = os.path.basename(os.readlink(drv_link))
-        gpus.append({"bdf": bdf, "vendor": vendor, "device": device, "class": cls, "driver": driver})
+        dev_hex = normalize_pci_hex4(device)
+        name = pci_names.get(dev_hex, "")
+        if not name and not pci_names:
+            if lspci_names is None:
+                lspci_names = lspci_nvidia_names()
+            name = lspci_names.get(dev_hex, "")
+        info = classify_nvidia_gpu(dev_hex, name=name, laptop_chassis=laptop)
+        gpus.append({
+            "bdf": bdf,
+            "vendor": vendor,
+            "device": f"0x{dev_hex}" if dev_hex else device,
+            "class": cls,
+            "driver": driver,
+            **info,
+        })
     return gpus
+
+
+def summarize_gpu_recommendation(gpus):
+    """Aggregate per-GPU family classification into one system recommendation."""
+    if not gpus:
+        return {
+            "recommended_branch": "off",
+            "supported_branches": [],
+            "recommend_reason": "no NVIDIA GPU detected",
+            "gpu_family": "none",
+            "gpu_name": "",
+            "ampere_laptop_gsp_note": False,
+            "conflict": "",
+            "notes": [],
+        }
+
+    notes = []
+    for g in gpus:
+        if g.get("note") and g["note"] not in notes:
+            notes.append(g["note"])
+    ampere_note = any(g.get("ampere_laptop_gsp_note") for g in gpus)
+
+    families = []
+    for g in gpus:
+        f = g.get("family") or "unknown"
+        if f not in families:
+            families.append(f)
+    gpu_family = families[0] if len(families) == 1 else ",".join(families)
+
+    names = [g.get("name") or g.get("device") or g.get("bdf") for g in gpus]
+    gpu_name = "; ".join(n for n in names if n)
+
+    common = None
+    for g in gpus:
+        s = set(g.get("supported_branches") or ())
+        common = s if common is None else (common & s)
+    supported = [b for b in CONCRETE_BRANCHES if b in (common or set())]
+
+    legacy_gpus = [g for g in gpus if not g.get("supported_branches")]
+    if legacy_gpus and len(legacy_gpus) == len(gpus):
+        return {
+            "recommended_branch": "off",
+            "supported_branches": [],
+            "recommend_reason": legacy_gpus[0].get("recommend_reason") or "legacy NVIDIA GPU unsupported by open/580xx",
+            "gpu_family": gpu_family,
+            "gpu_name": gpu_name,
+            "ampere_laptop_gsp_note": ampere_note,
+            "conflict": "",
+            "notes": notes,
+        }
+
+    if not supported:
+        # Multi-GPU conflict: e.g. Blackwell (open-only) + Pascal/Maxwell (580xx-only), or supported + legacy.
+        parts = [f"{g['bdf']} ({g['family']}: {'/'.join(g['supported_branches']) or 'unsupported'})" for g in gpus]
+        conflict = "multi-GPU branch conflict: no single NVIDIA driver branch supports all detected GPUs: " + ", ".join(parts)
+        return {
+            "recommended_branch": "off",
+            "supported_branches": [],
+            "recommend_reason": conflict,
+            "gpu_family": gpu_family,
+            "gpu_name": gpu_name,
+            "ampere_laptop_gsp_note": ampere_note,
+            "conflict": conflict,
+            "notes": notes,
+        }
+
+    if len(supported) == 1:
+        only = supported[0]
+        reasons = [g.get("recommend_reason") for g in gpus if g.get("supported_branches") == [only] and g.get("recommend_reason")]
+        reason = reasons[0] if reasons else f"detected GPU family requires {only}"
+        return {
+            "recommended_branch": only,
+            "supported_branches": supported,
+            "recommend_reason": reason,
+            "gpu_family": gpu_family,
+            "gpu_name": gpu_name,
+            "ampere_laptop_gsp_note": ampere_note,
+            "conflict": "",
+            "notes": notes,
+        }
+
+    # Both open and 580xx are supported by all detected GPUs: Arch Wiki default is open
+    # even when gpu-unlock is active (Zagitta/gpu-unlock #135: GSP does not block unlock;
+    # 595's NVreg_GpuInitOnProbe lazy-init regression was fixed in branch 615+).
+    rec = "open"
+    reason = gpus[0].get("recommend_reason") or "Arch Wiki default for Turing+ GPUs (open)"
+    return {
+        "recommended_branch": rec,
+        "supported_branches": supported,
+        "recommend_reason": reason,
+        "gpu_family": gpu_family,
+        "gpu_name": gpu_name,
+        "ampere_laptop_gsp_note": ampere_note,
+        "conflict": "",
+        "notes": notes,
+    }
 
 
 def detect_installed_branch():
@@ -249,7 +590,25 @@ def configured_branch():
     raw = (read_rc_layered("nvidia_driver") or "").strip().lower()
     if raw in BRANCHES:
         return raw
-    return detect_installed_branch() if detect_installed_branch() in ("open", "580xx") else "off"
+    inst = detect_installed_branch()
+    return inst if inst in CONCRETE_BRANCHES else "off"
+
+
+def effective_branch(cfg=None, inst=None, rec=None):
+    """Concrete driver branch ('open', '580xx', or 'off') for drop-in / GSP evaluation."""
+    if cfg is None:
+        cfg = configured_branch()
+    if inst is None:
+        inst = detect_installed_branch()
+    if cfg in CONCRETE_BRANCHES:
+        return cfg
+    if cfg == "auto":
+        if inst in CONCRETE_BRANCHES:
+            return inst
+        if rec in CONCRETE_BRANCHES:
+            return rec
+        return "off"
+    return inst if inst in CONCRETE_BRANCHES else "off"
 
 
 def configured_gsp_policy():
@@ -278,7 +637,7 @@ def should_disable_gsp(branch, gsp_policy, unlock_active):
 
 
 def render_modprobe_dropin(branch, gsp_policy, unlock_active):
-    if branch not in ("open", "580xx"):
+    if branch not in CONCRETE_BRANCHES:
         return None
     lines = [
         f"# Managed by locachy-nvidia (branch: {branch}, gsp: {gsp_policy})",
@@ -414,12 +773,14 @@ def run_boot_rebuild():
 
 
 def status_dict():
+    unlock_on = gpu_unlock_is_active()
     gpus = detect_nvidia_gpus()
+    summary = summarize_gpu_recommendation(gpus)
     inst = detect_installed_branch()
     cfg = configured_branch()
     gsp = configured_gsp_policy()
-    unlock_on = gpu_unlock_is_active()
-    gsp_off = should_disable_gsp(cfg if cfg in ("open", "580xx") else inst, gsp, unlock_on)
+    active_branch = effective_branch(cfg=cfg, inst=inst, rec=summary["recommended_branch"])
+    gsp_off = should_disable_gsp(active_branch, gsp, unlock_on)
 
     dkms_pkg = ""
     utils_pkg = ""
@@ -441,17 +802,30 @@ def status_dict():
                 loaded_mod = g["driver"]
                 break
 
-    advisory = ""
-    if unlock_on and (cfg == "open" or (cfg == "off" and inst == "open")):
-        advisory = (
-            "gpu-unlock is enabled with nvidia-open-dkms (GSP-RM required); "
-            "if GSP-RM resets unlocked clocks on your laptop GPU, switch to the 580xx DKMS branch (GSP off)."
-        )
+    # gpu-unlock note: shown while the branch is open, or open is what auto would install.
+    unlock_note = ""
+    if unlock_on and active_branch != "580xx" and (active_branch == "open" or summary["recommended_branch"] == "open"):
+        unlock_note = UNLOCK_OPEN_ADVISORY
+    advisories = []
+    if summary["conflict"]:
+        advisories.append(summary["conflict"])
+    if unlock_note:
+        advisories.append(unlock_note)
+    if active_branch != "580xx":
+        advisories.extend(n for n in summary["notes"] if n not in advisories)
 
     mp_file = root_path() / "etc/modprobe.d" / MODPROBE_NAME
     return {
         "configured_branch": cfg,
         "installed_branch": inst,
+        "recommended_branch": summary["recommended_branch"],
+        "supported_branches": summary["supported_branches"],
+        "recommend_reason": summary["recommend_reason"],
+        "gpu_family": summary["gpu_family"],
+        "gpu_name": summary["gpu_name"],
+        "ampere_laptop_gsp_note": summary["ampere_laptop_gsp_note"],
+        "gpu_conflict": summary["conflict"],
+        "gpu_notes": summary["notes"],
         "dkms_package": dkms_pkg,
         "dkms_version": dkms_ver,
         "utils_package": utils_pkg,
@@ -462,13 +836,18 @@ def status_dict():
         "gsp_policy": gsp,
         "gsp_disabled_configured": gsp_off,
         "gpu_unlock_active": unlock_on,
-        "gpu_unlock_advisory": advisory,
+        "gpu_unlock_advisory": unlock_note,
+        "advisories": advisories,
         "modprobe_configured": mp_file.is_file(),
         "loaded_driver": loaded_mod or "none",
         "loaded_version": loaded_ver,
         "nvidia_gpus": gpus,
-        "branches": ["open", "580xx", "off"],
+        "branches": list(BRANCHES),
     }
+
+
+def sanitize_tsv(val):
+    return str(val or "").replace("\t", " ").replace("\n", " ").replace("\r", " ")
 
 
 def cmd_status(args):
@@ -477,38 +856,107 @@ def cmd_status(args):
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     if args.tsv:
-        print(f"configured\t{data['configured_branch']}")
-        print(f"installed\t{data['installed_branch']}")
-        print(f"dkms_version\t{data['dkms_version']}")
-        print(f"utils_version\t{data['utils_version']}")
-        print(f"gsp_policy\t{data['gsp_policy']}")
+        print(f"configured\t{sanitize_tsv(data['configured_branch'])}")
+        print(f"installed\t{sanitize_tsv(data['installed_branch'])}")
+        print(f"recommended\t{sanitize_tsv(data['recommended_branch'])}")
+        print(f"supported\t{sanitize_tsv(','.join(data['supported_branches']))}")
+        print(f"gpu_family\t{sanitize_tsv(data['gpu_family'])}")
+        print(f"dkms_version\t{sanitize_tsv(data['dkms_version'])}")
+        print(f"utils_version\t{sanitize_tsv(data['utils_version'])}")
+        print(f"gsp_policy\t{sanitize_tsv(data['gsp_policy'])}")
         print(f"gsp_disabled\t{1 if data['gsp_disabled_configured'] else 0}")
         print(f"gpu_unlock\t{1 if data['gpu_unlock_active'] else 0}")
+        print(f"ampere_laptop_note\t{1 if data['ampere_laptop_gsp_note'] else 0}")
         print(f"gpu_count\t{len(data['nvidia_gpus'])}")
-        print(f"loaded\t{data['loaded_driver']}")
-        print(f"loaded_version\t{data['loaded_version']}")
+        print(f"loaded\t{sanitize_tsv(data['loaded_driver'])}")
+        print(f"loaded_version\t{sanitize_tsv(data['loaded_version'])}")
+        print(f"gpu_name\t{sanitize_tsv(data['gpu_name'])}")
+        print(f"recommend_reason\t{sanitize_tsv(data['recommend_reason'])}")
         return 0
     print(f"configured_branch: {data['configured_branch']}")
     print(f"installed_branch: {data['installed_branch']}"
           + (f" ({data['dkms_package']} {data['dkms_version']})" if data["dkms_version"] else ""))
+    print(f"recommended_branch: {data['recommended_branch']}"
+          + (f" ({data['recommend_reason']})" if data["recommend_reason"] else ""))
+    print(f"supported_branches: {', '.join(data['supported_branches']) or 'none'}")
+    print(f"gpu_family: {data['gpu_family']}" + (f" ({data['gpu_name']})" if data["gpu_name"] else ""))
     print(f"gsp_policy: {data['gsp_policy']} (NVreg_EnableGpuFirmware=0: {'yes' if data['gsp_disabled_configured'] else 'no'})")
     print(f"loaded_driver: {data['loaded_driver']}"
           + (f" ({data['loaded_version']})" if data["loaded_version"] else ""))
-    print(f"nvidia_gpus: {', '.join(g['bdf'] + '(' + g['device'] + ')' for g in data['nvidia_gpus']) or 'none'}")
-    if data["gpu_unlock_advisory"]:
-        print(f"advisory: {data['gpu_unlock_advisory']}")
+    gpu_desc = ", ".join(
+        f"{g['bdf']}({g['device']} {g['family']}" + (f": {g['name']}" if g.get("name") else "") + ")"
+        for g in data["nvidia_gpus"]
+    )
+    print(f"nvidia_gpus: {gpu_desc or 'none'}")
+    for adv in data["advisories"]:
+        print(f"advisory: {adv}")
     return 0
 
 
+def validate_branch_for_hardware(requested_branch, gpus, summary, force=False):
+    """Ensure requested manual branch is supported by detected NVIDIA hardware."""
+    if force or not gpus:
+        return
+    supported = summary["supported_branches"]
+    if requested_branch in supported:
+        return
+    if summary["conflict"]:
+        raise RuntimeError(f"{summary['conflict']} (pass --force to override)")
+    if not supported:
+        note = summary["notes"][0] if summary["notes"] else "legacy GPU unsupported by open/580xx"
+        raise RuntimeError(
+            f"detected NVIDIA GPU ({summary['gpu_family']}: {summary['gpu_name'] or 'unknown'}) is not supported "
+            f"by branch {requested_branch!r}: {note} (pass --force to override)"
+        )
+    rec = summary["recommended_branch"]
+    raise RuntimeError(
+        f"NVIDIA driver branch {requested_branch!r} does not support detected {summary['gpu_family']} GPU "
+        f"({summary['gpu_name'] or 'unknown'}); supported: {', '.join(supported)} "
+        f"(recommended: {rec}; pass --force to override)"
+    )
+
+
+def resolve_auto_branch(gpus, summary):
+    """Resolve `set auto` to a concrete branch ('open' or '580xx'), checking repo availability."""
+    if not gpus:
+        raise RuntimeError(
+            "no NVIDIA GPU detected; cannot auto-select a driver branch (use 'locachy-nvidia set off' or pass an explicit branch with --force)"
+        )
+    if summary["conflict"]:
+        raise RuntimeError(summary["conflict"])
+    supported = summary["supported_branches"]
+    rec = summary["recommended_branch"]
+    if rec not in CONCRETE_BRANCHES or not supported:
+        note = summary["notes"][0] if summary["notes"] else summary["recommend_reason"]
+        raise RuntimeError(
+            f"detected NVIDIA GPU ({summary['gpu_family']}: {summary['gpu_name'] or 'unknown'}) is unsupported by "
+            f"Arch/CachyOS open and 580xx DKMS branches ({note}); use 'locachy-nvidia set off'"
+        )
+    # Prefer the hardware-recommended branch when its packages exist in enabled repos;
+    # otherwise fall back to another hardware-supported branch if available.
+    ordered = [rec] + [b for b in supported if b != rec]
+    for candidate in ordered:
+        pkgs = BRANCH_PACKAGES[candidate]
+        if not all(pacman_has_package(p) for p in pkgs):
+            continue
+        if candidate == "580xx" and read_rc_layered("repo_multilib") == "0" and package_needs_multilib("nvidia-580xx-utils"):
+            continue
+        if candidate != rec:
+            print(f"locachy-nvidia: recommended {rec} is not in enabled repositories; using {candidate}", flush=True)
+        return candidate
+    return rec
+
+
 def cmd_set(args):
-    branch = args.branch
-    if branch not in BRANCHES:
-        raise ValueError(f"unsupported NVIDIA driver branch: {branch!r} (expected one of {', '.join(BRANCHES)})")
+    requested = args.branch
+    force = bool(getattr(args, "force", False))
+    if requested not in BRANCHES:
+        raise ValueError(f"unsupported NVIDIA driver branch: {requested!r} (expected one of {', '.join(BRANCHES)})")
 
     pkg = pkg_cmd_path()
     has_pkg = bool(pkg and os.path.exists(pkg))
 
-    if branch == "off":
+    if requested == "off":
         write_dropin("off")
         write_rc_key("nvidia_driver", "off")
         manifest_names = load_manifest_names()
@@ -526,16 +974,27 @@ def cmd_set(args):
         print("locachy-nvidia: NVIDIA driver removed and boot image rebuilt", flush=True)
         return 0
 
-    target_pkgs = list(BRANCH_PACKAGES[branch])
+    gpus = detect_nvidia_gpus()
+    summary = summarize_gpu_recommendation(gpus)
+
+    if requested == "auto":
+        install_branch = resolve_auto_branch(gpus, summary)
+        rc_branch = "auto"
+    else:
+        validate_branch_for_hardware(requested, gpus, summary, force=force)
+        install_branch = requested
+        rc_branch = requested
+
+    target_pkgs = list(BRANCH_PACKAGES[install_branch])
     opposite_pkgs = [p for p in ALL_DRIVER_PACKAGES if p not in target_pkgs]
 
     # Pre-flight check before touching any installed driver.
     missing_repo = [p for p in target_pkgs if not pacman_has_package(p)]
     if missing_repo:
         raise RuntimeError(
-            f"NVIDIA driver branch {branch!r} packages not found in enabled repositories: {', '.join(missing_repo)}"
+            f"NVIDIA driver branch {install_branch!r} packages not found in enabled repositories: {', '.join(missing_repo)}"
         )
-    if branch == "580xx" and read_rc_layered("repo_multilib") == "0" and package_needs_multilib("nvidia-580xx-utils"):
+    if install_branch == "580xx" and read_rc_layered("repo_multilib") == "0" and package_needs_multilib("nvidia-580xx-utils"):
         raise RuntimeError(
             "nvidia-580xx-utils requires lib32-* dependencies from [multilib]; "
             "enable Multilib in Settings -> System -> Software Sources first"
@@ -565,13 +1024,23 @@ def cmd_set(args):
             run_cmd([*net, "pacman", "-S", "--needed", "--noconfirm", *target_pkgs])
             update_manifest(add=[*target_pkgs, "dkms"])
 
-    write_rc_key("nvidia_driver", branch)
+    write_rc_key("nvidia_driver", rc_branch)
     if not read_rc_file_value(rc_path(), "nvidia_gsp"):
         write_rc_key("nvidia_gsp", "auto")
-    write_dropin(branch)
+    write_dropin(install_branch)
     sync_nvidia_powerd()
     run_boot_rebuild()
-    print(f"locachy-nvidia: installed branch={branch} ({', '.join(target_pkgs)}) and rebuilt boot image", flush=True)
+    if rc_branch == "auto":
+        print(
+            f"locachy-nvidia: auto-selected branch={install_branch} for {summary['gpu_family']} "
+            f"({', '.join(target_pkgs)}) and rebuilt boot image",
+            flush=True,
+        )
+    else:
+        print(
+            f"locachy-nvidia: installed branch={install_branch} ({', '.join(target_pkgs)}) and rebuilt boot image",
+            flush=True,
+        )
     return 0
 
 
@@ -580,8 +1049,8 @@ def cmd_gsp(args):
     if mode not in GSP_MODES:
         raise ValueError(f"unsupported GSP mode: {mode!r} (expected one of {', '.join(GSP_MODES)})")
     write_rc_key("nvidia_gsp", mode)
-    branch = configured_branch()
-    if branch in ("open", "580xx"):
+    branch = effective_branch()
+    if branch in CONCRETE_BRANCHES:
         write_dropin(branch, gsp_policy=mode)
     run_boot_rebuild()
     print(f"locachy-nvidia: nvidia_gsp set to {mode} (active branch: {branch})", flush=True)
@@ -589,7 +1058,7 @@ def cmd_gsp(args):
 
 
 def cmd_sync_dropin(_args):
-    branch = configured_branch()
+    branch = effective_branch()
     write_dropin(branch)
     return 0
 
@@ -598,13 +1067,14 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="locachy-nvidia", description="Manage Arch/CachyOS DKMS NVIDIA drivers on LOCachy.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp_st = sub.add_parser("status", help="Show installed/configured NVIDIA driver branch, GSP state, and GPUs")
+    sp_st = sub.add_parser("status", help="Show installed/configured NVIDIA driver branch, GPU family, GSP state, and GPUs")
     sp_st.add_argument("--json", action="store_true")
     sp_st.add_argument("--tsv", action="store_true")
     sp_st.set_defaults(func=cmd_status)
 
-    sp_set = sub.add_parser("set", help="Install/switch NVIDIA DKMS driver branch (open, 580xx) or remove (off)")
+    sp_set = sub.add_parser("set", help="Install/switch NVIDIA DKMS driver branch (auto, open, 580xx) or remove (off)")
     sp_set.add_argument("branch", choices=BRANCHES)
+    sp_set.add_argument("--force", action="store_true", help="Override GPU family compatibility validation")
     sp_set.set_defaults(func=cmd_set)
 
     sp_gsp = sub.add_parser("gsp", help="Configure NVIDIA GSP firmware policy (auto, off, on; off applies to 580xx)")

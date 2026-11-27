@@ -203,25 +203,44 @@ if [ "${IME:-1}" != 0 ] && [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/libri
         if [ ! -f /var/lib/locachy/rime/easy_en.dict.yaml ] && [ -f /usr/share/dict/words ]; then
             python3 "$src/base/rime/build_dict.py" /usr/share/dict/words /var/lib/locachy/rime/easy_en.dict.yaml
         fi
-        # Redeploy whenever our configuration changed, the build output is
-        # missing, or /usr/share/rime-data (e.g. rime-frost-git) was updated:
-        # librime loads prism.bin from user_data_dir before shared_data_dir, so
-        # a stale prism.bin paired with an upgraded shared table.bin shifts
-        # every syllable ID.
-        rime_shared_stamp=""
-        if [ -d /usr/share/rime-data ]; then
-            rime_shared_stamp=$(find /usr/share/rime-data -maxdepth 2 -type f \
-                \( -name '*.bin' -o -name '*.yaml' -o -name '*.gram' \) \
-                -printf '%P %s %T@\n' 2>/dev/null | LC_ALL=C sort | sha256sum | cut -d ' ' -f 1)
-        fi
+        # Redeploy whenever our configuration changed, a compiled output is
+        # missing, /usr/share/rime-data (e.g. rime-frost-git) was updated, OR
+        # librime itself (or its plugins) changed: librime loads prism.bin from
+        # user_data_dir before shared_data_dir, so both a stale prism paired
+        # with an upgraded shared table.bin (shifted syllable IDs) and a prism
+        # built by an older librime format (e.g. Prism/4.0 under librime 1.18's
+        # Prism/5.0) leave Chinese and English modes with zero candidates.
+        rime_shared_stamp=$({
+            rime_so=$(readlink -f /usr/lib/librime.so 2>/dev/null || true)
+            if [ -n "$rime_so" ] && [ -f "$rime_so" ]; then
+                stat -c 'engine:%n %s %Y' "$rime_so" 2>/dev/null || true
+            fi
+            stat -L -c 'deployer:%s %Y' /usr/bin/rime_deployer 2>/dev/null || true
+            if [ -d /usr/lib/rime-plugins ]; then
+                find -L /usr/lib/rime-plugins -maxdepth 1 -type f -name '*.so' \
+                    -printf 'plugin:%f %s %T@\n' 2>/dev/null || true
+            fi
+            if [ -d /usr/share/rime-data ]; then
+                find /usr/share/rime-data -type f \
+                    \( -name '*.bin' -o -name '*.yaml' -o -name '*.gram' -o -name '*.lua' \) \
+                    -printf 'data:%P %s %T@\n' 2>/dev/null || true
+            fi
+        } | LC_ALL=C sort | sha256sum | cut -d ' ' -f 1)
         rime_prev_stamp=$(cat /var/lib/locachy/rime/build/.shared-stamp 2>/dev/null || true)
         if [ -n "$rime_shared_stamp" ] && [ "$rime_shared_stamp" != "$rime_prev_stamp" ]; then
             rime_changed=1
         fi
-        if [ "$rime_changed" = 1 ] || [ ! -f /var/lib/locachy/rime/build/default.yaml ] ||
+        rime_need_frost=0
+        if [ -f /usr/share/rime-data/rime_frost.schema.yaml ] &&
+           [ ! -f /var/lib/locachy/rime/build/rime_frost.prism.bin ]; then
+            rime_need_frost=1
+        fi
+        if [ "$rime_changed" = 1 ] || [ "$rime_need_frost" = 1 ] ||
+           [ ! -f /var/lib/locachy/rime/build/default.yaml ] ||
            [ ! -f /var/lib/locachy/rime/build/easy_en.prism.bin ]; then
             # Drop stale user-dir compiled tables/prisms so librime rebuilds
-            # them cleanly against the current shared_data_dir (preserves userdb).
+            # them cleanly against the current engine and shared_data_dir
+            # (preserves userdb).
             rm -rf /var/lib/locachy/rime/build
             rime_deployer --build /var/lib/locachy/rime /usr/share/rime-data >/dev/null 2>&1 || true
             rime_deployer --compile /var/lib/locachy/rime/easy_en.schema.yaml /var/lib/locachy/rime /usr/share/rime-data >/dev/null 2>&1 || true
@@ -230,8 +249,24 @@ if [ "${IME:-1}" != 0 ] && [ -f /usr/include/rime_api.h ] && [ -f /usr/lib/libri
             if [ -f /var/lib/locachy/rime/context_pinyin.schema.yaml ]; then
                 rime_deployer --compile /var/lib/locachy/rime/context_pinyin.schema.yaml /var/lib/locachy/rime /usr/share/rime-data >/dev/null 2>&1 || true
             fi
-            if [ -d /var/lib/locachy/rime/build ] && [ -n "$rime_shared_stamp" ]; then
-                printf '%s\n' "$rime_shared_stamp" >/var/lib/locachy/rime/build/.shared-stamp
+            rime_ok=1
+            [ -f /var/lib/locachy/rime/build/default.yaml ] || rime_ok=0
+            if [ -f /var/lib/locachy/rime/easy_en.dict.yaml ] &&
+               [ ! -f /var/lib/locachy/rime/build/easy_en.prism.bin ]; then
+                rime_ok=0
+            fi
+            if [ -f /usr/share/rime-data/rime_frost.schema.yaml ] &&
+               [ ! -f /var/lib/locachy/rime/build/rime_frost.prism.bin ]; then
+                rime_ok=0
+            fi
+            if [ "$rime_ok" = 1 ]; then
+                if [ -n "$rime_shared_stamp" ]; then
+                    printf '%s\n' "$rime_shared_stamp" >/var/lib/locachy/rime/build/.shared-stamp
+                fi
+                rime_ver=$(sed -n 's/^Version:[[:space:]]*//p' /usr/lib/pkgconfig/rime.pc 2>/dev/null | head -n 1)
+                if [ -n "$rime_ver" ]; then
+                    printf '%s\n' "$rime_ver" >/var/lib/locachy/rime/build/.librime-version
+                fi
             fi
             rime_redeployed=1
         fi
@@ -466,6 +501,10 @@ if pkg-config --exists $EXTDISPLAY_PKGS; then
     if pkg-config --exists libva libva-drm; then
         VA_CFLAGS="-DCONFIG_EXTDISPLAY_VAAPI $(pkg-config --cflags libva libva-drm)"
         VA_LIBS="$(pkg-config --libs libva libva-drm)"
+        if pkg-config --exists gbm; then
+            VA_CFLAGS="$VA_CFLAGS -DCONFIG_EXTDISPLAY_GBM $(pkg-config --cflags gbm)"
+            VA_LIBS="$VA_LIBS $(pkg-config --libs gbm)"
+        fi
     fi
     $GCC_CORE -O3 -DCONFIG_EXTDISPLAY_FFMPEG $VA_CFLAGS $(pkg-config --cflags $EXTDISPLAY_PKGS) -c "$src/progs/extdisplay-decode.c" -o "$b/extdisplay-decode.o"
     $GCC_CORE $GC_LDFLAGS -DCONFIG_EXTDISPLAY_FFMPEG $VA_CFLAGS $(pkg-config --cflags $EXTDISPLAY_PKGS) -o "$lib/extdisplay-worker" "$src/progs/extdisplay-worker.c" \
