@@ -129,9 +129,10 @@ fi
 
 # The user is uid 1000: programs in containers run as it, and its home
 # /home/NAME holds the files every container and the host share.
-read -r -p "2. User name (owns /home/NAME, the shared files; default: nyz): " cuser
-cuser="${cuser:-nyz}"
 current=$(getent passwd 1000 | cut -d: -f1 || true)
+default_user="${current:-user}"
+read -r -p "2. User name (owns /home/NAME, the shared files; default: $default_user): " cuser
+cuser="${cuser:-$default_user}"
 if [ -n "$current" ] && [ "$current" != "$cuser" ]; then
     old_home=$(getent passwd 1000 | cut -d: -f6)
     if [ -d "$old_home" ] && [ "${old_home#/home/}" != "$old_home" ]; then
