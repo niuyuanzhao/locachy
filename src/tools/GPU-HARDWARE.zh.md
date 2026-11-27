@@ -12,6 +12,30 @@ LOCachy 将独立 NVIDIA GPU 的底层硬件能力直接并入系统的原生分
 
 固件设置需再次按 Enter 确认。`locachy-gpu-graphics status --json` 可读回固件配置；`set-mux hybrid|discrete` 和 `set-dgpu on|off` 走特权系统任务。未暴露、不可读或冲突的控制不会猜测写入。若机型只能从 BIOS 设置切换，就在 BIOS 中操作；启动旧的 UKI 不能撤销已写入的固件设置。
 
+## 0. NVIDIA DKMS 驱动管理（`locachy-nvidia`）
+
+LOCachy 统一通过 **DKMS** 管理 NVIDIA 驱动（不使用绑定特定内核分支的预编译模块包），按从新到旧排序，贴合 Arch Wiki 建议并与 LOCachy 的内核切换（`locachy-pkg kernel select`）协同：
+
+- **`open`**（新版，Turing RTX 20+ / Ampere / Ada / Blackwell 默认）：`nvidia-open-dkms` + `nvidia-utils` + `dkms` + 当前内核头文件。开源内核模块强制使用 GSP-RM 固件。
+- **`580xx`**（旧版闭源 / 可关 GSP：Maxwell / Pascal / Volta，或需要通过 `NVreg_EnableGpuFirmware=0` 关闭 GSP 固件的 Turing / Ampere / Ada 笔记本，例如配合 `gpu-unlock` 时避免 GSP-RM 覆盖频率设定）：`nvidia-580xx-dkms` + `nvidia-580xx-utils` + `dkms` + 当前内核头文件。注意 `cachyos/nvidia-580xx-utils` 依赖 `[multilib]` 中的 `lib32-nvidia-580xx-utils`，`locachy-nvidia` 在改动已安装驱动前会先检查 `[multilib]` 是否启用。
+- **`off`**：移除已安装的 NVIDIA 驱动包、清理 `/etc/locachy/packages` 条目、删除 `/etc/modprobe.d/40-locachy-nvidia.conf` 并重建 UKI。
+
+「设置」在 **输入与输出 → NVIDIA GPU** 顶部提供两行控制：
+
+- **NVIDIA driver (DKMS)**（`nvidia_driver="open"|"580xx"|"off"`）：选择器行（`Enter` 进入 → `Left`/`Right` 切换 → 再次 `Enter` 通过 `gpu-driver-set` 应用）。
+- **NVIDIA GSP firmware**（`nvidia_gsp="auto"|"off"|"on"`）：作用于 `580xx`（通过 `gpu-driver-gsp`）。`auto` 在 `gpu_unlock_targets` 启用时自动写入 `options nvidia NVreg_EnableGpuFirmware=0`；`off` 强制关闭；`on` 强制开启。`open` 分支必须使用 GSP-RM，若同时启用 `gpu-unlock`，`locachy-nvidia status` 会给出提示。
+
+命令行接口：
+
+```sh
+locachy-nvidia status [--json | --tsv]
+locachy-nvidia set open|580xx|off
+locachy-nvidia gsp auto|off|on
+locachy-nvidia sync-dropin
+```
+
+在 `open` 与 `580xx` 之间切换时，工具会原子替换冲突包（`pacman -S --needed --noconfirm --ask 4`），更新 `/etc/locachy/packages`（`locachy-pkg` 的 Vulkan 驱动探测同时兼容 `nvidia-utils` 与 `nvidia-580xx-utils`），生成 `/etc/modprobe.d/40-locachy-nvidia.conf`（`blacklist nouveau`、`options nouveau modeset=0`、`options nvidia-drm modeset=1`、`softdep nvidia post: nvidia-uvm` 及按需写入的 `NVreg_EnableGpuFirmware`），在启用 `nvidia_powerd="1"` 时同步服务，并重建 UKI。`locachy-gpu-unlock` 在安装、开关和卸载时也会自动调用 `locachy-nvidia sync-dropin`。
+
 ## 1. 驱动前 NVIDIA GPU 解锁（`locachy-gpu-unlock`）
 
 部分 NVIDIA GPU 在驱动初始化前会应用固件中的速度选择器。`locachy-gpu-unlock` 将上游 [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock) 直接集成进 LOCachy。上游内核模块为其 recipe 表中的 PCI ID 解除该限制，具体效果与范围见上游 README。在「设置」中进入 `Input & Output -> NVIDIA GPU -> NVIDIA GPU unlock (gpu-unlock)` 按 `Enter` 即可一键从 GitHub 拉取、构建并启用，也支持命令行操作：

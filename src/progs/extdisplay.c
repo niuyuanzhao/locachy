@@ -882,6 +882,7 @@ static void session_run(int transport)
                 /* Stalled flip event (e.g. lost across modeset/PSR): force a refresh
                  * so video never stays frozen indefinitely. */
                 say("extdisplay: DRM flip completion timed out; refreshing dma-buf slots");
+                screen_flip_reset();
                 flip_ack_pending = 0;
                 scanning_slot = -1;
                 pending_slot = -1;

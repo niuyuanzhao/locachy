@@ -298,14 +298,10 @@ int main(void)
     assert(category_of(storage_disks_index()) == CAT_SYSTEM);
     assert(storage_disks_index() == storage_vols_index() + 3);
 
-    /* Compute Node category shows default compute storage summary note. */
-    nentries = 0;
-    category_entries(CAT_NETWORK);
-    int found_note = 0;
-    for (int k = 0; k < nentries; k++) {
-        if (entries[k].idx == E_NOTE && strstr(entries[k].text, "Default compute storage: data")) found_note = 1;
-    }
-    assert(found_note);
+    /* Compute Node category exposes the interactive compute storage row showing "data". */
+    assert(category_of(compute_index() + 3) == CAT_NETWORK);
+    item_text(compute_index() + 3, line, sizeof line);
+    assert(strstr(line, "Compute storage volume") && strstr(line, "data"));
 
     item_text(storage_compute_index(), line, sizeof line);
     assert(strstr(line, "Compute default storage") && strstr(line, "< data >"));

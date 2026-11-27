@@ -75,6 +75,17 @@ In the examples, `locachy-gpu` is a client SSH config alias for the normal user
 and the node's tailnet IP or MagicDNS name. `service_compute`, `locachy-pair`,
 and a Thunderbolt cable are not needed for this workflow.
 
+### Settings TUI (`Network → Compute Node`)
+
+Settings exposes six rows under **Network → Compute Node**, backed by `locachy-compute status --tsv` (which never fails even when `compute_storage` is currently unmounted):
+
+1. **Compute HTTPS API (optional)** — toggles `service_compute`, showing live port and daemon state (`running` / `starting`).
+2. **Compute API over Thunderbolt** — toggles `compute_bind_tb` and runs `tb-sync`.
+3. **Compute GPU passthrough** — toggles `compute_gpu`, showing the detected host NVIDIA driver version and GPU device count.
+4. **Compute storage volume** — cycles the configured `compute_storage` volume (`Left`/`Right`) and shows `[MOUNTED]` free space or `[UNMOUNTED]`; press `m` to mount or unmount the selected volume directly.
+5. **Compute Node Manager** — opens an interactive 5-tab TUI (`1:Overview`, `2:Envs`, `3:Jobs`, `4:VMs`, `5:Images`) with a top live status region (API, storage mount/free space, GPU/CUDA state, inventory counts), storage mount/unmount, image import/remove, environment create/shell/reset/remove, job log viewer & stop, micro-VM start/shell/stop/reset/remove, and mTLS client pairing.
+6. **Client SSH config** — opens a scrollable viewer for `locachy-compute ssh-config` (with a base host stanza fallback when `compute_storage` is unmounted) and copies it to the clipboard with `c`.
+
 ### Prepare storage, run, and retrieve
 
 Use a mounted `compute` or `shared` volume with room for the image, overlay,

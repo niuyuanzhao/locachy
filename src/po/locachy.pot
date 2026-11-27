@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-26 06:45-0500\n"
+"POT-Creation-Date: 2026-11-27 14:51+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -3626,7 +3626,7 @@ msgstr ""
 msgid "Disconnected."
 msgstr ""
 
-#: progs/extdisplay-setup.c
+#: progs/extdisplay-setup.c progs/settings-compute.inc
 msgid "Pairing cancelled."
 msgstr ""
 
@@ -4445,7 +4445,7 @@ msgstr ""
 msgid "(Trash is empty)"
 msgstr ""
 
-#: progs/files.c
+#: progs/files.c progs/settings-compute.inc
 msgid "(empty)"
 msgstr ""
 
@@ -8139,7 +8139,7 @@ msgstr ""
 msgid "%s follows its new preset: %s"
 msgstr ""
 
-#: progs/packages.c
+#: progs/packages.c progs/settings-compute.inc
 msgid "stopped"
 msgstr ""
 
@@ -9550,6 +9550,435 @@ msgstr ""
 msgid "Search keys"
 msgstr ""
 
+#: progs/settings-compute.inc
+msgid ""
+"No secondary compute storage volume selected (using root disk /var/lib/"
+"locachy/compute)."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Up/Down/PgUp/PgDn: scroll   c: copy to clipboard   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Up/Down/PgUp/PgDn: scroll   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-hwinfo.inc
+#, c-format
+msgid "Copied %s to clipboard."
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-hwinfo.inc
+#: progs/settings-power.inc
+msgid "Clipboard service is not running."
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings.c
+#, c-format
+msgid "%s is not installed."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Compute Client SSH Config"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "SSH config"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Closed client SSH config."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Image name (e.g. pytorch-cu12): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Image import cancelled."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Invalid image name: letters, digits, . _ - only."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Source rootfs path (directory or .tar/.tar.zst): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Source path must be an absolute path."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Image import failed for %.40s."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Imported image %.40s."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Import a base rootfs image first (Images tab or Overview)."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Environment name (e.g. train-1): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Environment creation cancelled."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Invalid environment name: letters, digits, . _ - only."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Base image name: "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Invalid image name."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Created environment %.40s from %.40s."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Create env failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "check storage and image name"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Client peer name (e.g. macbook): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Invalid peer name: letters, digits, . _ - only."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Client pairing did not finish."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Paired compute client %.40s."
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "Compute Node Manager"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "API: %s (port %d, %s)   Paired: %d   SSH: ssh %.32s -p %d"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "OFF"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "ON / running"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "ON / starting"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "Tailscale"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Tailscale+TB"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage: root disk (%s free / %s)   base: %.80s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage: root disk (/var/lib/locachy/compute)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage: %.32s [MOUNTED]  %s free / %s  (%.70s)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage: %.32s [UNMOUNTED]  press m to mount"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "GPU: passthrough %s   NVIDIA %s   (%d devs, %d CUDA libs)"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "ON"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "GPU: passthrough %s   %d GPU device(s), %d NVIDIA libs"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"GPU: passthrough %s   no NVIDIA driver loaded (see Input & Output > NVIDIA "
+"GPU)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Inventory: %d images   %d envs   %d/%d jobs running   %d/%d VMs running"
+msgstr ""
+
+#: progs/settings-compute.inc progs/view.c
+msgid "Overview"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Envs"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Jobs"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "VMs"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Images"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "No compute jobs recorded yet."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "No compute micro-VMs created yet (locachy-compute vm create)."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Nothing here yet."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "[ Unmount compute storage volume '%.32s' ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "[ Mount compute storage volume '%.32s' ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ Storage: using root disk (configure under System > Storage Volumes) ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ + Import rootfs image (tarball or directory) ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ + Create compute environment ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ + Pair remote client (mTLS token) ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ View / copy client SSH config ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ Manage paired devices (locachy-pair) ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "RUNNING"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"1-5/Tab: tabs   Enter: shell/create   x: reset   Delete: remove   r: "
+"refresh   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "1-5/Tab: tabs   Enter: view log   s: stop job   r: refresh   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"1-5/Tab: tabs   Enter: start/shell   s: stop   x: reset   Delete: remove   "
+"r: refresh   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "1-5/Tab: tabs   Enter: import   Delete: remove   r: refresh   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"1-5/Tab: tabs   Enter: run action   m: mount storage   c: SSH config   r: "
+"refresh   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Compute Node: %d images, %d envs, %d jobs, %d VMs."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Refreshed Compute Node status."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press x again to wipe upperdir and reset env '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Reset environment '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Reset failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "error"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press Delete again to remove env '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Removed environment '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Remove failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Job Log: %.64s"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "(no log output)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "job log"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Stopped job '%.48s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Stop job failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Started VM '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Start VM failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Stopped VM '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Stop VM failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press x again to reset CoW disk of VM '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Reset VM '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Reset VM failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press Delete again to remove VM '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Removed VM '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Remove VM failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press Delete again to remove image '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Removed image '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Remove image failed: %.120s"
+msgstr ""
+
 #: progs/settings-hwinfo.inc
 msgid "Processor"
 msgstr ""
@@ -10128,10 +10557,6 @@ msgstr ""
 msgid "Copied system summary to clipboard."
 msgstr ""
 
-#: progs/settings-hwinfo.inc progs/settings-power.inc
-msgid "Clipboard service is not running."
-msgstr ""
-
 #: progs/settings-hwinfo.inc
 msgid "settings — Hardware Information"
 msgstr ""
@@ -10150,11 +10575,6 @@ msgstr ""
 msgid ""
 "Up/Down: select   Tab / Left / Right: switch pane   r: refresh   Ctrl+C: "
 "copy page   Esc: back"
-msgstr ""
-
-#: progs/settings-hwinfo.inc
-#, c-format
-msgid "Copied %s to clipboard."
 msgstr ""
 
 #: progs/settings-hwinfo.inc
@@ -10855,6 +11275,30 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Power saver"
+msgstr ""
+
+#: progs/settings.c
+msgid "Open DKMS (new, RTX 20+)"
+msgstr ""
+
+#: progs/settings.c
+msgid "580xx DKMS (legacy / GSP off)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Off (not installed)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Auto (off with gpu-unlock on 580xx)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Off (580xx only)"
+msgstr ""
+
+#: progs/settings.c
+msgid "On"
 msgstr ""
 
 #: progs/settings.c
@@ -11957,11 +12401,6 @@ msgid "Drag a screen to position it; p edits its exact X,Y coordinates."
 msgstr ""
 
 #: progs/settings.c
-#, c-format
-msgid "%s is not installed."
-msgstr ""
-
-#: progs/settings.c
 msgid "Network connections: nmtui closed."
 msgstr ""
 
@@ -12059,10 +12498,6 @@ msgid "No saved network yet."
 msgstr ""
 
 #: progs/settings.c
-msgid "Tailscale"
-msgstr ""
-
-#: progs/settings.c
 msgid "SSH Server (sshd)"
 msgstr ""
 
@@ -12080,11 +12515,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Compute Node"
-msgstr ""
-
-#: progs/settings.c
-#, c-format
-msgid "Default compute storage: %.40s (change under System > Storage Volumes)."
 msgstr ""
 
 #: progs/settings.c
@@ -12661,6 +13091,34 @@ msgid "Maintenance Windows job failed: %s"
 msgstr ""
 
 #: progs/settings.c
+msgid "NVIDIA driver updated; the boot image was rebuilt. Restart to use it."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "NVIDIA driver change failed: %s"
+msgstr ""
+
+#: progs/settings.c
+msgid "Wait: an NVIDIA driver job is still running."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not start NVIDIA driver change: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Removing NVIDIA DKMS driver and rebuilding boot image..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Installing NVIDIA DKMS driver (%s) and rebuilding boot image..."
+msgstr ""
+
+#: progs/settings.c
 msgid "NVIDIA GPU unlock updated; the boot image was rebuilt."
 msgstr ""
 
@@ -12991,10 +13449,6 @@ msgid "TrackPoint Press-to-Select"
 msgstr ""
 
 #: progs/settings.c
-msgid "OFF"
-msgstr ""
-
-#: progs/settings.c
 msgid "ON "
 msgstr ""
 
@@ -13256,6 +13710,16 @@ msgid "Paired devices"
 msgstr ""
 
 #: progs/settings.c
+#, c-format
+msgid "port %d, running"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "port %d, starting"
+msgstr ""
+
+#: progs/settings.c
 msgid "Compute HTTPS API (optional)"
 msgstr ""
 
@@ -13265,6 +13729,54 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Compute GPU passthrough"
+msgstr ""
+
+#: progs/settings.c
+msgid "no NVIDIA driver"
+msgstr ""
+
+#: progs/settings.c
+msgid "root disk"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%.32s  [UNMOUNTED]  m: mount"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "%.32s  (%s free, m: unmount)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute storage volume"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "imgs:%d  envs:%d  jobs:%d/%d  vms:%d/%d   (Enter: manage)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: open Compute Node Manager"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "ssh %.32s -p %d   (Enter: view / copy)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: view / copy SSH config"
+msgstr ""
+
+#: progs/settings.c
+msgid "Client SSH config"
 msgstr ""
 
 #: progs/settings.c
@@ -13421,6 +13933,37 @@ msgid "  (search service off)"
 msgstr ""
 
 #: progs/settings.c
+#, c-format
+msgid "installed %s %.24s  (Enter: apply)"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "installed %s  (Enter: apply)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "not installed  (Enter: apply)"
+msgstr ""
+
+#: progs/settings.c
+msgid "NVIDIA driver (DKMS)"
+msgstr ""
+
+#: progs/settings.c
+msgid "(open requires GSP; use 580xx to disable)"
+msgstr ""
+
+#: progs/settings.c
+msgid "(NVreg_EnableGpuFirmware=0 active)"
+msgstr ""
+
+#: progs/settings.c
+msgid "NVIDIA GSP firmware"
+msgstr ""
+
+#: progs/settings.c
 msgid "Hybrid graphics policy"
 msgstr ""
 
@@ -13458,10 +14001,6 @@ msgstr ""
 
 #: progs/settings.c
 msgid " (firmware change pending restart)"
-msgstr ""
-
-#: progs/settings.c
-msgid "ON"
 msgstr ""
 
 #: progs/settings.c
@@ -14704,6 +15243,22 @@ msgid_plural "Mirrors are ranked again every %d days."
 msgstr[0] ""
 msgstr[1] ""
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "NVIDIA driver: %s. Press Enter to apply."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change NVIDIA GSP policy: %s"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "Setting NVIDIA GSP firmware policy to %s..."
+msgstr ""
+
 #: progs/settings.c
 msgid "Graphics policy saved. Applies when graphics next starts."
 msgstr ""
@@ -14935,6 +15490,18 @@ msgid "Saved to %s and applied."
 msgstr ""
 
 #: progs/settings.c
+msgid ""
+"Choose Open DKMS (new, RTX 20+), 580xx DKMS (legacy / GSP off), or Off; "
+"Enter applies."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Auto disables GSP when gpu-unlock is on (580xx); Open DKMS always uses GSP "
+"firmware."
+msgstr ""
+
+#: progs/settings.c
 msgid "automatic; keeps explicit display-card choices"
 msgstr ""
 
@@ -14964,6 +15531,23 @@ msgstr ""
 msgid "Enter: allow a full charge until unplugged or for up to 24 hours."
 msgstr ""
 
+#: progs/settings.c
+msgid ""
+"Left/Right: choose compute storage volume   m: mount or unmount selected "
+"volume."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: open interactive Compute Node Manager (storage, envs, jobs, VMs, "
+"images, pairing)."
+msgstr ""
+
+#: progs/settings.c
+msgid ""
+"Enter: view and copy generated OpenSSH client config for this compute node."
+msgstr ""
+
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Installed   Delete, twice: remove it"
@@ -14985,6 +15569,10 @@ msgstr ""
 #: progs/settings.c
 msgid ""
 "Enter+Left/Right: on/off   r: download model   Delete, twice: remove model"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter+Left/Right: choose storage volume   m: mount/unmount"
 msgstr ""
 
 #: progs/settings.c
@@ -16263,10 +16851,6 @@ msgstr ""
 
 #: progs/view.c
 msgid "Facing Pages (Center First Page)"
-msgstr ""
-
-#: progs/view.c
-msgid "Overview"
 msgstr ""
 
 #: progs/view.c

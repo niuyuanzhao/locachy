@@ -646,6 +646,20 @@ check("storage: image import writes into compute_storage volume base",
       r_cs_img.returncode == 0 and (storage_root / "vol-compute" / "locachy-compute" / "images" / "vol-img" / "rootfs").is_dir(),
       r_cs_img.stdout + r_cs_img.stderr)
 
+# status --json and status --tsv summarize mounted storage, images, envs, GPU, and SSH prefix
+r_st_m = subprocess.run(["python3", COMPUTE, "status", "--json"], env=cs_env, capture_output=True, text=True, timeout=30)
+st_m = json.loads(r_st_m.stdout) if r_st_m.returncode == 0 else {}
+r_st_tsv = subprocess.run(["python3", COMPUTE, "status", "--tsv"], env=cs_env, capture_output=True, text=True, timeout=30)
+check("status: mounted compute_storage reports inventory in JSON and TSV",
+      r_st_m.returncode == 0
+      and st_m.get("storage", {}).get("volume") == "vol-compute"
+      and st_m.get("storage", {}).get("mounted") is True
+      and any(im.get("name") == "vol-img" for im in st_m.get("images", []))
+      and r_st_tsv.returncode == 0
+      and "meta\tstorage_mounted\t1" in r_st_tsv.stdout
+      and "\nimage\tvol-img\t" in r_st_tsv.stdout,
+      f"json_rc={r_st_m.returncode} tsv_rc={r_st_tsv.returncode} tsv={r_st_tsv.stdout[:240]!r} err={r_st_m.stderr!r}")
+
 # Unmount vol-compute -> compute_base() MUST FAIL CLOSED (never fall back to root!)
 subprocess.run(["umount", str(storage_root / "vol-compute")], check=True)
 r_cs_unmounted = subprocess.run(["python3", COMPUTE, "image", "list", "--json"],
@@ -653,6 +667,19 @@ r_cs_unmounted = subprocess.run(["python3", COMPUTE, "image", "list", "--json"],
 check("storage: compute_storage fails closed when configured volume is unmounted",
       r_cs_unmounted.returncode != 0 and "not mounted" in r_cs_unmounted.stderr,
       r_cs_unmounted.stdout + r_cs_unmounted.stderr)
+
+# status must still succeed when compute_storage is unmounted so Settings TUI can show UNMOUNTED + mount action
+r_st_u = subprocess.run(["python3", COMPUTE, "status", "--json"], env=cs_env, capture_output=True, text=True, timeout=30)
+st_u = json.loads(r_st_u.stdout) if r_st_u.returncode == 0 else {}
+r_st_u_tsv = subprocess.run(["python3", COMPUTE, "status", "--tsv"], env=cs_env, capture_output=True, text=True, timeout=30)
+check("status: unmounted compute_storage succeeds and reports storage_mounted=0",
+      r_st_u.returncode == 0
+      and st_u.get("storage", {}).get("volume") == "vol-compute"
+      and st_u.get("storage", {}).get("mounted") is False
+      and "not mounted" in (st_u.get("storage", {}).get("error") or "")
+      and r_st_u_tsv.returncode == 0
+      and "meta\tstorage_mounted\t0" in r_st_u_tsv.stdout,
+      f"json_rc={r_st_u.returncode} tsv_rc={r_st_u_tsv.returncode} out={r_st_u.stdout[:240]!r} err={r_st_u.stderr!r}")
 
 # Also verify health endpoint exposes storage_volume & compute_base
 r_sv_clean = run_vol_cli("env", "remove", "volenv")

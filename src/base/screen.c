@@ -3331,6 +3331,17 @@ int screen_flip_complete(void)
     return completed;
 }
 
+void screen_flip_reset(void)
+{
+    if (card < 0 || noutputs != 1 || lent || window_mode || extended) return;
+    struct output *o = &outputs[0];
+    if (!o->dmabuf_flip_pending) return;
+    if (screen_flip_complete() > 0) return;
+    o->dmabuf_flip_pending = 0;
+    o->dmabuf_pending_fb_id = 0;
+    o->dmabuf_pending_slot = -1;
+}
+
 int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t w, uint32_t h)
 {
     if (!p || window_mode || extended) {

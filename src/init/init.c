@@ -3654,6 +3654,12 @@ static void storage_mount_all(void)
     say("init: mounting storage volumes at %.3f s", t0);
     pid_t spid = fork();
     if (spid == 0) {
+        sigprocmask(SIG_UNBLOCK, &handled, NULL);
+        int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDIN_FILENO);
+            close(null_fd);
+        }
         int log = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
         if (log >= 0) {
             dup2(log, STDOUT_FILENO);
@@ -3682,6 +3688,12 @@ static void storage_umount_all(void)
     }
     pid_t spid = fork();
     if (spid == 0) {
+        sigprocmask(SIG_UNBLOCK, &handled, NULL);
+        int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDIN_FILENO);
+            close(null_fd);
+        }
         execl("/usr/local/bin/locachy-storage", "locachy-storage", "umount-all", (char *)NULL);
         _exit(127);
     }

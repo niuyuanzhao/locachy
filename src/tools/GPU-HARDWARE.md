@@ -12,6 +12,30 @@ Under **Settings → Input & Output → NVIDIA GPU**, three controls do differen
 
 Confirm firmware changes with a second Enter. `locachy-gpu-graphics status --json` reads back the configured values. `set-mux hybrid|discrete` and `set-dgpu on|off` are privileged system jobs. Unsupported, unreadable or conflicting firmware controls are not guessed. If the machine exposes a different switch only in BIOS Setup, use BIOS Setup; an older UKI does not undo an already written firmware setting.
 
+## 0. NVIDIA DKMS Driver Management (`locachy-nvidia`)
+
+LOCachy manages NVIDIA drivers strictly through **DKMS** (never prebuilt kernel-flavor module packages), ordered new → old to match Arch Wiki guidance and LOCachy's multi-kernel selector (`locachy-pkg kernel select`):
+
+- **`open`** (new, default for Turing RTX 20+ / Ampere / Ada / Blackwell): `nvidia-open-dkms` + `nvidia-utils` + `dkms` + active kernel headers. Open kernel modules always run with GSP-RM firmware.
+- **`580xx`** (legacy / GSP-off fallback: Maxwell / Pascal / Volta, or Turing / Ampere / Ada laptops that need GSP firmware off via `NVreg_EnableGpuFirmware=0`, e.g. when GSP-RM conflicts with `gpu-unlock`): `nvidia-580xx-dkms` + `nvidia-580xx-utils` + `dkms` + active kernel headers. Note that `cachyos/nvidia-580xx-utils` depends on `lib32-nvidia-580xx-utils` from `[multilib]`; `locachy-nvidia` verifies `[multilib]` is enabled before modifying an installed driver.
+- **`off`**: removes installed NVIDIA driver packages, clears manifest leaves, removes `/etc/modprobe.d/40-locachy-nvidia.conf`, and rebuilds the UKI.
+
+Settings exposes two rows at the top of **Input & Output → NVIDIA GPU**:
+
+- **NVIDIA driver (DKMS)** (`nvidia_driver="open"|"580xx"|"off"`): picker row (`Enter` → `Left`/`Right` → `Enter` applies via `gpu-driver-set`).
+- **NVIDIA GSP firmware** (`nvidia_gsp="auto"|"off"|"on"`): applies to `580xx` via `gpu-driver-gsp`. `auto` writes `options nvidia NVreg_EnableGpuFirmware=0` whenever `gpu_unlock_targets` is active; `off` forces it off; `on` forces GSP on. `open` requires GSP-RM, so `locachy-nvidia` keeps GSP enabled on `open` and prints an advisory if `gpu-unlock` is also active.
+
+CLI interface:
+
+```sh
+locachy-nvidia status [--json | --tsv]
+locachy-nvidia set open|580xx|off
+locachy-nvidia gsp auto|off|on
+locachy-nvidia sync-dropin
+```
+
+Switching between `open` and `580xx` replaces conflicting packages atomically (`pacman -S --needed --noconfirm --ask 4`), updates `/etc/locachy/packages` (and `locachy-pkg`'s Vulkan detection recognizes `nvidia-580xx-utils` as well as `nvidia-utils`), writes `/etc/modprobe.d/40-locachy-nvidia.conf` (`blacklist nouveau`, `options nouveau modeset=0`, `options nvidia-drm modeset=1`, `softdep nvidia post: nvidia-uvm`, and optional `NVreg_EnableGpuFirmware`), refreshes `nvidia-powerd` when enabled, and rebuilds the UKI. `locachy-gpu-unlock` calls `locachy-nvidia sync-dropin` automatically whenever `gpu-unlock` is installed, toggled, or removed.
+
 ## 1. Pre-driver NVIDIA GPU Unlock (`locachy-gpu-unlock`)
 
 Some NVIDIA GPUs carry firmware speed selectors that are applied before the driver initializes. `locachy-gpu-unlock` integrates upstream [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock) directly into LOCachy. Upstream's kernel module lifts that limit for the PCI IDs in its recipe table; its README states the exact effect and scope. LOCachy adds one action in Settings (`Input & Output -> NVIDIA GPU -> NVIDIA GPU unlock (gpu-unlock)` -> `Enter`) or the CLI:

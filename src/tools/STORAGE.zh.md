@@ -74,6 +74,7 @@
 ## 多 NVMe 设备解析与安全规则
 
 - 成员设备每次都从 `lsblk` 按 LUKS2 `UUID` 与 GPT `PARTUUID` 动态查找，重启后 `/dev/nvme0n1` 与 `/dev/nvme1n1` 编号互换不影响挂载。
+- 在启动早期（`init.c` 在 `udev-client` 启动前调用 `locachy-storage mount-all`，此时 `/run/udev` 为空），`probe_lsblk()` 会直接通过 `blkid -o export`、`sfdisk -J` 与 `/sys/class/block/*/uevent` 补齐空的 `PARTUUID`/`UUID`/`FSTYPE`/`PARTLABEL`；LUKS 解锁会确保 `/dev/mapper/control` 与 `/run/cryptsetup` 存在、按需加载 `dm_mod`/`dm_crypt`、传入 `--disable-external-tokens`，并在 udev 尚未创建节点时根据 sysfs 直接补建 `/dev/dm-N` 与 `/dev/mapper/<名称>`。若副盘在 `coldplug()` 之后稍晚完成枚举，`mount-all` 还会进行有界重试。
 - 如果多个块设备报告相同的 `UUID` 或 `PARTUUID`（例如同时接入了整盘克隆盘），解析直接报错中止（`Ambiguous member UUID`），不做猜测。
 - 凡是承载 `/`、`/efi`、`/boot`、交换区、Live 介质（`/run/archiso`、`/run/initramfs`）、已登记存储卷或维护用 Windows（`locachy-winmaint`）的磁盘，都禁止格式化。维护用 Windows 分区（按 GPT 分区名 `LOCACHY_WIN_ESP`、`LOCACHY_WIN_MSR`、`LOCACHY_WIN_C` 或 `/var/lib/locachy/winmaint/state.json` 中记录的 `PARTUUID` 识别）绝不可附加，也会被 `remove --wipe` 拒绝；共享盘上的其他分区仍可附加，即使移除了该盘上的存储卷，该盘仍禁止格式化。
 - 多盘 Btrfs 阵列会先解锁全部在位 LUKS 成员并执行 `btrfs device scan`，再执行挂载。成员缺失时从不静默降级挂载；`status` 会报告 `degraded`，需由管理员显式执行 `mount 名称 --degraded`。

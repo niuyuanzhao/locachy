@@ -56,6 +56,8 @@
 | `winmaint-boot-default` | `locachy-winmaint boot-default` | `windows`、`locachy`，或 `windows --reboot` |
 | `winiso-fetch` | `locachy-winiso fetch windows` | 无，或 `--lang 语言`（如 `en-US`、`zh-CN`、`es-419`：2–3 个小写字母、`-`，再接 2 个大写字母或 3 位数字）（不在软件包域内） |
 | `winmaint-heal-boot` | `locachy-winmaint heal-boot` | 无 |
+| `gpu-driver-set` | `locachy-nvidia set` | `open`、`580xx` 或 `off` |
+| `gpu-driver-gsp` | `locachy-nvidia gsp` | `auto`、`off` 或 `on` |
 | `gpu-unlock-install` | `locachy-gpu-unlock install --target` | `all`，或以十六进制数字开头的 `[0-9a-fA-F:.,]` PCI BDF 列表（1–95 字节） |
 | `gpu-unlock-set` | `locachy-gpu-unlock set` | `all`、`off`，或以十六进制数字开头的 `[0-9a-fA-F:.,]` PCI BDF 列表（1–95 字节） |
 | `gpu-unlock-remove` | `locachy-gpu-unlock remove` | 无 |
@@ -73,7 +75,7 @@
 | `battery-model-fetch` | `locachy-battery-model fetch` | 无 |
 | `battery-model-remove` | `locachy-battery-model remove` | 无 |
 
-**软件包域。** 软件包（`pkg-*`）、内核（`kernel-*`）、软件源（`repos-*`）类任务、`locachy-source`，以及所有会改动宿主软件包、内核模块或启动镜像的类型（`boot`、`locachy-rebuild`、`tpm-*`、`secure-boot`、`security-policy`、`winmaint-create`、`winmaint-reclaim`、`gpu-unlock-install`、`gpu-unlock-set`、`gpu-unlock-remove`、`gpu-power-apply` 与 `app-host-build`），都像 `locachy-pkg` 一样持有 `/run/locachy/pkg.lock`：任务的 runner 在任务 cgroup 内、第一个步骤之前取得它（`flock` 等待：外部 pacman 的 guard 持有它时，先等 pacman 完成），每个步骤都继承这个描述符，因此工具能发现域已被持有，不会再次打开。工具自己的锁都在域之内取得（先域，再安全锁，再配置）；工具自己从不取 `pkg.lock`。固件类任务不持有它（`locachy-firmware` 持有 `firmware.lock`），`tb-sync`、`winmaint-boot-once`、`winmaint-boot-default`、`winmaint-heal-boot`、`winiso-fetch`、`gpu-powerd`、所有 `storage-*` 类型、`battery-model-fetch`、`battery-model-remove`，以及非宿主容器类任务（`app-build`、`app-rollback`、`app-remove`：`app-build` 不在宿主上安装任何软件包）也不持有它。`app-host-build` 持有它，因为 `host="1"` 的应用会把其软件包安装到宿主上，这是宿主软件包事务。任务种类由应用自身的 host 设置决定，由服务在受理时读取并检查（不符则拒绝：“the app's host setting changed; open it again”，即应用的 host 设置已改变，请重新打开）；任何客户端参数都不能决定它。路径是固定的：没有任何运行时设置能改变它，runner 会从每个步骤的环境中移除 `LOCACHY_PKG_LOCK`（测试构建只在编译时改动路径）。
+**软件包域。** 软件包（`pkg-*`）、内核（`kernel-*`）、软件源（`repos-*`）类任务、`locachy-source`，以及所有会改动宿主软件包、内核模块或启动镜像的类型（`boot`、`locachy-rebuild`、`tpm-*`、`secure-boot`、`security-policy`、`winmaint-create`、`winmaint-reclaim`、`gpu-driver-set`、`gpu-driver-gsp`、`gpu-unlock-install`、`gpu-unlock-set`、`gpu-unlock-remove`、`gpu-power-apply` 与 `app-host-build`），都像 `locachy-pkg` 一样持有 `/run/locachy/pkg.lock`：任务的 runner 在任务 cgroup 内、第一个步骤之前取得它（`flock` 等待：外部 pacman 的 guard 持有它时，先等 pacman 完成），每个步骤都继承这个描述符，因此工具能发现域已被持有，不会再次打开。工具自己的锁都在域之内取得（先域，再安全锁，再配置）；工具自己从不取 `pkg.lock`。固件类任务不持有它（`locachy-firmware` 持有 `firmware.lock`），`tb-sync`、`winmaint-boot-once`、`winmaint-boot-default`、`winmaint-heal-boot`、`winiso-fetch`、`gpu-powerd`、所有 `storage-*` 类型、`battery-model-fetch`、`battery-model-remove`，以及非宿主容器类任务（`app-build`、`app-rollback`、`app-remove`：`app-build` 不在宿主上安装任何软件包）也不持有它。`app-host-build` 持有它，因为 `host="1"` 的应用会把其软件包安装到宿主上，这是宿主软件包事务。任务种类由应用自身的 host 设置决定，由服务在受理时读取并检查（不符则拒绝：“the app's host setting changed; open it again”，即应用的 host 设置已改变，请重新打开）；任何客户端参数都不能决定它。路径是固定的：没有任何运行时设置能改变它，runner 会从每个步骤的环境中移除 `LOCACHY_PKG_LOCK`（测试构建只在编译时改动路径）。
 
 **自适应充电模型。** `battery-model-fetch` 与 `battery-model-remove` 不接受参数（任何参数都会被拒绝），也不持有软件包域。`battery-model-fetch` 以 root 运行 `/usr/local/bin/locachy-battery-model fetch`：该工具在 `locachy-net` 网络命名空间内，以 `nobody` 身份（uid 与 gid 均为 65534，清除附加组，设置 `no_new_privs`）通过 HTTPS 用 `curl` 下载两个固定文件；只有当每个文件的字节数与 SHA-512 都与固定清单一致后，才把它安装到 `/var/lib/locachy/battery/model/`。`battery-model-remove` 以 root 运行 `/usr/local/bin/locachy-battery-model remove`，不建立任何网络连接。
 

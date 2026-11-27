@@ -664,6 +664,97 @@ check("winmaint: CLI create --mode attach refuses Windows C: with the reason",
       and "winc" not in (wm_root / "etc/locachy/volumes.json").read_text(encoding="utf-8"),
       r_wm_att.stdout + r_wm_att.stderr)
 
+# 5.7 Pre-udev boot auto-mount: null lsblk metadata enriched by blkid/sfdisk,
+#     sysfs dm lookup for missing /dev/mapper/<name>, and bounded missing-member retry.
+preudev_tree = [
+    {
+        "path": "/dev/nvme1n1", "name": "/dev/nvme1n1", "kname": "nvme1n1", "type": "disk",
+        "pkname": None, "partuuid": None, "partlabel": None, "uuid": None, "fstype": None, "label": None,
+        "size": 2000000000000, "model": "Data-NVMe", "serial": "SDATA", "tran": "nvme",
+        "mountpoints": [None], "ro": False, "rm": False,
+        "children": [
+            {
+                "path": "/dev/nvme1n1p1", "name": "/dev/nvme1n1p1", "kname": "nvme1n1p1", "type": "part",
+                "pkname": "nvme1n1", "partuuid": None, "partlabel": None, "uuid": None, "fstype": None,
+                "label": None, "size": 2000000000000, "mountpoints": [None],
+            }
+        ],
+    }
+]
+orig_blkid = st._probe_blkid_export
+orig_sfdisk = st._probe_sfdisk_parts
+try:
+    st._probe_blkid_export = lambda p: (
+        {"UUID": "4f55d91e-27a0-4cd7-9a30-7d4582c9d26d", "TYPE": "crypto_LUKS"}
+        if p == "/dev/nvme1n1p1" else {}
+    )
+    st._probe_sfdisk_parts = lambda d: (
+        {"/dev/nvme1n1p1": {"partuuid": "65c9f417-e3a3-401e-9365-f1cd7026059d", "partlabel": "locachy-data"}}
+        if d == "/dev/nvme1n1" else {}
+    )
+    enriched = st._enrich_blockdevices_blkid(preudev_tree)
+    pnode = enriched[0]["children"][0]
+    vol_omen = st.validate_volume_entry({
+        "name": "data", "topology": "single", "fs": "btrfs", "raid": "", "role": "shared",
+        "encrypt": "luks", "auto_mount": True, "fs_uuid": "5f83c5d4-5408-4882-840a-be89699d8f53",
+        "members": [{
+            "part_uuid": "65c9f417-e3a3-401e-9365-f1cd7026059d",
+            "luks_uuid": "4f55d91e-27a0-4cd7-9a30-7d4582c9d26d",
+            "mapper": "locachy-vol-data-0",
+            "keyfile": "/etc/locachy/keys/vol-data-0.key",
+        }],
+        "mount_options": "", "created_at": "2026-11-26T13:42:58Z",
+    })
+    res_pre = st.resolve_volume_members(vol_omen, blockdevices=enriched)
+    check("pre-udev: blkid+sfdisk enrichment fills null lsblk fields and resolves LUKS member",
+          pnode["uuid"] == "4f55d91e-27a0-4cd7-9a30-7d4582c9d26d"
+          and pnode["partuuid"] == "65c9f417-e3a3-401e-9365-f1cd7026059d"
+          and pnode["fstype"] == "crypto_LUKS"
+          and res_pre[0]["present"] is True
+          and res_pre[0]["device_path"] == "/dev/nvme1n1p1",
+          f"pnode={pnode} res={res_pre}")
+finally:
+    st._probe_blkid_export = orig_blkid
+    st._probe_sfdisk_parts = orig_sfdisk
+
+# Sysfs dm/name discovery for pre-udev mapper nodes
+fake_sys_block = OUT / "fake-sys-block"
+(fake_sys_block / "dm-2" / "dm").mkdir(parents=True)
+(fake_sys_block / "dm-2" / "dm" / "name").write_text("locachy-vol-data-0\n", encoding="utf-8")
+(fake_sys_block / "dm-2" / "dev").write_text("253:2\n", encoding="utf-8")
+orig_sys_block = st.SYS_BLOCK_DIR
+try:
+    st.SYS_BLOCK_DIR = str(fake_sys_block)
+    dm_hit = st._find_dm_for_mapper("locachy-vol-data-0")
+    dm_miss = st._find_dm_for_mapper("locachy-vol-other-0")
+    check("pre-udev: _find_dm_for_mapper locates active dm-2 device from sysfs",
+          dm_hit == ("dm-2", 253, 2) and dm_miss is None, f"hit={dm_hit} miss={dm_miss}")
+finally:
+    st.SYS_BLOCK_DIR = orig_sys_block
+
+# mount_all bounded retry when a member disk finishes probing on attempt 2
+retry_vfile = OUT / "retry-volumes.json"
+os.environ["LOCACHY_VOLUMES_FILE"] = str(retry_vfile)
+os.environ["LOCACHY_STORAGE_MOUNT_RETRY_S"] = "0.01"
+st.save_config({"schema": 1, "volumes": [vol_omen]})
+attempts = {"data": 0}
+orig_mount_vol = st.mount_volume
+def fake_mount_vol(name, **kw):
+    attempts[name] = attempts.get(name, 0) + 1
+    if attempts[name] == 1:
+        raise st.StorageError("volume 'data': missing 1/1 member(s): 4f55d91e")
+    return {"name": name, "mountpoint": "/srv/storage/data", "drives_path": "", "already_mounted": False}
+try:
+    st.mount_volume = fake_mount_vol
+    mres = st.mount_all()
+    check("pre-udev: mount_all retries transient missing-member error and succeeds on attempt 2",
+          attempts["data"] == 2 and mres["mounted"] == ["data"] and not mres["errors"],
+          f"attempts={attempts} res={mres}")
+finally:
+    st.mount_volume = orig_mount_vol
+    del os.environ["LOCACHY_VOLUMES_FILE"]
+    del os.environ["LOCACHY_STORAGE_MOUNT_RETRY_S"]
+
 sys.exit(0 if fails == 0 else 1)
 PYEOF
 

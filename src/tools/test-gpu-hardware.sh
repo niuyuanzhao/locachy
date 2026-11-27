@@ -318,6 +318,229 @@ assert not dkms_dir.exists()
 assert not (proot / "etc/modprobe.d/50-locachy-hp-omen-gpu.conf").exists()
 assert not (proot / "etc/modules-load.d/50-locachy-hp-omen-gpu.conf").exists()
 print("PASS locachy-gpu-power machine layering, modes, auto/AC mapping, nvidia-powerd, and remove")
+
+# 4b. End-to-end mocked locachy-nvidia (open -> 580xx -> off, GSP drop-in, gpu-unlock sync, multilib guard)
+nvroot = out / "nv-root"
+(nvroot / "etc/locachy").mkdir(parents=True)
+(nvroot / "etc/locachy/packages").write_text("base\nlinux-cachyos-bore\n", encoding="utf-8")
+(nvroot / "etc/locachy/rc.conf").write_text(
+    'boot_kernel="linux-cachyos-bore"\ngpu_unlock_targets="all"\n', encoding="utf-8"
+)
+nv_db = nvroot / "var/lib/pacman/local"
+nv_db.mkdir(parents=True)
+nv_bin = out / "nv-bin"
+nv_bin.mkdir(parents=True)
+nv_log = out / "nv-calls.log"
+nv_ver_map = {
+    "nvidia-open-dkms": "595.45.04-1",
+    "nvidia-utils": "595.45.04-1",
+    "nvidia-580xx-dkms": "580.126.25-1",
+    "nvidia-580xx-utils": "580.126.25-1",
+    "dkms": "3.1.5-1",
+    "linux-cachyos-bore-headers": "6.19.1-1",
+}
+
+def db_install(pkg_name):
+    ver = nv_ver_map.get(pkg_name, "1.0-1")
+    d = nv_db / f"{pkg_name}-{ver}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "desc").write_text(f"%NAME%\n{pkg_name}\n\n%VERSION%\n{ver}\n", encoding="utf-8")
+
+def db_remove(pkg_name):
+    for d in list(nv_db.glob(f"{pkg_name}-*")):
+        if (d / "desc").is_file() and f"%NAME%\n{pkg_name}\n" in (d / "desc").read_text():
+            shutil.rmtree(d)
+
+write_exec(
+    nv_bin / "pacman",
+    f"""#!/usr/bin/env python3
+import os, pathlib, shutil, sys
+log = pathlib.Path({str(nv_log)!r})
+db = pathlib.Path({str(nv_db)!r})
+vers = {nv_ver_map!r}
+args = sys.argv[1:]
+with log.open("a", encoding="utf-8") as f:
+    f.write("pacman " + " ".join(args) + "\\n")
+if "-Sp" in args:
+    pkg = args[-1]
+    sys.exit(0 if pkg in vers else 1)
+if "-Si" in args:
+    pkg = args[-1]
+    if pkg == "nvidia-580xx-utils":
+        print("Name            : nvidia-580xx-utils")
+        print("Depends On      : opencl-nvidia-580xx  lib32-nvidia-580xx-utils")
+        sys.exit(0)
+    print(f"Name            : {{pkg}}")
+    print("Depends On      : dkms")
+    sys.exit(0)
+if "-S" in args:
+    pkgs = [a for a in args if not a.startswith("-") and a != "4"]
+    if any(p.startswith("nvidia-580xx") for p in pkgs):
+        for old in ("nvidia-open-dkms", "nvidia-utils"):
+            for d in list(db.glob(f"{{old}}-*")):
+                shutil.rmtree(d)
+    if any(p in ("nvidia-open-dkms", "nvidia-utils") for p in pkgs):
+        for old in ("nvidia-580xx-dkms", "nvidia-580xx-utils"):
+            for d in list(db.glob(f"{{old}}-*")):
+                shutil.rmtree(d)
+    for p in pkgs:
+        v = vers.get(p, "1.0-1")
+        d = db / f"{{p}}-{{v}}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "desc").write_text(f"%NAME%\\n{{p}}\\n\\n%VERSION%\\n{{v}}\\n", encoding="utf-8")
+    sys.exit(0)
+if "-Rns" in args:
+    pkgs = [a for a in args if not a.startswith("-")]
+    for p in pkgs:
+        for d in list(db.glob(f"{{p}}-*")):
+            shutil.rmtree(d)
+    sys.exit(0)
+sys.exit(0)
+""",
+)
+
+write_exec(
+    nv_bin / "locachy-pkg",
+    f"""#!/usr/bin/env python3
+import pathlib, shutil, sys
+log = pathlib.Path({str(nv_log)!r})
+db = pathlib.Path({str(nv_db)!r})
+mf = pathlib.Path({str(nvroot / "etc/locachy/packages")!r})
+vers = {nv_ver_map!r}
+args = sys.argv[1:]
+with log.open("a", encoding="utf-8") as f:
+    f.write("locachy-pkg " + " ".join(args) + "\\n")
+def mf_add(pkgs):
+    lines = mf.read_text(encoding="utf-8").splitlines()
+    for p in pkgs:
+        if p not in lines:
+            lines.append(p)
+    mf.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+def mf_rm(pkgs):
+    s = set(pkgs)
+    lines = [l for l in mf.read_text(encoding="utf-8").splitlines() if l.strip() not in s]
+    mf.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+if args[:3] == ["kernel", "headers", "on"]:
+    v = vers["linux-cachyos-bore-headers"]
+    d = db / f"linux-cachyos-bore-headers-{{v}}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "desc").write_text(f"%NAME%\\nlinux-cachyos-bore-headers\\n\\n%VERSION%\\n{{v}}\\n", encoding="utf-8")
+    sys.exit(0)
+if args and args[0] == "install":
+    for p in args[1:]:
+        v = vers.get(p, "1.0-1")
+        d = db / f"{{p}}-{{v}}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "desc").write_text(f"%NAME%\\n{{p}}\\n\\n%VERSION%\\n{{v}}\\n", encoding="utf-8")
+    mf_add(args[1:])
+    sys.exit(0)
+if args and args[0] == "remove":
+    for p in args[1:]:
+        for d in list(db.glob(f"{{p}}-*")):
+            shutil.rmtree(d)
+    mf_rm(args[1:])
+    sys.exit(0)
+sys.exit(0)
+""",
+)
+
+write_exec(
+    nv_bin / "locachy-boot",
+    f"""#!/bin/sh
+printf 'locachy-boot %s\\n' "$*" >>"{nv_log}"
+""",
+)
+
+nvenv = dict(os.environ)
+nvenv.update({
+    "PATH": f"{nv_bin}:{os.environ.get('PATH', '')}",
+    "LOCACHY_NVIDIA_ROOT": str(nvroot),
+    "LOCACHY_NVIDIA_SYS_PCI": str(sys_pci),
+    "LOCACHY_NVIDIA_SYS_MODULE": str(out / "no-nv-mod"),
+    "LOCACHY_NVIDIA_PKG": str(nv_bin / "locachy-pkg"),
+    "LOCACHY_NVIDIA_BOOT": str(nv_bin / "locachy-boot"),
+    "LOCACHY_NVIDIA_POWER": str(out / "no-nv-power"),
+    "LOCACHY_NVIDIA_NO_NETNS": "1",
+})
+
+def run_nv(*args, expect_ok=True):
+    r = subprocess.run([sys.executable, "-B", str(src / "link/locachy-nvidia"), *args],
+                       env=nvenv, capture_output=True, text=True)
+    if expect_ok:
+        assert r.returncode == 0, f"locachy-nvidia {args} failed: {r.stderr}\\n{r.stdout}"
+    else:
+        assert r.returncode != 0, f"locachy-nvidia {args} unexpectedly succeeded"
+    return r
+
+nst0 = json.loads(run_nv("status", "--json").stdout)
+assert nst0["branches"] == ["open", "580xx", "off"]
+assert nst0["installed_branch"] == "off" and nst0["configured_branch"] == "off"
+assert len(nst0["nvidia_gpus"]) == 1 and nst0["nvidia_gpus"][0]["device"] == "0x2460"
+
+# Install open DKMS (new branch first)
+run_nv("set", "open")
+nst_open = json.loads(run_nv("status", "--json").stdout)
+assert nst_open["installed_branch"] == "open" and nst_open["configured_branch"] == "open"
+assert nst_open["dkms_version"] == "595.45.04-1" and nst_open["kernel_headers_installed"] is True
+assert nst_open["gsp_disabled_configured"] is False
+assert "gpu-unlock" in nst_open["gpu_unlock_advisory"]
+mp_open = (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").read_text()
+assert "blacklist nouveau" in mp_open and "options nvidia-drm modeset=1" in mp_open
+assert "NVreg_EnableGpuFirmware=0" not in mp_open
+nv_log_txt = nv_log.read_text()
+assert "locachy-pkg kernel headers on" in nv_log_txt
+assert "locachy-pkg install dkms" in nv_log_txt
+assert "locachy-pkg install nvidia-open-dkms nvidia-utils" in nv_log_txt
+
+# Multilib disabled guard refuses 580xx cleanly before touching installed open driver
+(nvroot / "etc/locachy/rc.conf").write_text(
+    (nvroot / "etc/locachy/rc.conf").read_text() + 'repo_multilib="0"\n', encoding="utf-8"
+)
+r_no_ml = run_nv("set", "580xx", expect_ok=False)
+assert "multilib" in r_no_ml.stderr.lower()
+assert json.loads(run_nv("status", "--json").stdout)["installed_branch"] == "open"
+
+# Re-enable multilib and switch open -> 580xx atomically (--ask 4) with auto GSP off (gpu_unlock active)
+(nvroot / "etc/locachy/rc.conf").write_text(
+    (nvroot / "etc/locachy/rc.conf").read_text().replace('repo_multilib="0"\n', ""), encoding="utf-8"
+)
+run_nv("set", "580xx")
+nst_580 = json.loads(run_nv("status", "--json").stdout)
+assert nst_580["installed_branch"] == "580xx" and nst_580["dkms_version"] == "580.126.25-1"
+assert nst_580["gsp_disabled_configured"] is True
+assert nst_580["gpu_unlock_advisory"] == ""
+mp_580 = (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").read_text()
+assert "options nvidia NVreg_EnableGpuFirmware=0" in mp_580
+mf_580 = (nvroot / "etc/locachy/packages").read_text()
+assert "nvidia-580xx-dkms" in mf_580 and "nvidia-580xx-utils" in mf_580
+assert "nvidia-open-dkms" not in mf_580 and "nvidia-utils\n" not in mf_580
+assert "pacman -S --needed --noconfirm --ask 4 nvidia-580xx-dkms nvidia-580xx-utils" in nv_log.read_text()
+
+# TSV status output matches settings.c parser contract
+tsv_580 = run_nv("status", "--tsv").stdout
+assert "installed\t580xx\n" in tsv_580
+assert "dkms_version\t580.126.25-1\n" in tsv_580
+assert "gsp_disabled\t1\n" in tsv_580
+
+# GSP on/off/auto and sync-dropin when gpu_unlock_targets is disabled
+run_nv("gsp", "on")
+assert "options nvidia NVreg_EnableGpuFirmware=1" in (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").read_text()
+run_nv("gsp", "auto")
+assert "options nvidia NVreg_EnableGpuFirmware=0" in (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").read_text()
+(nvroot / "etc/locachy/rc.conf").write_text(
+    (nvroot / "etc/locachy/rc.conf").read_text().replace('gpu_unlock_targets="all"', 'gpu_unlock_targets="off"'),
+    encoding="utf-8",
+)
+run_nv("sync-dropin")
+assert "NVreg_EnableGpuFirmware" not in (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").read_text()
+
+# Remove driver cleanly
+run_nv("set", "off")
+nst_off = json.loads(run_nv("status", "--json").stdout)
+assert nst_off["installed_branch"] == "off" and nst_off["configured_branch"] == "off"
+assert not (nvroot / "etc/modprobe.d/40-locachy-nvidia.conf").exists()
+assert "nvidia-580xx-dkms" not in (nvroot / "etc/locachy/packages").read_text()
+print("PASS locachy-nvidia open/580xx/off DKMS flow, atomic switch, multilib guard, GSP & sync-dropin")
 PY
 
 # 5. Compile hp_omen_gpu.c against real Linux kernel headers when available (no install, no load).

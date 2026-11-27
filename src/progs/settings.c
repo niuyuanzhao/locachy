@@ -443,8 +443,34 @@ static const char *const power_profile_labels[NPPROFS] = {
     N_("Auto (battery power-saving)"), N_("Power saver"), N_("Balanced"), N_("Performance"),
 };
 static int power_profile = PPROF_AUTO;
-/* NVIDIA pre-driver GPU unlock (gpu_unlock_targets) and machine GPU power
- * control (gpu_power_method, gpu_power_mode, nvidia_powerd). */
+/* NVIDIA DKMS driver (locachy-nvidia: open -> 580xx -> off; nvidia_gsp: auto/off/on),
+ * pre-driver GPU unlock (gpu_unlock_targets), and machine GPU power control
+ * (gpu_power_method, gpu_power_mode, nvidia_powerd). */
+#ifndef LOCACHY_NVIDIA
+#define LOCACHY_NVIDIA "/usr/local/bin/locachy-nvidia"
+#endif
+enum { NVD_OPEN, NVD_580XX, NVD_OFF, NNVD_BRANCHES };
+static const char *const gpu_driver_values[NNVD_BRANCHES] = { "open", "580xx", "off" };
+static const char *const gpu_driver_labels[NNVD_BRANCHES] = {
+    N_("Open DKMS (new, RTX 20+)"),
+    N_("580xx DKMS (legacy / GSP off)"),
+    N_("Off (not installed)"),
+};
+enum { NVGSP_AUTO, NVGSP_OFF, NVGSP_ON, NNVGSP_MODES };
+static const char *const gpu_gsp_values[NNVGSP_MODES] = { "auto", "off", "on" };
+static const char *const gpu_gsp_labels[NNVGSP_MODES] = {
+    N_("Auto (off with gpu-unlock on 580xx)"),
+    N_("Off (580xx only)"),
+    N_("On"),
+};
+static int gpu_driver_choice = NVD_OPEN;
+static int gpu_driver_cfg = NVD_OFF;
+static int gpu_driver_installed = NVD_OFF;
+static int gpu_driver_loaded;
+static char gpu_driver_ver[48];
+static int gpu_gsp_mode = NVGSP_AUTO;
+static int gpu_gsp_disabled;
+static int gpu_driver_job;
 static char gpu_unlock_cfg[96] = "off";
 static int gpu_unlock_job;
 static char gpu_power_method[32];
@@ -1472,6 +1498,16 @@ static void on_rc(const char *name, const char *value, void *arg)
         if (v >= 40 && v <= 4096) winmaint_size_gib = v;
     } else if (strcmp(name, "gpu_graphics_policy") == 0) {
         gpu_graphics_auto = strcmp(value, "auto") == 0;
+    } else if (strcmp(name, "nvidia_driver") == 0) {
+        gpu_driver_cfg = NVD_OFF;
+        for (int i = 0; i < NNVD_BRANCHES; i++) {
+            if (strcmp(value, gpu_driver_values[i]) == 0) gpu_driver_cfg = i;
+        }
+        gpu_driver_choice = gpu_driver_cfg;
+    } else if (strcmp(name, "nvidia_gsp") == 0) {
+        if (strcmp(value, "0") == 0 || strcmp(value, "off") == 0) gpu_gsp_mode = NVGSP_OFF;
+        else if (strcmp(value, "1") == 0 || strcmp(value, "on") == 0) gpu_gsp_mode = NVGSP_ON;
+        else gpu_gsp_mode = NVGSP_AUTO;
     } else if (strcmp(name, "gpu_unlock_targets") == 0) {
         const char *v = value[0] && strcmp(value, "0") != 0 ? value : "off";
         snprintf(gpu_unlock_cfg, sizeof gpu_unlock_cfg, "%s", v);
@@ -3529,7 +3565,8 @@ static int paired_devices_index(void)
     return extd_paired_only_index() + 1;
 }
 
-/* Headless compute node: service_compute, compute_bind_tb, compute_gpu. */
+/* Headless compute node: service_compute, compute_bind_tb, compute_gpu,
+ * compute_storage, interactive Compute Node Manager, Client SSH config. */
 static int compute_index(void)
 {
     return paired_devices_index() + 1;
@@ -3539,7 +3576,7 @@ static int compute_index(void)
  * it now. Shown in the Maintenance Windows group, after "Boot Windows once". */
 static int winmaint_mode_index(void)
 {
-    return compute_index() + 3;
+    return compute_index() + 6;
 }
 
 /* Maintenance Windows: size, status (create/reclaim), boot once, heal boot, VM. */
@@ -3780,11 +3817,22 @@ static int search_docs_index(void)
     return search_svc_index() + 1;
 }
 
-/* NVIDIA GPU rows: the pre-driver unlock (gpu_unlock_targets), the machine's
- * power mode (gpu_power_method, gpu_power_mode), and nvidia_powerd. */
-static int gpu_unlock_index(void)
+/* NVIDIA GPU rows: DKMS driver branch (open/580xx/off), GSP firmware policy,
+ * pre-driver unlock (gpu_unlock_targets), machine power mode, nvidia_powerd,
+ * and hybrid/firmware graphics routing. */
+static int gpu_driver_index(void)
 {
     return search_docs_index() + 1;
+}
+
+static int gpu_gsp_index(void)
+{
+    return gpu_driver_index() + 1;
+}
+
+static int gpu_unlock_index(void)
+{
+    return gpu_gsp_index() + 1;
 }
 
 static int gpu_power_index(void)
@@ -5493,6 +5541,7 @@ static void category_entries(int cat)
         add_items(extd_index(), 1);
         add_items(display_card_index(), 4);
         add_title(_("NVIDIA GPU"));
+        add_items(gpu_driver_index(), 2);
         add_items(gpu_graphics_index(), 3);
         add_items(gpu_unlock_index(), 1);
         break;
@@ -5536,13 +5585,7 @@ static void category_entries(int cat)
         add_title(_("Terminal"));
         add_items(tnet_index(), 1);
         add_title(_("Compute Node"));
-        add_items(compute_index(), 3);
-        if (compute_storage_cfg[0]) {
-            char csnote[128];
-            snprintf(csnote, sizeof csnote, _("Default compute storage: %.40s (change under System > Storage Volumes)."),
-                     compute_storage_cfg);
-            add_entry(E_NOTE, csnote);
-        }
+        add_items(compute_index(), 6);
         break;
     case CAT_APPEARANCE:
         add_title(_("Colors"));
@@ -6969,6 +7012,71 @@ static int gpu_unlock_present(void)
     return access(GPU_UNLOCK_DOC, R_OK) == 0;
 }
 
+/* locachy-nvidia status --tsv: the installed DKMS branch, version, and GSP state. */
+static void load_gpu_driver_status(void)
+{
+    char out[512], *save = NULL;
+    char *const argv[] = { LOCACHY_NVIDIA, "status", "--tsv", NULL };
+    gpu_driver_installed = NVD_OFF;
+    gpu_driver_ver[0] = '\0';
+    gpu_gsp_disabled = 0;
+    gpu_driver_loaded = 1;
+    out[0] = '\0';
+    if (access(LOCACHY_NVIDIA, X_OK) != 0) return;
+    command_output(argv, out, sizeof out);
+    for (char *line = strtok_r(out, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!strncmp(line, "installed\t", 10)) {
+            for (int i = 0; i < NNVD_BRANCHES; i++) {
+                if (!strcmp(line + 10, gpu_driver_values[i])) gpu_driver_installed = i;
+            }
+        } else if (!strncmp(line, "dkms_version\t", 13)) {
+            snprintf(gpu_driver_ver, sizeof gpu_driver_ver, "%s", line + 13);
+        } else if (!strncmp(line, "gsp_disabled\t", 13)) {
+            gpu_gsp_disabled = atoi(line + 13) != 0;
+        }
+    }
+    if (gpu_driver_cfg == NVD_OFF && gpu_driver_installed != NVD_OFF) {
+        gpu_driver_choice = gpu_driver_installed;
+    }
+}
+
+static void gpu_driver_check(void)
+{
+    struct jobs_row r;
+    char log[96];
+    if (!gpu_driver_job || !job_ended(gpu_driver_job, &r, log, sizeof log)) return;
+    gpu_driver_job = 0;
+    rc_read(on_rc, NULL);
+    load_gpu_driver_status();
+    entries_dirty = 1;
+    full_redraw = 1;
+    if (strcmp(r.state, "done") == 0) {
+        snprintf(notice, sizeof notice, "%s", _("NVIDIA driver updated; the boot image was rebuilt. Restart to use it."));
+    } else {
+        snprintf(notice, sizeof notice, _("NVIDIA driver change failed: %s"), r.last[0] ? r.last : log);
+    }
+}
+
+static void gpu_driver_apply_row(void)
+{
+    char why[160] = "";
+    int id = 0, pos = 0;
+    if (gpu_driver_job) {
+        snprintf(notice, sizeof notice, "%s", _("Wait: an NVIDIA driver job is still running."));
+        return;
+    }
+    const char *args[] = { gpu_driver_values[gpu_driver_choice], NULL };
+    if (jobs_submit("gpu-driver-set", args, &id, &pos, why, sizeof why) < 0) {
+        snprintf(notice, sizeof notice, _("Could not start NVIDIA driver change: %s"), why);
+        return;
+    }
+    gpu_driver_job = id;
+    snprintf(notice, sizeof notice, gpu_driver_choice == NVD_OFF ?
+             _("Removing NVIDIA DKMS driver and rebuilding boot image...") :
+             _("Installing NVIDIA DKMS driver (%s) and rebuilding boot image..."),
+             gpu_driver_values[gpu_driver_choice]);
+}
+
 static void gpu_unlock_check(void)
 {
     struct jobs_row r;
@@ -7517,6 +7625,8 @@ static void load_storage_status(void)
     }
 }
 
+static void load_compute_status(void);
+
 static void storage_check(void)
 {
     struct jobs_row r;
@@ -7529,6 +7639,7 @@ static void storage_check(void)
     compute_storage_cfg[0] = '\0';
     rc_read(on_rc, NULL);
     load_storage_status();
+    load_compute_status();
     entries_dirty = 1;
     full_redraw = 1;
     if (strcmp(r.state, "done") == 0) {
@@ -7852,6 +7963,8 @@ static void storage_manage_disks_row(void)
              _("Storage manager closed.") : _("Storage manager did not finish."));
 }
 
+#include "settings-compute.inc"
+
 /* Reopened or polled: the active system jobs (including ones started from
  * packages or firmware, or another settings window), followed while they run
  * or wait. A slot already tracking a job keeps it; otherwise a running job
@@ -7863,7 +7976,7 @@ static void adopt_jobs(void)
     int have_repos = repos_job != 0, have_boot = boot_job != 0, have_pkg = pkg_job != 0, have_tpm = tpm_job != 0;
     int have_security = security_job != 0, have_winmaint = winmaint_job != 0, have_tb = tb_sync_job != 0;
     int have_gpu_unlock = gpu_unlock_job != 0, have_gpu_power = gpu_power_job != 0, have_storage = storage_job != 0;
-    int have_gpu_graphics = gpu_graphics_job != 0, have_bat_model = bat_model_job != 0;
+    int have_gpu_graphics = gpu_graphics_job != 0, have_bat_model = bat_model_job != 0, have_gpu_driver = gpu_driver_job != 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n; i++) {
             const struct jobs_row *r = &rows[i];
@@ -7891,6 +8004,9 @@ static void adopt_jobs(void)
             } else if (!have_tb && strcmp(r->kind, "tb-sync") == 0) {
                 tb_sync_job = r->id;
                 have_tb = 1;
+            } else if (!have_gpu_driver && strncmp(r->kind, "gpu-driver-", 11) == 0) {
+                gpu_driver_job = r->id;
+                have_gpu_driver = 1;
             } else if (!have_gpu_unlock && strncmp(r->kind, "gpu-unlock-", 11) == 0) {
                 gpu_unlock_job = r->id;
                 have_gpu_unlock = 1;
@@ -8149,11 +8265,13 @@ static int enter_row(int idx)
            idx == duress_index() ||
            idx == tz_index() || idx == tz_index() + 2 || (idx >= imek_index() && idx < imek_index() + NIME_KEYS) ||
            idx == paired_devices_index() ||
+           idx == compute_index() + 4 || idx == compute_index() + 5 ||
            (idx >= winmaint_index() + 1 && idx < winmaint_index() + 5) ||
            idx == winmaint_mode_index() || idx == winmaint_mode_index() + 1 ||
            (idx >= system_keymap_index() && idx < kb_index() + nkeyboards_seen) ||
            idx == bat_page_index() || idx == bat_full_index() ||
            idx == hwinfo_index() || idx == hwcopy_index() || idx == nmtui_index() || idx == ts_index() + 2 ||
+           idx == gpu_driver_index() ||
            idx == gpu_unlock_index() || idx == gpu_graphics_index() + 1 || idx == gpu_graphics_index() + 2 ||
            idx == storage_disks_index() ||
            idx == ssh_index() + 1 || idx == ssh_index() + 3 || idx == ssh_index() + 4;
@@ -8194,7 +8312,8 @@ static int component_row(int idx, int *present, int *complete)
  * a camera, a finger): Enter opens them, Enter again does it. */
 static int picker_row(int idx)
 {
-    return idx == boot_index() + 3 || idx == fc_index() + 4 || idx == fp_index() + 3 || idx == cpu_opt_index();
+    return idx == boot_index() + 3 || idx == fc_index() + 4 || idx == fp_index() + 3 ||
+           idx == cpu_opt_index() || idx == gpu_driver_index();
 }
 
 /* Lines that only show something; Enter says what it is. */
@@ -8393,6 +8512,7 @@ static void refresh_net_status(void)
     snprintf(tailscale_line, sizeof tailscale_line, "%s", tailscale_status());
     snprintf(clash_line, sizeof clash_line, "%s", clash_status());
     snprintf(tor_line, sizeof tor_line, "%s", tor_status());
+    load_compute_status();
     net_refreshed_at = uptime();
     net_due = 0;
 }
@@ -8465,6 +8585,10 @@ static void item_text(int idx, char *line, size_t size)
             load_ssh_keys();
         } else if (idx == ssh_index() + 4 && !ssh_host_fp_loaded) {
             load_ssh_host_fp();
+        } else if ((idx == gpu_driver_index() || idx == gpu_gsp_index()) && !gpu_driver_loaded) {
+            load_gpu_driver_status();
+        } else if (idx >= compute_index() && idx < compute_index() + 6 && !compute_snap.loaded) {
+            load_compute_status();
         }
     }
     /* The pointer's rows (first TrackPoint's three, when there is one), then
@@ -8711,19 +8835,81 @@ static void item_text(int idx, char *line, size_t size)
         snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Paired devices"), 32), vbuf);
         return;
     }
-    if ((i = idx - compute_index()) >= 0 && i < 3) {
+    if ((i = idx - compute_index()) >= 0 && i < 6) {
         if (i == 0) {
-            snprintf(line, size, "%.95s [%s]", ui_pad(label, sizeof label, _("Compute HTTPS API (optional)"), 32),
-                     compute_on ? _("ON ") : _("OFF"));
+            if (compute_on && compute_snap.loaded) {
+                snprintf(vbuf, sizeof vbuf, compute_snap.daemon_running ?
+                         _("port %d, running") : _("port %d, starting"), compute_snap.port);
+                snprintf(line, size, "%.95s [%s]  %s",
+                         ui_pad(label, sizeof label, _("Compute HTTPS API (optional)"), 32),
+                         _("ON "), vbuf);
+            } else {
+                snprintf(line, size, "%.95s [%s]",
+                         ui_pad(label, sizeof label, _("Compute HTTPS API (optional)"), 32),
+                         compute_on ? _("ON ") : _("OFF"));
+            }
         } else if (i == 1) {
             snprintf(line, size, "  %.95s [%s]%s%s",
                      ui_pad(label, sizeof label, _("Compute API over Thunderbolt"), 30),
                      compute_bind_tb ? _("ON ") : _("OFF"),
                      tb_sync_job ? "  " : "", tb_sync_job ? _("working...") : "");
+        } else if (i == 2) {
+            if (compute_snap.loaded && compute_snap.nvidia_version[0]) {
+                snprintf(line, size, "  %.95s [%s]  NVIDIA %.24s (%d devs)",
+                         ui_pad(label, sizeof label, _("Compute GPU passthrough"), 30),
+                         compute_gpu ? _("ON ") : _("OFF"),
+                         compute_snap.nvidia_version, compute_snap.gpu_devices);
+            } else if (compute_snap.loaded && compute_snap.gpu_devices == 0) {
+                snprintf(line, size, "  %.95s [%s]  %s",
+                         ui_pad(label, sizeof label, _("Compute GPU passthrough"), 30),
+                         compute_gpu ? _("ON ") : _("OFF"), _("no NVIDIA driver"));
+            } else {
+                snprintf(line, size, "  %.95s [%s]",
+                         ui_pad(label, sizeof label, _("Compute GPU passthrough"), 30),
+                         compute_gpu ? _("ON ") : _("OFF"));
+            }
+        } else if (i == 3) {
+            const char *svol = compute_storage_cfg[0] ? compute_storage_cfg : compute_snap.storage_volume;
+            if (storage_job && (strcmp(storage_what, "set-compute") == 0 ||
+                                strcmp(storage_what, "mount") == 0 || strcmp(storage_what, "umount") == 0)) {
+                snprintf(vbuf, sizeof vbuf, "%s", _("working..."));
+            } else if (!svol[0]) {
+                snprintf(vbuf, sizeof vbuf, "%s", _("root disk"));
+            } else if (compute_snap.loaded && !compute_snap.storage_mounted) {
+                snprintf(vbuf, sizeof vbuf, _("%.32s  [UNMOUNTED]  m: mount"), svol);
+            } else if (compute_snap.loaded && compute_snap.storage_total > 0) {
+                char free_s[24];
+                format_bytes_iec(compute_snap.storage_free, free_s, sizeof free_s);
+                snprintf(vbuf, sizeof vbuf, _("%.32s  (%s free, m: unmount)"), svol, free_s);
+            } else {
+                snprintf(vbuf, sizeof vbuf, "%.32s", svol);
+            }
+            snprintf(line, size, "  %.95s < %s >",
+                     ui_pad(label, sizeof label, _("Compute storage volume"), 30), vbuf);
+        } else if (i == 4) {
+            if (compute_snap.loaded) {
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, _("imgs:%d  envs:%d  jobs:%d/%d  vms:%d/%d   (Enter: manage)"),
+                         compute_snap.nimages, compute_snap.nenvs,
+                         compute_snap.njobs_running, compute_snap.njobs,
+                         compute_snap.nvms_running, compute_snap.nvms);
+            } else {
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, "%s", _("Enter: open Compute Node Manager"));
+            }
+            snprintf(line, size, "  %.95s %s",
+                     ui_pad(label, sizeof label, _("Compute Node Manager"), 30), vbuf);
         } else {
-            snprintf(line, size, "  %.95s [%s]",
-                     ui_pad(label, sizeof label, _("Compute GPU passthrough"), 30),
-                     compute_gpu ? _("ON ") : _("OFF"));
+            if (compute_snap.loaded && compute_snap.ssh_prefix[0]) {
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, _("ssh %.32s -p %d   (Enter: view / copy)"),
+                         compute_snap.ssh_prefix, compute_snap.ssh_port);
+            } else {
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, "%s", _("Enter: view / copy SSH config"));
+            }
+            snprintf(line, size, "  %.95s %s",
+                     ui_pad(label, sizeof label, _("Client SSH config"), 30), vbuf);
         }
         return;
     }
@@ -8864,6 +9050,37 @@ static void item_text(int idx, char *line, size_t size)
         snprintf(line, size, "  %.95s [%s]%s", ui_pad(label, sizeof label, _("Document content indexing"), 30),
                  search_docs ? _("ON ") : _("OFF"),
                  search_on ? "" : _("  (search service off)"));
+        return;
+    }
+    if (idx == gpu_driver_index()) {
+        char state[80] = "";
+        if (gpu_driver_job) {
+            snprintf(state, sizeof state, "%s", _("working..."));
+        } else if (gpu_driver_installed == NVD_OPEN || gpu_driver_installed == NVD_580XX) {
+            if (gpu_driver_ver[0]) {
+                snprintf(state, sizeof state, _("installed %s %.24s  (Enter: apply)"),
+                         gpu_driver_values[gpu_driver_installed], gpu_driver_ver);
+            } else {
+                snprintf(state, sizeof state, _("installed %s  (Enter: apply)"),
+                         gpu_driver_values[gpu_driver_installed]);
+            }
+        } else {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            snprintf(state, sizeof state, "%s", _("not installed  (Enter: apply)"));
+        }
+        snprintf(line, size, "%.95s < %s >  %s",
+                 ui_pad(label, sizeof label, _("NVIDIA driver (DKMS)"), 32),
+                 _(gpu_driver_labels[gpu_driver_choice]), state);
+        return;
+    }
+    if (idx == gpu_gsp_index()) {
+        const char *note = gpu_driver_job ? _("working...") :
+                           (gpu_driver_installed == NVD_OPEN || (gpu_driver_installed == NVD_OFF && gpu_driver_cfg == NVD_OPEN)) ?
+                           _("(open requires GSP; use 580xx to disable)") :
+                           gpu_gsp_disabled ? _("(NVreg_EnableGpuFirmware=0 active)") : "";
+        snprintf(line, size, "  %.95s < %s >%s%s",
+                 ui_pad(label, sizeof label, _("NVIDIA GSP firmware"), 30),
+                 _(gpu_gsp_labels[gpu_gsp_mode]), note[0] ? "  " : "", note);
         return;
     }
     if (idx == gpu_graphics_index()) {
@@ -9926,6 +10143,10 @@ static void adjust(int dir)
                  _("Compute GPU passthrough off; applies to new compute jobs."));
         return;
     }
+    if (selected == compute_index() + 3) {
+        storage_cycle_compute(dir);
+        return;
+    }
     if (selected == winmaint_index() + 5) {
         winmaint_cycle_disk(dir);
         return;
@@ -10564,6 +10785,31 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, _("Saved to %s."), RC_CONF);
         return;
     }
+    if (selected == gpu_driver_index()) {
+        gpu_driver_choice = (gpu_driver_choice + (dir < 0 ? NNVD_BRANCHES - 1 : 1)) % NNVD_BRANCHES;
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, _("NVIDIA driver: %s. Press Enter to apply."),
+                 _(gpu_driver_labels[gpu_driver_choice]));
+        return;
+    }
+    if (selected == gpu_gsp_index()) {
+        if (gpu_driver_job) {
+            snprintf(notice, sizeof notice, "%s", _("Wait: an NVIDIA driver job is still running."));
+            return;
+        }
+        int next = (gpu_gsp_mode + (dir < 0 ? NNVGSP_MODES - 1 : 1)) % NNVGSP_MODES;
+        char why[160] = "";
+        int id = 0, pos = 0;
+        const char *args[] = { gpu_gsp_values[next], NULL };
+        if (jobs_submit("gpu-driver-gsp", args, &id, &pos, why, sizeof why) < 0) {
+            snprintf(notice, sizeof notice, _("Could not change NVIDIA GSP policy: %s"), why);
+            return;
+        }
+        gpu_driver_job = id;
+        gpu_gsp_mode = next;
+        snprintf(notice, sizeof notice, _("Setting NVIDIA GSP firmware policy to %s..."), gpu_gsp_values[next]);
+        return;
+    }
     if (selected == gpu_graphics_index()) {
         int next = !gpu_graphics_auto;
         if (rc_set("gpu_graphics_policy", next ? "auto" : "off") < 0) {
@@ -10948,6 +11194,13 @@ static void row_hint_text(int idx, char *out, size_t size)
     } else if (idx == bt_index() + 2) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: open Bluetooth devices in bluetui (the service must be on)."));
+    } else if (idx == gpu_driver_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s",
+                 _("Choose Open DKMS (new, RTX 20+), 580xx DKMS (legacy / GSP off), or Off; Enter applies."));
+    } else if (idx == gpu_gsp_index()) {
+        snprintf(out, size, "%s",
+                 _("Auto disables GSP when gpu-unlock is on (580xx); Open DKMS always uses GSP firmware."));
     } else if (idx == gpu_graphics_index()) {
         snprintf(out, size, "%s", gpu_graphics_auto ? _("automatic; keeps explicit display-card choices") : _("off; leaves existing routing unchanged"));
     } else if (idx == gpu_graphics_index() + 1) {
@@ -11075,6 +11328,18 @@ static void row_hint_text(int idx, char *out, size_t size)
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s",
                  _("Enter: list paired devices in a terminal (pair or revoke with locachy-pair)."));
+    } else if (idx == compute_index() + 3) {
+        /* TRANSLATORS: Left/Right and m are key names; keep them. */
+        snprintf(out, size, "%s",
+                 _("Left/Right: choose compute storage volume   m: mount or unmount selected volume."));
+    } else if (idx == compute_index() + 4) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s",
+                 _("Enter: open interactive Compute Node Manager (storage, envs, jobs, VMs, images, pairing)."));
+    } else if (idx == compute_index() + 5) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s",
+                 _("Enter: view and copy generated OpenSSH client config for this compute node."));
     } else if (idx == winmaint_index() + 1) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", winmaint_created ?
@@ -11144,6 +11409,10 @@ static void row_hint(void)
         /* TRANSLATORS: Enter, Left/Right, r and Delete are key names; keep them. */
         snprintf(notice, sizeof notice, "%s",
                  _("Enter+Left/Right: on/off   r: download model   Delete, twice: remove model"));
+    } else if (selected == compute_index() + 3) {
+        /* TRANSLATORS: Enter, Left/Right and m are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter+Left/Right: choose storage volume   m: mount/unmount"));
     } else if (selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {
         /* TRANSLATORS: Enter, Left/Right, m, a and Delete are key names; keep them. */
         snprintf(notice, sizeof notice, "%s",
@@ -11169,6 +11438,8 @@ static void picker_cancel(void)
         load_face_camera();
     } else if (selected == boot_index() + 3) {
         kernel_choice = 0; /* the kernel booted (load_kernel_choices) */
+    } else if (selected == gpu_driver_index()) {
+        gpu_driver_choice = gpu_driver_cfg != NVD_OFF ? gpu_driver_cfg : gpu_driver_installed;
     }
 }
 
@@ -11438,11 +11709,13 @@ int main(int argc, char **argv)
     load_kernel_choices();
     load_drm_cards();
     load_gpu_graphics();
+    load_gpu_driver_status();
     load_paired_peers();
     load_ssh_status();
     load_winmaint_status();
     winmaint_load_targets();
     load_storage_status();
+    load_compute_status();
     refresh_static_text();
     refresh_brightness();
     refresh_opt_cache();
@@ -11508,7 +11781,7 @@ int main(int argc, char **argv)
                               ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6) |
                               ((gpu_unlock_job != 0) << 7) | ((gpu_power_job != 0) << 8) |
                               ((gpu_graphics_job != 0) << 10) | ((storage_job != 0) << 9) |
-                              ((bat_model_job != 0) << 11);
+                              ((bat_model_job != 0) << 11) | ((gpu_driver_job != 0) << 12);
             last_job_poll = uptime();
             adopt_jobs();
             pkg_check();
@@ -11516,6 +11789,7 @@ int main(int argc, char **argv)
             boot_check();
             security_check();
             winmaint_check();
+            gpu_driver_check();
             gpu_graphics_check();
             gpu_unlock_check();
             gpu_power_check();
@@ -11539,7 +11813,7 @@ int main(int argc, char **argv)
                              ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6) |
                              ((gpu_unlock_job != 0) << 7) | ((gpu_power_job != 0) << 8) |
                              ((gpu_graphics_job != 0) << 10) | ((storage_job != 0) << 9) |
-                             ((bat_model_job != 0) << 11);
+                             ((bat_model_job != 0) << 11) | ((gpu_driver_job != 0) << 12);
             if (jobs_after != jobs_before) {
                 entries_dirty = 1;
                 full_redraw = 1;
@@ -12004,6 +12278,18 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == paired_devices_index()) {
             manage_paired_devices();
+            draw();
+        } else if ((key == 'm' || key == 'M') && selected == compute_index() + 3) {
+            compute_mount_storage_action();
+            draw();
+        } else if (key == '\n' && selected == compute_index() + 4) {
+            manage_compute_node();
+            draw();
+        } else if (key == '\n' && selected == compute_index() + 5) {
+            compute_view_ssh_config();
+            draw();
+        } else if (key == '\n' && selected == gpu_driver_index()) {
+            gpu_driver_apply_row();
             draw();
         } else if (key == '\n' && selected == gpu_unlock_index()) {
             gpu_unlock_action();

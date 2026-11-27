@@ -46,6 +46,12 @@ DEFAULT_COMPUTE_BASE = "/var/lib/locachy/compute"
 DEFAULT_WINMAINT_STATE = "/var/lib/locachy/winmaint/state.json"
 DEFAULT_USER_UID = 1000
 
+SYS_BLOCK_DIR = "/sys/class/block"
+SYS_DM_MISC_DEV = "/sys/class/misc/device-mapper/dev"
+DEV_DIR = "/dev"
+DEV_MAPPER_DIR = "/dev/mapper"
+RUN_CRYPTSETUP_DIR = "/run/cryptsetup"
+
 # Maintenance Windows (locachy-winmaint): the GPT names of its partitions (it finds
 # its triplet by them), and the reason a disk holding them is never formatted.
 WINMAINT_PART_LABELS = ("LOCACHY_WIN_ESP", "LOCACHY_WIN_MSR", "LOCACHY_WIN_C")
@@ -288,15 +294,18 @@ def _run(
 ) -> subprocess.CompletedProcess:
     env = dict(os.environ, LC_ALL="C")
     try:
-        proc = subprocess.run(
-            cmd,
-            input=input_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            env=env,
-            check=False,
-        )
+        kwargs: dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "timeout": timeout,
+            "env": env,
+            "check": False,
+        }
+        if input_bytes is not None:
+            kwargs["input"] = input_bytes
+        else:
+            kwargs["stdin"] = subprocess.DEVNULL
+        proc = subprocess.run(cmd, **kwargs)
     except FileNotFoundError as exc:
         raise StorageError(f"required tool not found: {cmd[0]}") from exc
     except subprocess.TimeoutExpired as exc:
@@ -533,12 +542,132 @@ def write_rc_value(key: str, value: str | None, root: str | os.PathLike[str] | N
 
 # ---- Block device discovery & UUID/PARTUUID resolution ----
 
+def _probe_blkid_export(path: str) -> dict[str, str]:
+    """Low-level direct superblock & partition probe (bypasses udev DB and blkid cache)."""
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        proc = _run(["blkid", "-p", "-o", "export", path], check=False, timeout=15)
+    except StorageError:
+        return {}
+    if proc.returncode != 0:
+        return {}
+    props: dict[str, str] = {}
+    for line in proc.stdout.decode("utf-8", errors="replace").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            props[k.strip()] = v.strip()
+    return props
+
+
+def _probe_sfdisk_parts(disk_path: str) -> dict[str, dict[str, str]]:
+    """Read GPT partition UUIDs/labels directly from disk via sfdisk (pre-udev fallback)."""
+    if not disk_path or not os.path.exists(disk_path):
+        return {}
+    try:
+        proc = _run(["sfdisk", "--json", disk_path], check=False, timeout=15)
+    except StorageError:
+        return {}
+    if proc.returncode != 0:
+        return {}
+    try:
+        data = json.loads(proc.stdout.decode("utf-8", errors="replace"))
+    except ValueError:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    pt = data.get("partitiontable") or {}
+    for part in pt.get("partitions") or []:
+        node = str(part.get("node") or "")
+        if not node:
+            continue
+        out[node] = {
+            "partuuid": str(part.get("uuid") or ""),
+            "partlabel": str(part.get("name") or ""),
+        }
+    return out
+
+
+def _read_sysfs_partname(kname: str) -> str:
+    if not kname:
+        return ""
+    uevent = Path(SYS_BLOCK_DIR) / kname / "uevent"
+    try:
+        for line in uevent.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("PARTNAME="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _enrich_blockdevices_blkid(tree: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fill missing UUID/PARTUUID/FSTYPE/LABEL/PARTLABEL before systemd-udevd starts.
+
+    init runs `locachy-storage mount-all` before starting udev-client, so lsblk's
+    udev DB lookup returns nulls. Only probes nodes that actually lack metadata,
+    leaving populated udev results untouched.
+    """
+    sfdisk_cache: dict[str, dict[str, dict[str, str]]] = {}
+
+    def _walk(node: dict[str, Any], top_disk: str) -> None:
+        dev_type = str(node.get("type") or "")
+        path = str(node.get("path") or node.get("name") or "")
+        kname = str(node.get("kname") or (os.path.basename(path) if path else ""))
+        children = node.get("children") or []
+        cur_top = path if dev_type == "disk" else top_disk
+
+        need_blkid = False
+        if path.startswith("/dev/"):
+            if dev_type == "part":
+                need_blkid = not node.get("uuid") or not node.get("partuuid") or not node.get("fstype")
+            elif dev_type in ("disk", "crypt") and not children:
+                need_blkid = not node.get("uuid") and not node.get("fstype")
+
+        if need_blkid:
+            props = _probe_blkid_export(path)
+            if props:
+                if not node.get("uuid") and props.get("UUID"):
+                    node["uuid"] = props["UUID"]
+                if not node.get("fstype") and props.get("TYPE"):
+                    node["fstype"] = props["TYPE"]
+                if not node.get("label") and props.get("LABEL"):
+                    node["label"] = props["LABEL"]
+                if not node.get("partuuid") and props.get("PART_ENTRY_UUID"):
+                    node["partuuid"] = props["PART_ENTRY_UUID"]
+                if not node.get("partlabel") and props.get("PART_ENTRY_NAME"):
+                    node["partlabel"] = props["PART_ENTRY_NAME"]
+
+        if dev_type == "part" and path.startswith("/dev/"):
+            if (not node.get("partuuid") or not node.get("partlabel")) and cur_top:
+                if cur_top not in sfdisk_cache:
+                    sfdisk_cache[cur_top] = _probe_sfdisk_parts(cur_top)
+                pinfo = sfdisk_cache[cur_top].get(path) or {}
+                if not node.get("partuuid") and pinfo.get("partuuid"):
+                    node["partuuid"] = pinfo["partuuid"]
+                if not node.get("partlabel") and pinfo.get("partlabel"):
+                    node["partlabel"] = pinfo["partlabel"]
+            if not node.get("partlabel") and kname:
+                pname = _read_sysfs_partname(kname)
+                if pname:
+                    node["partlabel"] = pname
+
+        for child in children:
+            _walk(child, cur_top)
+
+    for root_node in tree:
+        _walk(root_node, "")
+    return tree
+
+
 def probe_lsblk(fixture_path: str | os.PathLike[str] | None = None) -> list[dict[str, Any]]:
     """Return raw lsblk blockdevices tree (or injectable JSON fixture for tests)."""
     env_fix = fixture_path or os.environ.get("LOCACHY_STORAGE_LSBLK_JSON", "").strip()
     if env_fix:
         raw = json.loads(Path(env_fix).read_text(encoding="utf-8"))
-        return list(raw.get("blockdevices", [])) if isinstance(raw, dict) else list(raw)
+        tree = list(raw.get("blockdevices", [])) if isinstance(raw, dict) else list(raw)
+        if os.environ.get("LOCACHY_STORAGE_ENRICH_FIXTURE") == "1":
+            _enrich_blockdevices_blkid(tree)
+        return tree
     proc = _run(
         [
             "lsblk",
@@ -553,7 +682,9 @@ def probe_lsblk(fixture_path: str | os.PathLike[str] | None = None) -> list[dict
         timeout=30,
     )
     parsed = json.loads(proc.stdout.decode("utf-8", errors="replace"))
-    return list(parsed.get("blockdevices", []))
+    tree = list(parsed.get("blockdevices", []))
+    _enrich_blockdevices_blkid(tree)
+    return tree
 
 
 def flatten_blockdevices(tree: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1195,11 +1326,96 @@ def btrfs_metadata_profile(raid: str, member_count: int) -> str:
     return "raid1"
 
 
+def _parse_dev_majmin(path: Path) -> tuple[int, int] | None:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    parts = raw.split(":", 1)
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def _find_dm_for_mapper(mapper: str) -> tuple[str, int, int] | None:
+    """Locate an active device-mapper device by dm/name in sysfs."""
+    if not mapper:
+        return None
+    sdir = Path(SYS_BLOCK_DIR)
+    if not sdir.is_dir():
+        return None
+    for entry in sorted(sdir.glob("dm-*")):
+        try:
+            dm_name = (entry / "dm" / "name").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if dm_name != mapper:
+            continue
+        mm = _parse_dev_majmin(entry / "dev")
+        if mm is not None:
+            return entry.name, mm[0], mm[1]
+    return None
+
+
+def _ensure_dm_ready() -> None:
+    """Prepare device-mapper control node and lock dir before udev-client starts."""
+    misc_dev = Path(SYS_DM_MISC_DEV)
+    if not misc_dev.is_file() and shutil.which("modprobe"):
+        for mod in ("dm_mod", "dm_crypt"):
+            try:
+                _run(["modprobe", mod], check=False, timeout=15)
+            except StorageError:
+                pass
+    try:
+        os.makedirs(DEV_MAPPER_DIR, mode=0o755, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        os.makedirs(RUN_CRYPTSETUP_DIR, mode=0o700, exist_ok=True)
+        os.chmod(RUN_CRYPTSETUP_DIR, 0o700)
+    except OSError:
+        pass
+    ctrl = os.path.join(DEV_MAPPER_DIR, "control")
+    if not os.path.exists(ctrl) and misc_dev.is_file():
+        mm = _parse_dev_majmin(misc_dev)
+        if mm is not None:
+            try:
+                os.mknod(ctrl, stat.S_IFCHR | 0o600, os.makedev(mm[0], mm[1]))
+            except (FileExistsError, PermissionError, OSError):
+                pass
+
+
+def _ensure_mapper_node(mapper: str) -> str:
+    """Ensure /dev/dm-N and /dev/mapper/<mapper> exist when udev has not run yet."""
+    found = _find_dm_for_mapper(mapper)
+    if found is None:
+        return ""
+    dm_kname, maj, min_no = found
+    try:
+        os.makedirs(DEV_MAPPER_DIR, mode=0o755, exist_ok=True)
+    except OSError:
+        pass
+    dm_node = os.path.join(DEV_DIR, dm_kname)
+    mapper_path = os.path.join(DEV_MAPPER_DIR, mapper)
+    dev_id = os.makedev(maj, min_no)
+    for node in (dm_node, mapper_path):
+        if not os.path.exists(node):
+            try:
+                os.mknod(node, stat.S_IFBLK | 0o600, dev_id)
+            except (FileExistsError, PermissionError, OSError):
+                pass
+    return mapper_path if os.path.exists(mapper_path) else (dm_node if os.path.exists(dm_node) else "")
+
+
 def _unlock_luks_member(dev_path: str, mapper: str, keyfile: str, passphrase_file: str = "") -> str:
-    mapper_path = f"/dev/mapper/{mapper}"
+    mapper_path = os.path.join(DEV_MAPPER_DIR, mapper)
     if os.path.exists(mapper_path):
         return mapper_path
-    cmd = ["cryptsetup", "open", "--type", "luks2", "--allow-discards"]
+    existing = _ensure_mapper_node(mapper)
+    if existing:
+        return existing
+    _ensure_dm_ready()
+    cmd = ["cryptsetup", "open", "--type", "luks2", "--allow-discards", "--disable-external-tokens"]
     if keyfile and Path(keyfile).is_file():
         cmd.extend(["--key-file", keyfile])
     elif passphrase_file and Path(passphrase_file).is_file():
@@ -1208,14 +1424,21 @@ def _unlock_luks_member(dev_path: str, mapper: str, keyfile: str, passphrase_fil
         raise StorageError(f"LUKS keyfile missing for {mapper}: {keyfile!r}")
     cmd.extend([dev_path, mapper])
     _run(cmd, check=True, timeout=120)
+    if not os.path.exists(mapper_path):
+        # Before udev-client runs, libdevmapper creates no node: make it from
+        # sysfs, as init's ensure_mapper_nodes does for the root.
+        created = _ensure_mapper_node(mapper)
+        if created:
+            return created
+        raise StorageError(f"cryptsetup opened {mapper}, but {mapper_path} did not appear")
     return mapper_path
 
 
 def _close_luks_member(mapper: str) -> None:
     if not mapper:
         return
-    mapper_path = f"/dev/mapper/{mapper}"
-    if not os.path.exists(mapper_path):
+    mapper_path = os.path.join(DEV_MAPPER_DIR, mapper)
+    if not os.path.exists(mapper_path) and _find_dm_for_mapper(mapper) is None:
         return
     _run(["cryptsetup", "close", mapper], check=True, timeout=60)
 
@@ -1305,20 +1528,46 @@ def umount_volume(name: str, *, close_luks: bool = True) -> dict[str, Any]:
 
 
 def mount_all() -> dict[str, Any]:
-    """Mount all volumes with auto_mount=True; non-fatal per volume."""
+    """Mount all volumes with auto_mount=True; non-fatal per volume.
+
+    Retries briefly (bounded, default 2 x 0.5 s) only when a volume reports a
+    missing member device, covering slow async NVMe/SATA namespace discovery
+    right after init loads kernel modules.
+    """
     cfg = load_config()
     mounted: list[str] = []
     skipped: list[str] = []
-    errors: dict[str, str] = {}
+    pending: list[str] = []
     for vol in cfg["volumes"]:
         if not vol.get("auto_mount", True):
             skipped.append(vol["name"])
-            continue
-        try:
-            mount_volume(vol["name"])
-            mounted.append(vol["name"])
-        except Exception as exc:
-            errors[vol["name"]] = str(exc)
+        else:
+            pending.append(vol["name"])
+
+    try:
+        retry_sleep = float(os.environ.get("LOCACHY_STORAGE_MOUNT_RETRY_S", "0.5"))
+    except ValueError:
+        retry_sleep = 0.5
+    max_attempts = 3 if retry_sleep > 0 else 1
+
+    errors: dict[str, str] = {}
+    for attempt in range(max_attempts):
+        if not pending:
+            break
+        if attempt > 0:
+            time.sleep(retry_sleep)
+        next_pending: list[str] = []
+        for vname in pending:
+            try:
+                mount_volume(vname)
+                errors.pop(vname, None)
+                mounted.append(vname)
+            except Exception as exc:
+                msg = str(exc)
+                errors[vname] = msg
+                if "missing " in msg and "member(s)" in msg:
+                    next_pending.append(vname)
+        pending = next_pending
     return {"mounted": mounted, "skipped": skipped, "errors": errors}
 
 

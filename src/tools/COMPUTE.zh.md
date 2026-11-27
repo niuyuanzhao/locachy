@@ -38,6 +38,17 @@
 
 以下示例中的 `locachy-gpu` 是客户端 SSH 配置中的别名，指向节点的 tailnet IP 或 MagicDNS 名称，并使用普通用户。这个工作流不需要 `service_compute`、`locachy-pair` 或 Thunderbolt 线缆。
 
+### 设置界面入口（**网络 → 计算节点**）
+
+「设置」在 **网络 → 计算节点** 下提供 6 行直接管理入口，由 `locachy-compute status --tsv` 驱动（即使 `compute_storage` 当前未挂载也不会失败）：
+
+1. **Compute HTTPS API (optional)**：开关 `service_compute`，并实时显示端口与守护进程状态（`running` / `starting`）。
+2. **Compute API over Thunderbolt**：开关 `compute_bind_tb` 并同步雷电放行规则（`tb-sync`）。
+3. **Compute GPU passthrough**：开关 `compute_gpu`，并显示检测到的宿主机 NVIDIA 驱动版本与 GPU 设备数。
+4. **Compute storage volume**：按 `Left`/`Right` 切换 `compute_storage` 存储卷，直接显示 `[MOUNTED]` 剩余空间或 `[UNMOUNTED]` 状态；按 `m` 可直接挂载或卸载当前卷。
+5. **Compute Node Manager**：按 `Enter` 打开 5 标签页交互式管理界面（`1:Overview`、`2:Envs`、`3:Jobs`、`4:VMs`、`5:Images`），顶部独立状态区展示 API、存储挂载与空间、GPU/CUDA 状态和资源计数，支持挂载/卸载存储卷、导入/删除基础镜像、创建/进入 shell/重置/删除环境、查看作业日志与停止作业、启停/进入/重置/删除微型虚拟机，以及配对 mTLS 客户端。
+6. **Client SSH config**：按 `Enter` 打开可滚动的 `locachy-compute ssh-config` 预览（即使存储卷未挂载也会给出基础主机配置段），按 `c` 一键复制到剪贴板。
+
 ### 准备存储、运行并取回结果
 
 使用有足够空间的 `compute` 或 `shared` 卷，容纳镜像、叠加层、数据集、模型权重、检查点、结果和日志。本例卷名为 `experiments`。放入文件前要确认卷确实已挂载；`scp` 和 `sftp` 本身不会检查路径是否位于预期磁盘。SSH 用户的暂存目录应位于 `locachy-compute/` 之外（那里保存受管状态），并且只绑定工作负载真正需要的目录。

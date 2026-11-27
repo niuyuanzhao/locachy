@@ -407,10 +407,31 @@ def gpu_drivers(drm="/sys/class/drm", pci="/sys/bus/pci/devices"):
     return seen
 
 
+def nvidia_utils_package(installed=None, manifest=None):
+    """Respect the legacy 580xx NVIDIA branch when declared or installed so
+    Vulkan auto-selection never pulls conflicting nvidia-utils."""
+    if installed is not None and ("nvidia-580xx-utils" in installed or "nvidia-580xx-dkms" in installed):
+        return "nvidia-580xx-utils"
+    if manifest is not None and ("nvidia-580xx-utils" in manifest or "nvidia-580xx-dkms" in manifest):
+        return "nvidia-580xx-utils"
+    try:
+        if os.path.isfile(MANIFEST) and any(p in ("nvidia-580xx-utils", "nvidia-580xx-dkms") for p in load_manifest(MANIFEST)):
+            return "nvidia-580xx-utils"
+    except SystemExit:
+        pass
+    try:
+        inst = local_packages()
+        if "nvidia-580xx-utils" in inst or "nvidia-580xx-dkms" in inst:
+            return "nvidia-580xx-utils"
+    except (OSError, SystemExit):
+        pass
+    return "nvidia-utils"
+
+
 def gpu_vulkan_drivers(drm="/sys/class/drm", pci="/sys/bus/pci/devices"):
     drivers = []
     for driver, _ in gpu_drivers(drm, pci):
-        pkg_name = VULKAN_DRIVERS.get(driver)
+        pkg_name = nvidia_utils_package() if driver == "nvidia" else VULKAN_DRIVERS.get(driver)
         if pkg_name and pkg_name not in drivers:
             drivers.append(pkg_name)
     return drivers or ["vulkan-swrast"]

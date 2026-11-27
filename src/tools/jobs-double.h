@@ -16,7 +16,7 @@
 static int jobs_double_count, jobs_double_ended = 1, jobs_double_status, jobs_double_nmine;
 static int (*jobs_double_hook)(void);
 static char jobs_double_last[512];
-static struct jobs_row jobs_double_mine[4];
+static struct jobs_row jobs_double_mine[8];
 
 int jobs_submit(const char *kind, const char *const args[], int *id, int *position, char *why, size_t size)
 {

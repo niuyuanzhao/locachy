@@ -947,6 +947,7 @@ install -m 755 "$src/link/locachy-winiso" /usr/local/bin/locachy-winiso
 install -m 755 "$src/link/locachy-gpu-unlock" /usr/local/bin/locachy-gpu-unlock
 install -m 755 "$src/link/locachy-gpu-power" /usr/local/bin/locachy-gpu-power
 install -m 755 "$src/link/locachy-gpu-graphics" /usr/local/bin/locachy-gpu-graphics
+install -m 755 "$src/link/locachy-nvidia" /usr/local/bin/locachy-nvidia
 install -D -m 644 "$src/link/gpu-unlock-upstream.json" /usr/local/share/locachy/gpu-unlock/upstream.json
 # Adaptive charging model (tools/BATTERY-CHARGING.md): the downloader is run only
 # on the user's explicit opt-in; its pinned manifest is the ChromiumOS artifacts' SHA-512.

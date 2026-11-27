@@ -19,6 +19,7 @@ static char fake_winmaint_state[256] = "/tmp/nonexistent-winmaint-state.json";
 #define WINMAINT_STATE_FILE fake_winmaint_state
 #define SETTINGS_COMMAND_OUTPUT
 #define SETTINGS_SSH_ADMIN
+#define SETTINGS_COMPUTE_RUN
 int settings_access(const char *path, int mode);
 int settings_kill(pid_t pid, int sig);
 struct passwd *settings_getpwuid(uid_t uid);
@@ -49,6 +50,7 @@ static int reloads, fail_rc;
 static char rc_name[32][64], rc_value[32][256];
 static int rc_count;
 static int fake_pair_installed, fake_winmaint_installed, fake_gpu_unlock_installed;
+static int fake_nvidia_installed = 1, fake_compute_installed = 1;
 static int fake_ssh_installed = 1;
 static int ssh_reload_calls, ssh_regen_calls, ssh_keys_add_calls, ssh_keys_remove_calls;
 static int ssh_admin_fail_next;
@@ -58,6 +60,14 @@ static char fake_ssh_host_fp[128];
 static const char *fake_pair_output = "";
 static const char *fake_winmaint_status = "";
 static const char *fake_graphics_status = "";
+static const char *fake_nvidia_status = "";
+static const char *fake_compute_status = "";
+static const char *fake_compute_ssh_config = "";
+static int fake_compute_exec_rc;
+static int compute_exec_calls;
+static char compute_exec_last[256];
+static int clip_calls;
+static char clip_last[256];
 static int term_calls, term_status;
 static char term_last[512];
 static struct screen_card_info fake_cards[4];
@@ -163,6 +173,33 @@ static int ssh_admin_run(char *const argv[], const char *stdin_text, char *out, 
     return 1;
 }
 
+static int compute_exec(char *const argv[], char *out, size_t out_size)
+{
+    if (out && out_size > 0) out[0] = '\0';
+    compute_exec_last[0] = '\0';
+    for (int i = 0; argv[i]; i++) {
+        size_t len = strlen(compute_exec_last);
+        snprintf(compute_exec_last + len, sizeof compute_exec_last - len, "%s%s", len ? " " : "", argv[i]);
+    }
+    compute_exec_calls++;
+    if (argv[1] && strcmp(argv[1], "ssh-config") == 0 && fake_compute_exec_rc == 0) {
+        if (out && out_size > 0) snprintf(out, out_size, "%s", fake_compute_ssh_config);
+    } else if (argv[1] && strcmp(argv[1], "job") == 0 && argv[2] && strcmp(argv[2], "log") == 0) {
+        if (out && out_size > 0) snprintf(out, out_size, "epoch 1 loss=0.42\n");
+    }
+    return fake_compute_exec_rc;
+}
+
+int clipboard_set(int primary, const void *text, size_t size)
+{
+    (void)primary;
+    clip_calls++;
+    size_t n = size < sizeof clip_last - 1 ? size : sizeof clip_last - 1;
+    memcpy(clip_last, text, n);
+    clip_last[n] = '\0';
+    return 0;
+}
+
 int screen_list_cards(struct screen_card_info *out, int max)
 {
     int n = nfake_cards < max ? nfake_cards : max;
@@ -184,6 +221,14 @@ static void command_output(char *const argv[], char *buf, size_t size)
     if (argv[0] && strcmp(argv[0], GPU_GRAPHICS_HELPER) == 0 && argv[1] && strcmp(argv[1], "status") == 0 &&
         argv[2] && strcmp(argv[2], "--tsv") == 0 && argv[3] == NULL) {
         snprintf(buf, size, "%s", fake_graphics_status);
+    }
+    if (argv[0] && strcmp(argv[0], LOCACHY_NVIDIA) == 0 && argv[1] && strcmp(argv[1], "status") == 0 &&
+        argv[2] && strcmp(argv[2], "--tsv") == 0 && argv[3] == NULL) {
+        snprintf(buf, size, "%s", fake_nvidia_status);
+    }
+    if (argv[0] && strcmp(argv[0], LOCACHY_COMPUTE) == 0 && argv[1] && strcmp(argv[1], "status") == 0 &&
+        argv[2] && strcmp(argv[2], "--tsv") == 0 && argv[3] == NULL) {
+        snprintf(buf, size, "%s", fake_compute_status);
     }
 }
 
@@ -246,6 +291,16 @@ int settings_access(const char *path, int mode)
     }
     if (strcmp(path, SSH_ADMIN_CMD) == 0) {
         if (fake_ssh_installed) return 0;
+        errno = ENOENT;
+        return -1;
+    }
+    if (strcmp(path, LOCACHY_NVIDIA) == 0) {
+        if (fake_nvidia_installed) return 0;
+        errno = ENOENT;
+        return -1;
+    }
+    if (strcmp(path, LOCACHY_COMPUTE) == 0) {
+        if (fake_compute_installed) return 0;
         errno = ENOENT;
         return -1;
     }
@@ -655,7 +710,101 @@ int main(void)
     assert(compute_gpu == 0);
     on_rc("compute_gpu", "", NULL);
     assert(compute_gpu == 1);
-    puts("PASS compute rows write rc.conf, signal PID 1 on service_compute, and run tb-sync on compute_bind_tb");
+
+    /* Compute status TSV parsing, 6-row rendering, SSH config viewer + clipboard copy, and Compute Node Manager TUI. */
+    assert(category_of(compute_index() + 3) == CAT_NETWORK &&
+           category_of(compute_index() + 4) == CAT_NETWORK &&
+           category_of(compute_index() + 5) == CAT_NETWORK);
+    assert(enter_row(compute_index() + 4) && enter_row(compute_index() + 5));
+    fake_compute_status =
+        "meta\tservice_enabled\t1\n"
+        "meta\tdaemon_running\t1\n"
+        "meta\tport\t27184\n"
+        "meta\tbind_tb\t1\n"
+        "meta\tgpu_enabled\t1\n"
+        "meta\tstorage_volume\tdata\n"
+        "meta\tstorage_mounted\t1\n"
+        "meta\tstorage_base\t/srv/storage/data/locachy-compute\n"
+        "meta\tstorage_free\t536870912000\n"
+        "meta\tstorage_total\t1073741824000\n"
+        "meta\tstorage_error\t\n"
+        "meta\tgpu_devices\t3\n"
+        "meta\tgpu_libs\t14\n"
+        "meta\tnvidia_version\t595.45.04\n"
+        "meta\tpaired_peers\t2\n"
+        "meta\tssh_host\t100.64.0.9\n"
+        "meta\tssh_user\talice\n"
+        "meta\tssh_port\t22222\n"
+        "meta\tssh_prefix\tcompute-node\n"
+        "image\tpytorch-cu12\t2026-11-26T00:00:00Z\t/tmp/pt.tar.zst\n"
+        "env\ttrain1\tpytorch-cu12\t1\tnone\n"
+        "job\tjob-42\ttrain1\trunning\t\tpython train.py\n"
+        "vm\tdevvm\t0\t4096\t4\t2222\troot\n";
+    compute_on = 1;
+    snprintf(compute_storage_cfg, sizeof compute_storage_cfg, "data");
+    load_compute_status();
+    assert(compute_snap.loaded && compute_snap.daemon_running && compute_snap.nimages == 1 &&
+           compute_snap.nenvs == 1 && compute_snap.njobs == 1 && compute_snap.njobs_running == 1 &&
+           compute_snap.nvms == 1 && compute_snap.nvms_running == 0);
+    item_text(compute_index(), line, sizeof line);
+    assert(strstr(line, "port 27184, running"));
+    item_text(compute_index() + 2, line, sizeof line);
+    assert(strstr(line, "NVIDIA 595.45.04"));
+    item_text(compute_index() + 3, line, sizeof line);
+    assert(strstr(line, "data") && strstr(line, "m: unmount"));
+    item_text(compute_index() + 4, line, sizeof line);
+    assert(strstr(line, "imgs:1") && strstr(line, "envs:1") && strstr(line, "jobs:1/1") && strstr(line, "vms:0/1"));
+    item_text(compute_index() + 5, line, sizeof line);
+    assert(strstr(line, "ssh compute-node -p 22222"));
+
+    /* Client SSH config viewer copies to clipboard on 'c' and exits cleanly on Esc. */
+    fake_compute_ssh_config = "Host compute-node\n    HostName 100.64.0.9\n    User alice\n    Port 22222\n";
+    fake_compute_exec_rc = 0;
+    clip_calls = 0;
+    clip_last[0] = '\0';
+    push_keys_str("c", 27);
+    compute_view_ssh_config();
+    assert(clip_calls == 1 && strstr(clip_last, "Host compute-node") && strstr(notice, "Copied"));
+
+    /* Compute Node Manager TUI: switch to Jobs tab (3), open job log (Enter), exit log (Esc), stop job (s),
+     * switch to Envs tab (2), move to train1 (Down), confirm reset (x, x), exit manager (Esc). */
+    compute_exec_calls = 0;
+    nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = '3';
+    fake_keys[nfake_keys++] = '\n';
+    fake_keys[nfake_keys++] = 27;
+    fake_keys[nfake_keys++] = 's';
+    fake_keys[nfake_keys++] = '2';
+    fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = 'x';
+    fake_keys[nfake_keys++] = 'x';
+    fake_keys[nfake_keys++] = 27;
+    manage_compute_node();
+    assert(compute_exec_calls == 3 && strstr(compute_exec_last, "env reset train1"));
+
+    /* Unmounted compute storage shows [UNMOUNTED] in settings row and still renders fallback SSH config. */
+    fake_compute_status =
+        "meta\tservice_enabled\t1\n"
+        "meta\tdaemon_running\t0\n"
+        "meta\tport\t27184\n"
+        "meta\tstorage_volume\tdata\n"
+        "meta\tstorage_mounted\t0\n"
+        "meta\tstorage_error\tcompute storage volume 'data' is not mounted\n"
+        "meta\tssh_host\t100.64.0.9\n"
+        "meta\tssh_user\talice\n"
+        "meta\tssh_port\t22222\n"
+        "meta\tssh_prefix\tcompute-node\n";
+    load_compute_status();
+    item_text(compute_index() + 3, line, sizeof line);
+    assert(strstr(line, "UNMOUNTED") && strstr(line, "m: mount"));
+    fake_compute_exec_rc = 1;
+    clip_calls = 0;
+    push_keys_str("c", 27);
+    compute_view_ssh_config();
+    assert(clip_calls == 1 && strstr(clip_last, "Host compute-node") && strstr(clip_last, "not mounted"));
+    compute_on = 0;
+    compute_storage_cfg[0] = '\0';
+    puts("PASS compute rows, live status, Compute Node Manager TUI, and client SSH config viewer");
 
     /* 6. Maintenance Windows: size cycling, state.json parsing, create/reclaim, boot-once, heal-boot, vm. */
     selected = winmaint_index();
@@ -879,20 +1028,88 @@ int main(void)
     jobs_double_mine[1] = (struct jobs_row){ .id = 7202, .kind = "tb-sync", .state = "queued", .position = 1 };
     jobs_double_mine[2] = (struct jobs_row){ .id = 7203, .kind = "gpu-unlock-install", .state = "queued", .position = 2 };
     jobs_double_mine[3] = (struct jobs_row){ .id = 7204, .kind = "gpu-power-apply", .state = "queued", .position = 3 };
-    jobs_double_nmine = 4;
+    jobs_double_mine[4] = (struct jobs_row){ .id = 7205, .kind = "gpu-driver-set", .state = "queued", .position = 4 };
+    jobs_double_nmine = 5;
     adopt_jobs();
     assert(winmaint_job == 7201 && !strcmp(winmaint_what, "create") && tb_sync_job == 7202 &&
-           gpu_unlock_job == 7203 && gpu_power_job == 7204);
+           gpu_unlock_job == 7203 && gpu_power_job == 7204 && gpu_driver_job == 7205);
     item_text(winmaint_index() + 1, line, sizeof line);
     assert(strstr(line, "working..."));
     item_text(extd_tb_shared_index(), line, sizeof line);
+    assert(strstr(line, "working..."));
+    item_text(gpu_driver_index(), line, sizeof line);
     assert(strstr(line, "working..."));
     item_text(gpu_unlock_index(), line, sizeof line);
     assert(strstr(line, "working..."));
     item_text(gpu_power_index(), line, sizeof line);
     assert(strstr(line, "working..."));
-    gpu_unlock_job = gpu_power_job = 0;
-    puts("PASS adopt_jobs follows winmaint-*, tb-sync, gpu-unlock-*, and gpu-power* jobs");
+    gpu_unlock_job = gpu_power_job = gpu_driver_job = 0;
+    puts("PASS adopt_jobs follows winmaint-*, tb-sync, gpu-driver-*, gpu-unlock-*, and gpu-power* jobs");
+
+    /* 7b. NVIDIA DKMS driver (new -> old: open, 580xx, off) and GSP firmware rows. */
+    assert(category_of(gpu_driver_index()) == CAT_INPUT && category_of(gpu_gsp_index()) == CAT_INPUT);
+    assert(picker_row(gpu_driver_index()) && enter_row(gpu_driver_index()));
+    fake_nvidia_status = "configured\toff\ninstalled\toff\ndkms_version\t\ngsp_policy\tauto\ngsp_disabled\t0\n";
+    gpu_driver_cfg = NVD_OFF;
+    gpu_driver_choice = NVD_OPEN;
+    load_gpu_driver_status();
+    item_text(gpu_driver_index(), line, sizeof line);
+    assert(strstr(line, "Open DKMS (new, RTX 20+)") && strstr(line, "not installed"));
+
+    /* Picker cycles new -> old (open -> 580xx -> off) without submitting until Enter (gpu_driver_apply_row). */
+    selected = gpu_driver_index();
+    jobs_double_last[0] = '\0';
+    adjust(+1);
+    assert(gpu_driver_choice == NVD_580XX && gpu_driver_job == 0 && !jobs_double_last[0]);
+    adjust(+1);
+    assert(gpu_driver_choice == NVD_OFF && gpu_driver_job == 0);
+    adjust(+1);
+    assert(gpu_driver_choice == NVD_OPEN && gpu_driver_job == 0);
+    jobs_double_ended = 0;
+    gpu_driver_apply_row();
+    assert(gpu_driver_job != 0 && !strcmp(jobs_double_last, "gpu-driver-set open"));
+    fake_nvidia_status = "configured\topen\ninstalled\topen\ndkms_version\t595.45.04-1\ngsp_policy\tauto\ngsp_disabled\t0\n";
+    assert(rc_set("nvidia_driver", "open") == 0);
+    jobs_double_ended = 1;
+    gpu_driver_check();
+    assert(gpu_driver_job == 0 && gpu_driver_installed == NVD_OPEN && !strcmp(gpu_driver_ver, "595.45.04-1"));
+    item_text(gpu_driver_index(), line, sizeof line);
+    assert(strstr(line, "installed open 595.45.04-1"));
+    item_text(gpu_gsp_index(), line, sizeof line);
+    assert(strstr(line, "open requires GSP"));
+
+    /* Esc cancels unapplied picker change; applying 580xx updates installed state and GSP indicator. */
+    selected = gpu_driver_index();
+    adjust(+1);
+    assert(gpu_driver_choice == NVD_580XX);
+    picker_cancel();
+    assert(gpu_driver_choice == NVD_OPEN);
+    adjust(+1);
+    assert(gpu_driver_choice == NVD_580XX);
+    jobs_double_ended = 0;
+    jobs_double_last[0] = '\0';
+    gpu_driver_apply_row();
+    assert(gpu_driver_job != 0 && !strcmp(jobs_double_last, "gpu-driver-set 580xx"));
+    fake_nvidia_status = "configured\t580xx\ninstalled\t580xx\ndkms_version\t580.126.25-1\ngsp_policy\tauto\ngsp_disabled\t1\n";
+    assert(rc_set("nvidia_driver", "580xx") == 0);
+    jobs_double_ended = 1;
+    gpu_driver_check();
+    assert(gpu_driver_job == 0 && gpu_driver_installed == NVD_580XX && gpu_gsp_disabled == 1);
+    item_text(gpu_gsp_index(), line, sizeof line);
+    assert(strstr(line, "NVreg_EnableGpuFirmware=0 active"));
+
+    /* GSP row cycles auto -> off -> on and queues gpu-driver-gsp. */
+    selected = gpu_gsp_index();
+    gpu_gsp_mode = NVGSP_AUTO;
+    jobs_double_ended = 0;
+    jobs_double_last[0] = '\0';
+    adjust(+1);
+    assert(gpu_driver_job != 0 && gpu_gsp_mode == NVGSP_OFF && !strcmp(jobs_double_last, "gpu-driver-gsp off"));
+    assert(rc_set("nvidia_gsp", "off") == 0);
+    jobs_double_ended = 1;
+    gpu_driver_check();
+    assert(gpu_driver_job == 0 && gpu_gsp_mode == NVGSP_OFF);
+    puts("PASS NVIDIA DKMS driver (open/580xx/off) picker and GSP firmware settings rows");
 
     /* 8. NVIDIA GPU unlock (one-keypress GitHub fetch/toggle/double-Delete remove)
      * and machine GPU power mode + Dynamic Boost (nvidia-powerd). */

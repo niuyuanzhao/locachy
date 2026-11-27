@@ -760,7 +760,8 @@ static void test_circular(void)
            power_profile_index() == blank_index() + 2 && zram_index() == power_profile_index() + 1 &&
            search_key_index() == zram_index() + 1 && search_svc_index() == search_key_index() + 1 &&
            search_docs_index() == search_svc_index() + 1 &&
-           gpu_unlock_index() == search_docs_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
+           gpu_driver_index() == search_docs_index() + 1 && gpu_gsp_index() == gpu_driver_index() + 1 &&
+           gpu_unlock_index() == gpu_gsp_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
            nvidia_powerd_index() == gpu_power_index() + 1 &&
            gpu_graphics_index() == nvidia_powerd_index() + 1 &&
            storage_compute_index() == gpu_graphics_index() + 3 &&
@@ -4028,7 +4029,8 @@ int main(int argc, char **argv)
            power_profile_index() == blank_index() + 2 && zram_index() == power_profile_index() + 1 &&
            search_key_index() == zram_index() + 1 && search_svc_index() == search_key_index() + 1 &&
            search_docs_index() == search_svc_index() + 1 &&
-           gpu_unlock_index() == search_docs_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
+           gpu_driver_index() == search_docs_index() + 1 && gpu_gsp_index() == gpu_driver_index() + 1 &&
+           gpu_unlock_index() == gpu_gsp_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
            nvidia_powerd_index() == gpu_power_index() + 1 &&
            gpu_graphics_index() == nvidia_powerd_index() + 1 &&
            storage_compute_index() == gpu_graphics_index() + 3 &&

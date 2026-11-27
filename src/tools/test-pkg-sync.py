@@ -378,6 +378,25 @@ class VulkanDriver(unittest.TestCase):
         self.card("card0", "bochs-drm")
         self.assertEqual(pkg.gpu_vulkan_drivers(str(other), str(empty_pci)), ["vulkan-swrast"])
 
+    def test_nvidia_vulkan_driver_respects_580xx_branch(self):
+        pci_nv = self.drm.parent / "pci-nv-vk"
+        dev = pci_nv / "0000:01:00.0"
+        (dev / "drivers/nvidia").mkdir(parents=True)
+        (dev / "class").write_text("0x030000\n", encoding="utf-8")
+        (dev / "driver").symlink_to(dev / "drivers/nvidia")
+        empty_drm = self.drm.parent / "drm-nv-vk"
+        empty_drm.mkdir()
+        with mock.patch.object(pkg.os.path, "isfile", return_value=True), \
+                mock.patch.object(pkg, "load_manifest", lambda path=None: ["base", "nvidia-open-dkms", "nvidia-utils"]), \
+                mock.patch.object(pkg, "local_packages", lambda db=None: {"nvidia-open-dkms": "595.45.04-1", "nvidia-utils": "595.45.04-1"}):
+            self.assertEqual(pkg.nvidia_utils_package(), "nvidia-utils")
+            self.assertEqual(pkg.gpu_vulkan_drivers(str(empty_drm), str(pci_nv)), ["nvidia-utils"])
+        with mock.patch.object(pkg.os.path, "isfile", return_value=True), \
+                mock.patch.object(pkg, "load_manifest", lambda path=None: ["base", "nvidia-580xx-dkms", "nvidia-580xx-utils"]), \
+                mock.patch.object(pkg, "local_packages", lambda db=None: {"nvidia-580xx-dkms": "580.126.25-1", "nvidia-580xx-utils": "580.126.25-1"}):
+            self.assertEqual(pkg.nvidia_utils_package(), "nvidia-580xx-utils")
+            self.assertEqual(pkg.gpu_vulkan_drivers(str(empty_drm), str(pci_nv)), ["nvidia-580xx-utils"])
+
     def test_vaapi_drivers_follow_each_real_gpu_topology(self):
         empty_pci = self.drm.parent / "pci-va"
         empty_pci.mkdir()

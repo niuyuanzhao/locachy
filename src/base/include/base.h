@@ -234,6 +234,9 @@ int screen_flip_fd(void);
 /* Drain DRM flip completion events; returns 1 when a pending flip completed, 0
  * if still pending, or -1 on error. */
 int screen_flip_complete(void);
+/* Clear stuck async flip bookkeeping after a flip completion timeout so the
+ * next frame is not permanently rejected with EBUSY. */
+void screen_flip_reset(void);
 /* The status bar at the top, as on the shared display (panel.c), with title
  * (the program) and ime (its input method mode, or NULL). The cells start
  * half a row below the top, so that row 0 is within the bar:

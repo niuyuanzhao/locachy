@@ -317,6 +317,128 @@ def _storage_summary() -> dict:
     return info
 
 
+def _compute_daemon_running() -> bool:
+    """Return True if a `locachy-compute serve` process is running on this host."""
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return False
+    me = os.getpid()
+    for ent in entries:
+        if not ent.isdigit():
+            continue
+        pid = int(ent)
+        if pid == me:
+            continue
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        parts = [p.decode("utf-8", errors="replace") for p in raw.split(b"\x00") if p]
+        if any(os.path.basename(p) == "locachy-compute" for p in parts) and "serve" in parts:
+            return True
+    return False
+
+
+def _tsv_clean(value: object, max_len: int = 160) -> str:
+    s = str(value if value is not None else "")
+    s = s.replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+    return s[:max_len]
+
+
+def node_status() -> dict:
+    """Return full live Compute Node state without failing if compute_storage is unmounted."""
+    rc_vals = read_rc_conf()
+    service_enabled = bool(rc_vals.get("service_compute", "").strip())
+    raw_port = rc_vals.get("compute_port", "").strip()
+    port = int(raw_port) if raw_port.isdigit() and 1 <= int(raw_port) <= 65535 else DEFAULT_PORT
+    bind_tb = rc_vals.get("compute_bind_tb", "").strip() == "1"
+    gpu_enabled = rc_vals.get("compute_gpu", "1").strip() != "0"
+    vol_name = configured_compute_storage_volume()
+
+    storage_mounted = True
+    storage_base = ""
+    storage_free = 0
+    storage_total = 0
+    storage_error = ""
+    images: list[dict] = []
+    envs: list[dict] = []
+    jobs: list[dict] = []
+    vms: list[dict] = []
+
+    try:
+        base = compute_base()
+        storage_base = str(base)
+        if base.exists():
+            sv = os.statvfs(base)
+            storage_free = int(sv.f_bavail) * int(sv.f_frsize)
+            storage_total = int(sv.f_blocks) * int(sv.f_frsize)
+        images = image_list()
+        envs = env_list()
+        jobs = job_list()
+        vms = vm_list()
+    except ComputeError as exc:
+        storage_mounted = False
+        storage_error = str(exc)
+
+    gpu_info = discover_gpu_resources()
+    nvidia_ver = ""
+    try:
+        vpath = Path("/sys/module/nvidia/version")
+        if vpath.is_file():
+            nvidia_ver = vpath.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        pass
+
+    paired_peers = -1
+    try:
+        paired_peers = len(peers_mod.list_peers(peers_dir(), scope="compute"))
+    except (OSError, peers_mod.PeerStoreError):
+        pass
+
+    return {
+        "service_enabled": service_enabled,
+        "daemon_running": _compute_daemon_running(),
+        "port": port,
+        "bind_tb": bind_tb,
+        "gpu_enabled": gpu_enabled,
+        "storage": {
+            "volume": vol_name,
+            "mounted": storage_mounted,
+            "base": storage_base,
+            "free_bytes": storage_free,
+            "total_bytes": storage_total,
+            "error": storage_error,
+        },
+        "gpu": {
+            "devices": len(gpu_info.get("devices", [])),
+            "nvidia_libs": len(gpu_info.get("nvidia_libs", [])),
+            "nvidia_version": nvidia_ver,
+        },
+        "paired_peers": paired_peers,
+        "ssh": {
+            "host": _detect_ssh_host(),
+            "user": _detect_ssh_user(),
+            "port": _detect_ssh_port(),
+            "prefix": _detect_ssh_prefix(),
+        },
+        "counts": {
+            "images": len(images),
+            "envs": len(envs),
+            "jobs_running": sum(1 for j in jobs if j.get("state") == "running"),
+            "jobs_total": len(jobs),
+            "vms_running": sum(1 for v in vms if v.get("running")),
+            "vms_total": len(vms),
+        },
+        "images": images,
+        "envs": envs,
+        "jobs": jobs,
+        "vms": vms,
+    }
+
+
 def discover_gpu_resources() -> dict[str, list[str]]:
     """Detect host GPU device nodes and host NVIDIA user-space driver libs."""
     devices: list[str] = []
@@ -3234,6 +3356,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub_vm.add_parser("remove")
     sp.add_argument("name")
 
+    # status
+    sp = sub.add_parser("status", help="Show live compute node status, storage, GPU, and inventory")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--tsv", action="store_true")
+
     # gpu
     sp = sub.add_parser("gpu-probe", help="Show detected GPU devices and NVIDIA libraries")
     sp.add_argument("--json", action="store_true")
@@ -3495,6 +3622,77 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(vm_reset(args.name), sort_keys=True))
             elif args.vm_cmd == "remove":
                 vm_remove(args.name)
+            return 0
+
+        if args.cmd == "status":
+            st_info = node_status()
+            if args.json:
+                print(json.dumps(st_info, indent=2, sort_keys=True))
+            elif args.tsv:
+                stor = st_info["storage"]
+                gpu = st_info["gpu"]
+                ssh = st_info["ssh"]
+                for k, v in (
+                    ("service_enabled", int(st_info["service_enabled"])),
+                    ("daemon_running", int(st_info["daemon_running"])),
+                    ("port", st_info["port"]),
+                    ("bind_tb", int(st_info["bind_tb"])),
+                    ("gpu_enabled", int(st_info["gpu_enabled"])),
+                    ("storage_volume", stor["volume"]),
+                    ("storage_mounted", int(stor["mounted"])),
+                    ("storage_base", stor["base"]),
+                    ("storage_free", stor["free_bytes"]),
+                    ("storage_total", stor["total_bytes"]),
+                    ("storage_error", stor["error"]),
+                    ("gpu_devices", gpu["devices"]),
+                    ("gpu_libs", gpu["nvidia_libs"]),
+                    ("nvidia_version", gpu["nvidia_version"]),
+                    ("paired_peers", st_info["paired_peers"]),
+                    ("ssh_host", ssh["host"]),
+                    ("ssh_user", ssh["user"]),
+                    ("ssh_port", ssh["port"]),
+                    ("ssh_prefix", ssh["prefix"]),
+                ):
+                    print(f"meta\t{k}\t{_tsv_clean(v, 240)}")
+                for it in st_info["images"]:
+                    print(f"image\t{_tsv_clean(it.get('name', ''), 64)}\t{_tsv_clean(it.get('imported_at', ''), 32)}\t{_tsv_clean(it.get('source', ''), 160)}")
+                for it in st_info["envs"]:
+                    print(f"env\t{_tsv_clean(it.get('name', ''), 64)}\t{_tsv_clean(it.get('image', ''), 64)}\t{int(bool(it.get('gpu')))}\t{_tsv_clean(it.get('net', 'none'), 24)}")
+                for it in st_info["jobs"]:
+                    cmd_txt = " ".join(str(x) for x in (it.get("command") or []))
+                    ec = "" if it.get("exit_code") is None else str(it.get("exit_code"))
+                    print(f"job\t{_tsv_clean(it.get('job_id', ''), 64)}\t{_tsv_clean(it.get('env', ''), 64)}\t{_tsv_clean(it.get('state', ''), 24)}\t{ec}\t{_tsv_clean(cmd_txt, 120)}")
+                for it in st_info["vms"]:
+                    print(
+                        f"vm\t{_tsv_clean(it.get('name', ''), 64)}\t{int(bool(it.get('running')))}\t"
+                        f"{int(it.get('memory_mb') or 0)}\t{int(it.get('cpus') or 0)}\t"
+                        f"{int(it.get('ssh_port') or 0)}\t{_tsv_clean(it.get('ssh_user', ''), 64)}"
+                    )
+            else:
+                stor = st_info["storage"]
+                gpu = st_info["gpu"]
+                cnt = st_info["counts"]
+                print(
+                    f"api: {'enabled' if st_info['service_enabled'] else 'disabled'} "
+                    f"({'running' if st_info['daemon_running'] else 'stopped'}, port={st_info['port']}, "
+                    f"tb={'on' if st_info['bind_tb'] else 'off'}, paired={st_info['paired_peers']})"
+                )
+                print(
+                    f"storage: {stor['volume'] or 'root'} "
+                    f"({'mounted' if stor['mounted'] else 'UNMOUNTED'}"
+                    + (f", {stor['base']}" if stor["base"] else f", {stor['error']}")
+                    + ")"
+                )
+                print(
+                    f"gpu: {'enabled' if st_info['gpu_enabled'] else 'disabled'} "
+                    f"(devices={gpu['devices']}, nvidia_libs={gpu['nvidia_libs']}"
+                    + (f", nvidia={gpu['nvidia_version']}" if gpu["nvidia_version"] else "")
+                    + ")"
+                )
+                print(
+                    f"inventory: images={cnt['images']} envs={cnt['envs']} "
+                    f"jobs={cnt['jobs_running']}/{cnt['jobs_total']} vms={cnt['vms_running']}/{cnt['vms_total']}"
+                )
             return 0
 
         if args.cmd == "gpu-probe":

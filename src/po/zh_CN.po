@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-26 06:45-0500\n"
+"POT-Creation-Date: 2026-11-27 14:51+0800\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -3696,7 +3696,7 @@ msgstr "线缆已拔出。正在等待重新接上线缆。"
 msgid "Disconnected."
 msgstr "已断开。"
 
-#: progs/extdisplay-setup.c
+#: progs/extdisplay-setup.c progs/settings-compute.inc
 msgid "Pairing cancelled."
 msgstr "已取消配对。"
 
@@ -4493,7 +4493,7 @@ msgstr "（无匹配筛选结果）"
 msgid "(Trash is empty)"
 msgstr "（回收站为空）"
 
-#: progs/files.c
+#: progs/files.c progs/settings-compute.inc
 msgid "(empty)"
 msgstr "（空）"
 
@@ -8186,7 +8186,7 @@ msgstr "重新构建：%s (%s -> %s)"
 msgid "%s follows its new preset: %s"
 msgstr "%s 跟随新的预设模板：%s"
 
-#: progs/packages.c
+#: progs/packages.c progs/settings-compute.inc
 msgid "stopped"
 msgstr "已暂停"
 
@@ -9597,6 +9597,435 @@ msgstr "Enter：打开  Ctrl+O：文件夹  Tab：筛选  F1：帮助  Esc：关
 msgid "Search keys"
 msgstr "搜索快捷键"
 
+#: progs/settings-compute.inc
+msgid ""
+"No secondary compute storage volume selected (using root disk /var/lib/"
+"locachy/compute)."
+msgstr "未选择附加计算存储卷（当前使用根盘 /var/lib/locachy/compute）。"
+
+#: progs/settings-compute.inc
+msgid "Up/Down/PgUp/PgDn: scroll   c: copy to clipboard   Esc: back"
+msgstr "Up/Down/PgUp/PgDn: 滚动   c: 复制到剪贴板   Esc: 返回"
+
+#: progs/settings-compute.inc
+msgid "Up/Down/PgUp/PgDn: scroll   Esc: back"
+msgstr "Up/Down/PgUp/PgDn: 滚动   Esc: 返回"
+
+#: progs/settings-compute.inc progs/settings-hwinfo.inc
+#, c-format
+msgid "Copied %s to clipboard."
+msgstr "已将“%s”复制到剪贴板。"
+
+#: progs/settings-compute.inc progs/settings-hwinfo.inc
+#: progs/settings-power.inc
+msgid "Clipboard service is not running."
+msgstr "剪贴板服务未运行。"
+
+#: progs/settings-compute.inc progs/settings.c
+#, c-format
+msgid "%s is not installed."
+msgstr "%s 未安装。"
+
+#: progs/settings-compute.inc
+msgid "Compute Client SSH Config"
+msgstr "计算客户端 SSH 配置"
+
+#: progs/settings-compute.inc
+msgid "SSH config"
+msgstr "SSH 配置"
+
+#: progs/settings-compute.inc
+msgid "Closed client SSH config."
+msgstr "已关闭客户端 SSH 配置。"
+
+#: progs/settings-compute.inc
+msgid "Image name (e.g. pytorch-cu12): "
+msgstr "镜像名称（例如 pytorch-cu12）："
+
+#: progs/settings-compute.inc
+msgid "Image import cancelled."
+msgstr "已取消镜像导入。"
+
+#: progs/settings-compute.inc
+msgid "Invalid image name: letters, digits, . _ - only."
+msgstr "镜像名称无效：仅允许字母、数字及 . _ -。"
+
+#: progs/settings-compute.inc
+msgid "Source rootfs path (directory or .tar/.tar.zst): "
+msgstr "源 rootfs 路径（目录或 .tar/.tar.zst）："
+
+#: progs/settings-compute.inc
+msgid "Source path must be an absolute path."
+msgstr "源路径必须为绝对路径。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Image import failed for %.40s."
+msgstr "导入镜像 %.40s 失败。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Imported image %.40s."
+msgstr "已导入镜像 %.40s。"
+
+#: progs/settings-compute.inc
+msgid "Import a base rootfs image first (Images tab or Overview)."
+msgstr "请先导入基础 rootfs 镜像（镜像页或概览页）。"
+
+#: progs/settings-compute.inc
+msgid "Environment name (e.g. train-1): "
+msgstr "环境名称（例如 train-1）："
+
+#: progs/settings-compute.inc
+msgid "Environment creation cancelled."
+msgstr "已取消创建环境。"
+
+#: progs/settings-compute.inc
+msgid "Invalid environment name: letters, digits, . _ - only."
+msgstr "环境名称无效：仅允许字母、数字及 . _ -。"
+
+#: progs/settings-compute.inc
+msgid "Base image name: "
+msgstr "基础镜像名称："
+
+#: progs/settings-compute.inc
+msgid "Invalid image name."
+msgstr "镜像名称无效。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Created environment %.40s from %.40s."
+msgstr "已创建环境 %.40s（基于 %.40s）。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Create env failed: %.120s"
+msgstr "创建环境失败：%.120s"
+
+#: progs/settings-compute.inc
+msgid "check storage and image name"
+msgstr "请检查存储状态和镜像名称"
+
+#: progs/settings-compute.inc
+msgid "Client peer name (e.g. macbook): "
+msgstr "客户端对端名称（例如 macbook）："
+
+#: progs/settings-compute.inc
+msgid "Invalid peer name: letters, digits, . _ - only."
+msgstr "对端名称无效：仅允许字母、数字及 . _ -。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Client pairing did not finish."
+msgstr "客户端配对未完成。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Paired compute client %.40s."
+msgstr "已配对计算客户端 %.40s。"
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "Compute Node Manager"
+msgstr "计算节点管理"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "API: %s (port %d, %s)   Paired: %d   SSH: ssh %.32s -p %d"
+msgstr "API: %s（端口 %d，%s）  已配对: %d   SSH: ssh %.32s -p %d"
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "OFF"
+msgstr "关"
+
+#: progs/settings-compute.inc
+msgid "ON / running"
+msgstr "已开启 / 运行中"
+
+#: progs/settings-compute.inc
+msgid "ON / starting"
+msgstr "已开启 / 启动中"
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "Tailscale"
+msgstr "Tailscale"
+
+#: progs/settings-compute.inc
+msgid "Tailscale+TB"
+msgstr "Tailscale+雷电"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage: root disk (%s free / %s)   base: %.80s"
+msgstr "存储：根盘（剩余 %s / 共 %s）  目录：%.80s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage: root disk (/var/lib/locachy/compute)"
+msgstr "存储：根盘（/var/lib/locachy/compute）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage: %.32s [MOUNTED]  %s free / %s  (%.70s)"
+msgstr "存储：%.32s [已挂载]  剩余 %s / 共 %s  (%.70s)"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage: %.32s [UNMOUNTED]  press m to mount"
+msgstr "存储：%.32s [未挂载]  按 m 挂载"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "GPU: passthrough %s   NVIDIA %s   (%d devs, %d CUDA libs)"
+msgstr "GPU：直通 %s   NVIDIA %s   （%d 个设备，%d 个 CUDA 库）"
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "ON"
+msgstr "开"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "GPU: passthrough %s   %d GPU device(s), %d NVIDIA libs"
+msgstr "GPU：直通 %s   %d 个 GPU 设备，%d 个 NVIDIA 库"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"GPU: passthrough %s   no NVIDIA driver loaded (see Input & Output > NVIDIA "
+"GPU)"
+msgstr "GPU：直通 %s   未加载 NVIDIA 驱动（见 输入与输出 > NVIDIA 显卡）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Inventory: %d images   %d envs   %d/%d jobs running   %d/%d VMs running"
+msgstr "清单：%d 个镜像   %d 个环境   %d/%d 个任务运行中   %d/%d 台虚拟机运行中"
+
+#: progs/settings-compute.inc progs/view.c
+msgid "Overview"
+msgstr "概览"
+
+#: progs/settings-compute.inc
+msgid "Envs"
+msgstr "环境"
+
+#: progs/settings-compute.inc
+msgid "Jobs"
+msgstr "任务"
+
+#: progs/settings-compute.inc
+msgid "VMs"
+msgstr "虚拟机"
+
+#: progs/settings-compute.inc
+msgid "Images"
+msgstr "镜像"
+
+#: progs/settings-compute.inc
+msgid "No compute jobs recorded yet."
+msgstr "尚无计算任务记录。"
+
+#: progs/settings-compute.inc
+msgid "No compute micro-VMs created yet (locachy-compute vm create)."
+msgstr "尚未创建计算微虚拟机（locachy-compute vm create）。"
+
+#: progs/settings-compute.inc
+msgid "Nothing here yet."
+msgstr "暂无内容。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "[ Unmount compute storage volume '%.32s' ]"
+msgstr "[ 卸载计算存储卷 '%.32s' ]"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "[ Mount compute storage volume '%.32s' ]"
+msgstr "[ 挂载计算存储卷 '%.32s' ]"
+
+#: progs/settings-compute.inc
+msgid "[ Storage: using root disk (configure under System > Storage Volumes) ]"
+msgstr "[ 存储：使用根盘（可在 系统 > 存储卷 中配置） ]"
+
+#: progs/settings-compute.inc
+msgid "[ + Import rootfs image (tarball or directory) ]"
+msgstr "[ + 导入 rootfs 镜像（压缩包或目录） ]"
+
+#: progs/settings-compute.inc
+msgid "[ + Create compute environment ]"
+msgstr "[ + 创建计算环境 ]"
+
+#: progs/settings-compute.inc
+msgid "[ + Pair remote client (mTLS token) ]"
+msgstr "[ + 配对远程客户端（mTLS 令牌） ]"
+
+#: progs/settings-compute.inc
+msgid "[ View / copy client SSH config ]"
+msgstr "[ 查看 / 复制客户端 SSH 配置 ]"
+
+#: progs/settings-compute.inc
+msgid "[ Manage paired devices (locachy-pair) ]"
+msgstr "[ 管理已配对设备（locachy-pair） ]"
+
+#: progs/settings-compute.inc
+msgid "RUNNING"
+msgstr "运行中"
+
+#: progs/settings-compute.inc
+msgid ""
+"1-5/Tab: tabs   Enter: shell/create   x: reset   Delete: remove   r: "
+"refresh   Esc: back"
+msgstr "1-5/Tab: 切换标签   Enter: 进入终端/新建   x: 重置   Delete: 删除   r: 刷新   Esc: 返回"
+
+#: progs/settings-compute.inc
+msgid "1-5/Tab: tabs   Enter: view log   s: stop job   r: refresh   Esc: back"
+msgstr "1-5/Tab: 切换标签   Enter: 查看日志   s: 停止任务   r: 刷新   Esc: 返回"
+
+#: progs/settings-compute.inc
+msgid ""
+"1-5/Tab: tabs   Enter: start/shell   s: stop   x: reset   Delete: remove   "
+"r: refresh   Esc: back"
+msgstr "1-5/Tab: 切换标签   Enter: 启动/终端   s: 停止   x: 重置   Delete: 删除   r: 刷新   Esc: 返回"
+
+#: progs/settings-compute.inc
+msgid "1-5/Tab: tabs   Enter: import   Delete: remove   r: refresh   Esc: back"
+msgstr "1-5/Tab: 切换标签   Enter: 导入   Delete: 删除   r: 刷新   Esc: 返回"
+
+#: progs/settings-compute.inc
+msgid ""
+"1-5/Tab: tabs   Enter: run action   m: mount storage   c: SSH config   r: "
+"refresh   Esc: back"
+msgstr "1-5/Tab: 切换标签   Enter: 执行操作   m: 挂载存储   c: SSH 配置   r: 刷新   Esc: 返回"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Compute Node: %d images, %d envs, %d jobs, %d VMs."
+msgstr "计算节点：%d 个镜像，%d 个环境，%d 个任务，%d 台虚拟机。"
+
+#: progs/settings-compute.inc
+msgid "Refreshed Compute Node status."
+msgstr "已刷新计算节点状态。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press x again to wipe upperdir and reset env '%.40s'."
+msgstr "再次按 x 清空 upperdir 并重置环境 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Reset environment '%.40s'."
+msgstr "已重置环境 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Reset failed: %.120s"
+msgstr "重置失败：%.120s"
+
+#: progs/settings-compute.inc
+msgid "error"
+msgstr "错误"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press Delete again to remove env '%.40s'."
+msgstr "再次按 Delete 删除环境 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Removed environment '%.40s'."
+msgstr "已删除环境 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Remove failed: %.120s"
+msgstr "删除失败：%.120s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Job Log: %.64s"
+msgstr "任务日志：%.64s"
+
+#: progs/settings-compute.inc
+msgid "(no log output)"
+msgstr "（无日志输出）"
+
+#: progs/settings-compute.inc
+msgid "job log"
+msgstr "任务日志"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Stopped job '%.48s'."
+msgstr "已停止任务 '%.48s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Stop job failed: %.120s"
+msgstr "停止任务失败：%.120s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Started VM '%.40s'."
+msgstr "已启动虚拟机 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Start VM failed: %.120s"
+msgstr "启动虚拟机失败：%.120s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Stopped VM '%.40s'."
+msgstr "已停止虚拟机 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Stop VM failed: %.120s"
+msgstr "停止虚拟机失败：%.120s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press x again to reset CoW disk of VM '%.40s'."
+msgstr "再次按 x 重置虚拟机 '%.40s' 的 CoW 磁盘。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Reset VM '%.40s'."
+msgstr "已重置虚拟机 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Reset VM failed: %.120s"
+msgstr "重置虚拟机失败：%.120s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press Delete again to remove VM '%.40s'."
+msgstr "再次按 Delete 删除虚拟机 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Removed VM '%.40s'."
+msgstr "已删除虚拟机 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Remove VM failed: %.120s"
+msgstr "删除虚拟机失败：%.120s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Press Delete again to remove image '%.40s'."
+msgstr "再次按 Delete 删除镜像 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Removed image '%.40s'."
+msgstr "已删除镜像 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Remove image failed: %.120s"
+msgstr "删除镜像失败：%.120s"
+
 #: progs/settings-hwinfo.inc
 msgid "Processor"
 msgstr "处理器"
@@ -10175,10 +10604,6 @@ msgstr "%d.%d%%（%s），健康度 %.1f%%（%.1f / %.1f Wh）"
 msgid "Copied system summary to clipboard."
 msgstr "已将系统摘要复制到剪贴板。"
 
-#: progs/settings-hwinfo.inc progs/settings-power.inc
-msgid "Clipboard service is not running."
-msgstr "剪贴板服务未运行。"
-
 #: progs/settings-hwinfo.inc
 msgid "settings — Hardware Information"
 msgstr "设置 — 硬件信息"
@@ -10199,11 +10624,6 @@ msgid ""
 "copy page   Esc: back"
 msgstr ""
 "上下键: 选择   Tab / 左右键: 切换栏   r: 刷新   Ctrl+C: 复制本页   Esc: 返回"
-
-#: progs/settings-hwinfo.inc
-#, c-format
-msgid "Copied %s to clipboard."
-msgstr "已将“%s”复制到剪贴板。"
 
 #: progs/settings-hwinfo.inc
 msgid "Hardware readings refreshed."
@@ -10906,6 +11326,30 @@ msgstr "性能"
 #: progs/settings.c
 msgid "Power saver"
 msgstr "省电"
+
+#: progs/settings.c
+msgid "Open DKMS (new, RTX 20+)"
+msgstr "Open DKMS（新版，RTX 20+）"
+
+#: progs/settings.c
+msgid "580xx DKMS (legacy / GSP off)"
+msgstr "580xx DKMS（旧版 / 可关 GSP）"
+
+#: progs/settings.c
+msgid "Off (not installed)"
+msgstr "关闭（未安装）"
+
+#: progs/settings.c
+msgid "Auto (off with gpu-unlock on 580xx)"
+msgstr "自动（580xx 开启解锁时关闭 GSP）"
+
+#: progs/settings.c
+msgid "Off (580xx only)"
+msgstr "关闭（仅 580xx）"
+
+#: progs/settings.c
+msgid "On"
+msgstr "开启"
 
 #: progs/settings.c
 msgid "Auto (follow power profile)"
@@ -12012,11 +12456,6 @@ msgid "Drag a screen to position it; p edits its exact X,Y coordinates."
 msgstr "拖动屏幕调整位置；p 编辑精确 X,Y 坐标。"
 
 #: progs/settings.c
-#, c-format
-msgid "%s is not installed."
-msgstr "%s 未安装。"
-
-#: progs/settings.c
 msgid "Network connections: nmtui closed."
 msgstr "网络连接：nmtui 已关闭。"
 
@@ -12114,10 +12553,6 @@ msgid "No saved network yet."
 msgstr "尚无已保存的网络。"
 
 #: progs/settings.c
-msgid "Tailscale"
-msgstr "Tailscale"
-
-#: progs/settings.c
 msgid "SSH Server (sshd)"
 msgstr "SSH 服务器（sshd）"
 
@@ -12136,11 +12571,6 @@ msgstr "云盘"
 #: progs/settings.c
 msgid "Compute Node"
 msgstr "计算节点"
-
-#: progs/settings.c
-#, c-format
-msgid "Default compute storage: %.40s (change under System > Storage Volumes)."
-msgstr "默认计算存储：%.40s（在“系统 > 存储卷”中更改）。"
 
 #: progs/settings.c
 msgid "Colors"
@@ -12458,7 +12888,8 @@ msgstr "sshd 端口已设为 %d。"
 msgid ""
 "Enter again: regenerate sshd host key (clients must remove the old "
 "known_hosts entry)."
-msgstr "再次按 Enter：重新生成 sshd 主机密钥（客户端需移除旧的 known_hosts 记录）。"
+msgstr ""
+"再次按 Enter：重新生成 sshd 主机密钥（客户端需移除旧的 known_hosts 记录）。"
 
 #: progs/settings.c
 #, c-format
@@ -12715,6 +13146,34 @@ msgstr "维护用 Windows 任务已完成。"
 #, c-format
 msgid "Maintenance Windows job failed: %s"
 msgstr "维护用 Windows 任务失败：%s"
+
+#: progs/settings.c
+msgid "NVIDIA driver updated; the boot image was rebuilt. Restart to use it."
+msgstr "NVIDIA 驱动已更新并重建启动镜像，重启后生效。"
+
+#: progs/settings.c
+#, c-format
+msgid "NVIDIA driver change failed: %s"
+msgstr "NVIDIA 驱动切换失败：%s"
+
+#: progs/settings.c
+msgid "Wait: an NVIDIA driver job is still running."
+msgstr "请稍候：NVIDIA 驱动任务仍在运行。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not start NVIDIA driver change: %s"
+msgstr "无法启动 NVIDIA 驱动切换任务：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Removing NVIDIA DKMS driver and rebuilding boot image..."
+msgstr "正在卸载 NVIDIA DKMS 驱动并重建启动镜像……"
+
+#: progs/settings.c
+#, c-format
+msgid "Installing NVIDIA DKMS driver (%s) and rebuilding boot image..."
+msgstr "正在安装 NVIDIA DKMS 驱动（%s）并重建启动镜像……"
 
 #: progs/settings.c
 msgid "NVIDIA GPU unlock updated; the boot image was rebuilt."
@@ -13048,10 +13507,6 @@ msgid "TrackPoint Press-to-Select"
 msgstr "TrackPoint 按压选择"
 
 #: progs/settings.c
-msgid "OFF"
-msgstr "关"
-
-#: progs/settings.c
 msgid "ON "
 msgstr "开 "
 
@@ -13312,6 +13767,16 @@ msgid "Paired devices"
 msgstr "已配对设备"
 
 #: progs/settings.c
+#, c-format
+msgid "port %d, running"
+msgstr "端口 %d，运行中"
+
+#: progs/settings.c
+#, c-format
+msgid "port %d, starting"
+msgstr "端口 %d，启动中"
+
+#: progs/settings.c
 msgid "Compute HTTPS API (optional)"
 msgstr "计算服务 HTTPS API（可选）"
 
@@ -13322,6 +13787,54 @@ msgstr "通过雷电接口访问计算 API"
 #: progs/settings.c
 msgid "Compute GPU passthrough"
 msgstr "计算容器直通 GPU"
+
+#: progs/settings.c
+msgid "no NVIDIA driver"
+msgstr "未加载 NVIDIA 驱动"
+
+#: progs/settings.c
+msgid "root disk"
+msgstr "根盘"
+
+#: progs/settings.c
+#, c-format
+msgid "%.32s  [UNMOUNTED]  m: mount"
+msgstr "%.32s  [未挂载]  m: 挂载"
+
+#: progs/settings.c
+#, c-format
+msgid "%.32s  (%s free, m: unmount)"
+msgstr "%.32s  （剩余 %s，m: 卸载）"
+
+#: progs/settings.c
+msgid "Compute storage volume"
+msgstr "计算存储卷"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "imgs:%d  envs:%d  jobs:%d/%d  vms:%d/%d   (Enter: manage)"
+msgstr "镜像:%d  环境:%d  任务:%d/%d  虚拟机:%d/%d   (Enter: 管理)"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: open Compute Node Manager"
+msgstr "Enter: 打开计算节点管理"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "ssh %.32s -p %d   (Enter: view / copy)"
+msgstr "ssh %.32s -p %d   (Enter: 查看 / 复制)"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: view / copy SSH config"
+msgstr "Enter: 查看 / 复制 SSH 配置"
+
+#: progs/settings.c
+msgid "Client SSH config"
+msgstr "客户端 SSH 配置"
 
 #: progs/settings.c
 msgid "not created"
@@ -13475,6 +13988,37 @@ msgid "  (search service off)"
 msgstr "  （搜索服务已关闭）"
 
 #: progs/settings.c
+#, c-format
+msgid "installed %s %.24s  (Enter: apply)"
+msgstr "已安装 %s %.24s  (Enter: 应用)"
+
+#: progs/settings.c
+#, c-format
+msgid "installed %s  (Enter: apply)"
+msgstr "已安装 %s  (Enter: 应用)"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "not installed  (Enter: apply)"
+msgstr "未安装  (Enter: 应用)"
+
+#: progs/settings.c
+msgid "NVIDIA driver (DKMS)"
+msgstr "NVIDIA 驱动（DKMS）"
+
+#: progs/settings.c
+msgid "(open requires GSP; use 580xx to disable)"
+msgstr "（open 必须启用 GSP；需关闭请用 580xx）"
+
+#: progs/settings.c
+msgid "(NVreg_EnableGpuFirmware=0 active)"
+msgstr "（NVreg_EnableGpuFirmware=0 已生效）"
+
+#: progs/settings.c
+msgid "NVIDIA GSP firmware"
+msgstr "NVIDIA GSP 固件"
+
+#: progs/settings.c
 msgid "Hybrid graphics policy"
 msgstr "混合显卡策略"
 
@@ -13513,10 +14057,6 @@ msgstr "NVIDIA 独显"
 #: progs/settings.c
 msgid " (firmware change pending restart)"
 msgstr "（固件设置待重启生效）"
-
-#: progs/settings.c
-msgid "ON"
-msgstr "开"
 
 #: progs/settings.c
 msgid "NVIDIA GPU unlock (gpu-unlock)"
@@ -14781,6 +15321,22 @@ msgid "Mirrors are ranked again every %d day."
 msgid_plural "Mirrors are ranked again every %d days."
 msgstr[0] "每 %d 天重新为镜像排序一次。"
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "NVIDIA driver: %s. Press Enter to apply."
+msgstr "NVIDIA 驱动：%s。按 Enter 应用。"
+
+#: progs/settings.c
+#, c-format
+msgid "Could not change NVIDIA GSP policy: %s"
+msgstr "无法修改 NVIDIA GSP 策略：%s"
+
+#: progs/settings.c
+#, c-format
+msgid "Setting NVIDIA GSP firmware policy to %s..."
+msgstr "正在将 NVIDIA GSP 固件策略设为 %s……"
+
 #: progs/settings.c
 msgid "Graphics policy saved. Applies when graphics next starts."
 msgstr "显卡策略已保存，下次启动图形界面时生效。"
@@ -14834,7 +15390,9 @@ msgstr "已在局域网与 Tailscale 上启用 SSH 服务器（sshd）。"
 msgid ""
 "SSH server (sshd) set to Tailscale only (Tailscale is off: waiting for "
 "tailscale0)."
-msgstr "SSH 服务器（sshd）已设为仅 Tailscale（Tailscale 未开启：正在等待 tailscale0）。"
+msgstr ""
+"SSH 服务器（sshd）已设为仅 Tailscale（Tailscale 未开启：正在等待 "
+"tailscale0）。"
 
 #: progs/settings.c
 msgid "SSH server (sshd) set to Tailscale only (blocked while Tor is on)."
@@ -15013,6 +15571,18 @@ msgid "Saved to %s and applied."
 msgstr "已保存至 %s 并生效。"
 
 #: progs/settings.c
+msgid ""
+"Choose Open DKMS (new, RTX 20+), 580xx DKMS (legacy / GSP off), or Off; "
+"Enter applies."
+msgstr "选择 Open DKMS（新版，RTX 20+）、580xx DKMS（旧版 / 可关 GSP）或关闭；按 Enter 应用。"
+
+#: progs/settings.c
+msgid ""
+"Auto disables GSP when gpu-unlock is on (580xx); Open DKMS always uses GSP "
+"firmware."
+msgstr "自动模式下 580xx 开启独显解锁时关闭 GSP；Open DKMS 始终使用 GSP 固件。"
+
+#: progs/settings.c
 msgid "automatic; keeps explicit display-card choices"
 msgstr "自动；保留手动指定的显示显卡。"
 
@@ -15042,6 +15612,23 @@ msgstr "Enter：从 GitHub 拉取并构建 gpu-unlock，或切换开关   Delete
 msgid "Enter: allow a full charge until unplugged or for up to 24 hours."
 msgstr "Enter：临时允许充满，拔掉电源或 24 小时后结束。"
 
+#: progs/settings.c
+msgid ""
+"Left/Right: choose compute storage volume   m: mount or unmount selected "
+"volume."
+msgstr "Left/Right: 选择计算存储卷   m: 挂载或卸载所选卷。"
+
+#: progs/settings.c
+msgid ""
+"Enter: open interactive Compute Node Manager (storage, envs, jobs, VMs, "
+"images, pairing)."
+msgstr "Enter: 打开交互式计算节点管理（存储、环境、任务、虚拟机、镜像、配对）。"
+
+#: progs/settings.c
+msgid ""
+"Enter: view and copy generated OpenSSH client config for this compute node."
+msgstr "Enter: 查看并复制该计算节点生成的 OpenSSH 客户端配置。"
+
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Installed   Delete, twice: remove it"
@@ -15064,6 +15651,10 @@ msgstr "Enter 后用 Left/Right 选择   再按 Enter: 执行"
 msgid ""
 "Enter+Left/Right: on/off   r: download model   Delete, twice: remove model"
 msgstr "Enter+Left/Right: 开关   r: 下载模型   连按两次 Delete: 删除模型"
+
+#: progs/settings.c
+msgid "Enter+Left/Right: choose storage volume   m: mount/unmount"
+msgstr "Enter+Left/Right: 选择存储卷   m: 挂载/卸载"
 
 #: progs/settings.c
 msgid ""
@@ -16340,10 +16931,6 @@ msgstr "自动适合"
 #: progs/view.c
 msgid "Facing Pages (Center First Page)"
 msgstr "对页（首页居中）"
-
-#: progs/view.c
-msgid "Overview"
-msgstr "概览"
 
 #: progs/view.c
 msgid "Continuous"

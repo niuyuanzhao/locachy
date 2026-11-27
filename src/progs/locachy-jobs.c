@@ -129,7 +129,8 @@ enum check {
     C_NONE, C_PACKAGES, C_SWAP, C_KERNEL, C_ONOFF, C_SECTION, C_TARGETS, C_CONTAINER, C_CONTAINER_DATA,
     C_DEVICE, C_RELEASE, C_FILE, C_SPI_PROBE, C_SPI_BACKUP, C_SPI_VERIFY, C_SPI_WRITE,
     C_TPM, C_TPM_ENROLL, C_SECURE_BOOT, C_BOOT, C_REBUILD, C_BIOS_SET, C_SECURITY,
-    C_WINMAINT_CREATE, C_WINMAINT_BOOT_DEFAULT, C_WINISO_FETCH, C_GPU_TARGET, C_GPU_MODE, C_GPU_MUX,
+    C_WINMAINT_CREATE, C_WINMAINT_BOOT_DEFAULT, C_WINISO_FETCH, C_GPU_DRIVER, C_GPU_GSP,
+    C_GPU_TARGET, C_GPU_MODE, C_GPU_MUX,
     C_STORAGE_NAME, C_STORAGE_ROLE, C_STORAGE_AUTO, C_STORAGE_COMPUTE,
     C_STORAGE_ATTACH, C_STORAGE_FORMAT, C_STORAGE_ARRAY,
 };
@@ -183,6 +184,8 @@ static const struct kind kinds[] = {
     { "winmaint-boot-default", "locachy-winmaint", { "boot-default" }, C_WINMAINT_BOOT_DEFAULT },
     { "winiso-fetch", "locachy-winiso", { "fetch", "windows" }, C_WINISO_FETCH },
     { "winmaint-heal-boot", "locachy-winmaint", { "heal-boot" }, C_NONE },
+    { "gpu-driver-set", "locachy-nvidia", { "set" }, C_GPU_DRIVER },
+    { "gpu-driver-gsp", "locachy-nvidia", { "gsp" }, C_GPU_GSP },
     { "gpu-unlock-install", "locachy-gpu-unlock", { "install", "--target" }, C_GPU_TARGET },
     { "gpu-unlock-set", "locachy-gpu-unlock", { "set" }, C_GPU_TARGET },
     { "gpu-unlock-remove", "locachy-gpu-unlock", { "remove" }, C_NONE },
@@ -407,6 +410,12 @@ static int check_args(const struct kind *k, char **a, int n, char *why, size_t s
     case C_BOOT:
         ok = n == 0 || (n == 1 && (strcmp(a[0], "--luks") == 0 || strcmp(a[0], "--register-only") == 0 ||
                                    strcmp(a[0], "--winmaint-shrink") == 0));
+        break;
+    case C_GPU_DRIVER:
+        ok = n == 1 && (strcmp(a[0], "open") == 0 || strcmp(a[0], "580xx") == 0 || strcmp(a[0], "off") == 0);
+        break;
+    case C_GPU_GSP:
+        ok = n == 1 && (strcmp(a[0], "auto") == 0 || strcmp(a[0], "off") == 0 || strcmp(a[0], "on") == 0);
         break;
     case C_GPU_TARGET: {
         /* all, off (gpu-unlock-set only), or a PCI BDF list; locachy-gpu-unlock checks exact form. */
@@ -944,6 +953,7 @@ static int in_pkg_domain(const struct job *j)
         "locachy-rebuild", "locachy-source", "boot",
         "secure-boot", "security-policy",
         "winmaint-create", "winmaint-reclaim", /* may rebuild the boot image for offline shrink */
+        "gpu-driver-set", "gpu-driver-gsp", /* NVIDIA DKMS packages, modprobe.d, and the boot image */
         "gpu-unlock-install", "gpu-unlock-set", "gpu-unlock-remove", /* packages and the boot image */
         "gpu-power-apply", /* the hp_omen_gpu module, its DKMS build, and the boot image */
         "app-host-build", /* a host program's build: packages on the host (app-build stays out) */

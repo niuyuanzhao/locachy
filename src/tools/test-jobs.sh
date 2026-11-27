@@ -46,7 +46,7 @@ for i in $(seq 1 150); do
     echo "populated 0" >"$t/cgroup/job-$i/cgroup.events"
 done
 install -m 755 "$src/tools/test-jobs-tool.sh" "$run/tool"
-for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint locachy-winiso locachy-gpu-unlock locachy-gpu-power locachy-storage locachy-battery-model; do ln -s "$run/tool" "$t/bin/$p"; done
+for p in locachy-pkg locachy-repos locachy-boot locachy-tpm locachy-app locachy-firmware locachy-security locachy-winmaint locachy-winiso locachy-nvidia locachy-gpu-unlock locachy-gpu-power locachy-storage locachy-battery-model; do ln -s "$run/tool" "$t/bin/$p"; done
 ln -s "$run/tool" "$t/lib/network-client"
 install -m 755 "$server" "$run/locachy-jobs"
 install -m 755 "$client" "$run/test-jobs"
@@ -119,6 +119,11 @@ check "a BIOS value with a newline is refused" refuse bios-set Boot.Order "$(pri
 check "graphics MUX rejects unknown modes" refuse gpu-graphics-mux auto
 check "graphics MUX rejects extra arguments" refuse gpu-graphics-mux hybrid --force
 check "discrete GPU rejects a PCI path" refuse gpu-graphics-dgpu /sys/bus/pci/devices
+check "NVIDIA driver rejects unknown branch" refuse gpu-driver-set 470xx
+check "NVIDIA driver rejects missing branch" refuse gpu-driver-set
+check "NVIDIA driver rejects extra argument" refuse gpu-driver-set open --force
+check "NVIDIA GSP rejects unknown mode" refuse gpu-driver-gsp maybe
+check "NVIDIA GSP rejects extra argument" refuse gpu-driver-gsp off extra
 check "a security switch takes on or off" refuse security-policy set login-skip maybe
 check "a security lock mode takes low or high" refuse security-policy set lock-mode on
 check "an unknown security key is refused" refuse security-policy set root on
@@ -139,6 +144,12 @@ check "the boot image is taken" accept boot
 check "a BIOS setting is taken, its value may start with -" accept bios-set Boot.Order -1
 check "direct NVIDIA MUX is taken" accept gpu-graphics-mux discrete
 check "discrete GPU disable is taken" accept gpu-graphics-dgpu off
+check "NVIDIA open DKMS branch is taken" accept gpu-driver-set open
+check "NVIDIA 580xx DKMS branch is taken" accept gpu-driver-set 580xx
+check "NVIDIA off branch is taken" accept gpu-driver-set off
+check "NVIDIA GSP auto is taken" accept gpu-driver-gsp auto
+check "NVIDIA GSP off is taken" accept gpu-driver-gsp off
+check "NVIDIA GSP on is taken" accept gpu-driver-gsp on
 check "a security switch is taken" accept security-policy set login-skip off
 check "the auto-lock security switch is taken" accept security-policy set auto-lock off
 check "a security lock mode is taken" accept security-policy set lock-mode high
@@ -152,6 +163,9 @@ check "a kernel: locachy-pkg kernel select" grep -q "locachy-pkg kernel select l
 check "a section: locachy-repos apply --set" grep -q "locachy-repos apply --set extra=off \[3\]" "$t/calls"
 check "the periodic ranking runs locachy-repos rank --due" grep -q "locachy-repos rank --due \[2\]" "$t/calls"
 check "a BIOS setting: locachy-firmware bios-set, two words" grep -q "locachy-firmware bios-set Boot.Order -1 \[3\]" "$t/calls"
+check "NVIDIA driver set invokes locachy-nvidia set open" grep -q "locachy-nvidia set open \[2\]" "$t/calls"
+check "NVIDIA driver set invokes locachy-nvidia set 580xx" grep -q "locachy-nvidia set 580xx \[2\]" "$t/calls"
+check "NVIDIA GSP invokes locachy-nvidia gsp off" grep -q "locachy-nvidia gsp off \[2\]" "$t/calls"
 check "a security switch: locachy-security, its words" grep -q "locachy-security set login-skip off \[3\]" "$t/calls"
 check "a named path with a space is taken whole, as one copy" grep -q "fwupd-action local-install $t/jobs/[0-9]*.input \[3\]" "$t/calls"
 check "an SPI write: its options as given, its image as its copy" grep -q \

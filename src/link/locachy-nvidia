@@ -1,0 +1,626 @@
+#!/usr/bin/env python3
+"""locachy-nvidia: Arch Wiki DKMS NVIDIA driver manager (new open -> legacy 580xx -> off).
+
+Manages both supported Arch/CachyOS DKMS NVIDIA driver branches cleanly through
+LOCachy's package manifest (/etc/locachy/packages), kernel headers, native
+/etc/modprobe.d/ drop-ins (read by src/base/modload.c), nvidia-powerd service
+wiring, and unified kernel image rebuilds (locachy-boot):
+
+  1. open   (new, default for Turing RTX 20+ / Ampere / Ada / Blackwell):
+            nvidia-open-dkms + nvidia-utils + dkms + active kernel headers
+            (GSP-RM firmware is mandatory on open kernel modules).
+  2. 580xx  (legacy proprietary 580xx: Maxwell/Pascal/Volta, and Turing/Ampere/Ada
+            laptops needing GSP off via NVreg_EnableGpuFirmware=0, e.g. with
+            Zagitta/gpu-unlock speed selector persistence):
+            nvidia-580xx-dkms + nvidia-580xx-utils + dkms + active kernel headers.
+  3. off    Remove NVIDIA driver packages and modprobe drop-in.
+
+Commands:
+  locachy-nvidia status [--json | --tsv]
+  locachy-nvidia set open|580xx|off
+  locachy-nvidia gsp auto|off|on
+  locachy-nvidia sync-dropin
+"""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+
+BRANCHES = ("open", "580xx", "off")
+GSP_MODES = ("auto", "off", "on")
+
+BRANCH_PACKAGES = {
+    "open": ("nvidia-open-dkms", "nvidia-utils"),
+    "580xx": ("nvidia-580xx-dkms", "nvidia-580xx-utils"),
+}
+ALL_DRIVER_PACKAGES = (
+    "nvidia-open-dkms",
+    "nvidia-utils",
+    "nvidia-580xx-dkms",
+    "nvidia-580xx-utils",
+    "nvidia-dkms",
+)
+
+PCI_BDF_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$")
+MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+
+MODPROBE_NAME = "40-locachy-nvidia.conf"
+DOMAIN_LOCK_PATH = "/run/locachy/pkg.lock"
+
+
+def env_path(var, default):
+    val = os.environ.get(var, "").strip()
+    return Path(val) if val else Path(default)
+
+
+def root_path():
+    return env_path("LOCACHY_NVIDIA_ROOT", "/")
+
+
+def rc_path():
+    return env_path("LOCACHY_NVIDIA_RC", root_path() / "etc/locachy/rc.conf")
+
+
+def machines_dir():
+    return env_path("LOCACHY_MACHINES_DIR", root_path() / "usr/local/share/locachy/machines")
+
+
+def manifest_path():
+    return env_path("LOCACHY_NVIDIA_MANIFEST", root_path() / "etc/locachy/packages")
+
+
+def local_db_path():
+    return env_path("LOCACHY_NVIDIA_LOCAL_DB", root_path() / "var/lib/pacman/local")
+
+
+def sys_pci_path():
+    return env_path("LOCACHY_NVIDIA_SYS_PCI", "/sys/bus/pci/devices")
+
+
+def sys_module_path():
+    return env_path("LOCACHY_NVIDIA_SYS_MODULE", "/sys/module/nvidia")
+
+
+def boot_cmd_path():
+    return os.environ.get("LOCACHY_NVIDIA_BOOT", "/usr/local/bin/locachy-boot")
+
+
+def pkg_cmd_path():
+    return os.environ.get("LOCACHY_NVIDIA_PKG", "/usr/local/bin/locachy-pkg")
+
+
+def power_cmd_path():
+    return os.environ.get("LOCACHY_NVIDIA_POWER", "/usr/local/bin/locachy-gpu-power")
+
+
+def read_rc_file_value(path, key):
+    if not path.is_file():
+        return ""
+    found = ""
+    pat = re.compile(rf"^\s*{re.escape(key)}=\"([^\"]*)\"\s*(?:#.*)?$")
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = pat.match(line)
+        if m:
+            found = m.group(1)
+    return found
+
+
+def read_rc_layered(key):
+    rc = rc_path()
+    direct = read_rc_file_value(rc, key)
+    if direct != "":
+        return direct
+    mach = read_rc_file_value(rc, "machine")
+    if mach and MACHINE_RE.fullmatch(mach):
+        return read_rc_file_value(machines_dir() / f"{mach}.conf", key)
+    return ""
+
+
+def write_rc_key(key, value):
+    rc = rc_path()
+    rc.parent.mkdir(parents=True, exist_ok=True)
+    lines = rc.read_text(encoding="utf-8", errors="replace").splitlines() if rc.is_file() else []
+    pat = re.compile(rf"^\s*{re.escape(key)}=")
+    out = []
+    replaced = False
+    for line in lines:
+        if pat.match(line):
+            if value is not None and not replaced:
+                out.append(f'{key}="{value}"')
+                replaced = True
+            continue
+        out.append(line)
+    if value is not None and not replaced:
+        out.append(f'{key}="{value}"')
+    tmp = rc.with_name(rc.name + f".tmp.{os.getpid()}")
+    tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, rc)
+
+
+def load_manifest_names():
+    mf = manifest_path()
+    if not mf.is_file():
+        return set()
+    names = set()
+    for line in mf.read_text(encoding="utf-8", errors="replace").splitlines():
+        code = line.split("#", 1)[0].strip()
+        if code:
+            names.update(code.split())
+    return names
+
+
+def update_manifest(add=(), remove=()):
+    mf = manifest_path()
+    if not mf.is_file() and not add:
+        return
+    mf.parent.mkdir(parents=True, exist_ok=True)
+    lines = mf.read_text(encoding="utf-8", errors="replace").splitlines() if mf.is_file() else []
+    remove_set = set(remove)
+    existing = set()
+    kept = []
+    for line in lines:
+        code = line.split("#", 1)[0].strip()
+        if not code:
+            kept.append(line)
+            continue
+        words = [w for w in code.split() if w not in remove_set]
+        if not words:
+            continue
+        if len(words) == len(code.split()):
+            kept.append(line)
+        else:
+            kept.append(" ".join(words))
+        existing.update(words)
+    missing = [p for p in add if p not in existing]
+    if missing:
+        kept.append("# NVIDIA DKMS driver (locachy-nvidia)")
+        kept.extend(missing)
+    tmp = mf.with_name(mf.name + f".tmp.{os.getpid()}")
+    tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, mf)
+
+
+def installed_pkg_version(name):
+    db = local_db_path()
+    if not db.is_dir():
+        return ""
+    for desc in db.glob(f"{name}-*/desc"):
+        lines = desc.read_text(encoding="utf-8", errors="replace").splitlines()
+        pkg_name = ""
+        pkg_ver = ""
+        for i, line in enumerate(lines):
+            if line == "%NAME%" and i + 1 < len(lines):
+                pkg_name = lines[i + 1].strip()
+            elif line == "%VERSION%" and i + 1 < len(lines):
+                pkg_ver = lines[i + 1].strip()
+        if pkg_name == name:
+            return pkg_ver
+    return ""
+
+
+def detect_nvidia_gpus():
+    gpus = []
+    pci = sys_pci_path()
+    if not pci.is_dir():
+        return gpus
+    for dev in sorted(pci.iterdir()):
+        bdf = dev.name.lower()
+        if not PCI_BDF_RE.fullmatch(bdf):
+            continue
+        try:
+            vendor = (dev / "vendor").read_text(encoding="utf-8").strip().lower()
+            device = (dev / "device").read_text(encoding="utf-8").strip().lower()
+            cls = (dev / "class").read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            continue
+        if vendor != "0x10de" or not cls.startswith("0x03"):
+            continue
+        driver = ""
+        drv_link = dev / "driver"
+        if drv_link.is_symlink():
+            driver = os.path.basename(os.readlink(drv_link))
+        gpus.append({"bdf": bdf, "vendor": vendor, "device": device, "class": cls, "driver": driver})
+    return gpus
+
+
+def detect_installed_branch():
+    has_open = bool(installed_pkg_version("nvidia-open-dkms") or installed_pkg_version("nvidia-utils"))
+    has_580 = bool(installed_pkg_version("nvidia-580xx-dkms") or installed_pkg_version("nvidia-580xx-utils"))
+    if has_open and has_580:
+        return "mixed"
+    if has_open:
+        return "open"
+    if has_580:
+        return "580xx"
+    return "off"
+
+
+def configured_branch():
+    raw = (read_rc_layered("nvidia_driver") or "").strip().lower()
+    if raw in BRANCHES:
+        return raw
+    return detect_installed_branch() if detect_installed_branch() in ("open", "580xx") else "off"
+
+
+def configured_gsp_policy():
+    raw = (read_rc_layered("nvidia_gsp") or "").strip().lower()
+    if raw in ("0", "off"):
+        return "off"
+    if raw in ("1", "on"):
+        return "on"
+    return "auto"
+
+
+def gpu_unlock_is_active():
+    raw = (read_rc_layered("gpu_unlock_targets") or "").strip().lower()
+    return bool(raw and raw not in ("off", "0"))
+
+
+def should_disable_gsp(branch, gsp_policy, unlock_active):
+    """Only proprietary 580xx honors NVreg_EnableGpuFirmware=0; open requires GSP."""
+    if branch != "580xx":
+        return False
+    if gsp_policy == "off":
+        return True
+    if gsp_policy == "on":
+        return False
+    return bool(unlock_active)
+
+
+def render_modprobe_dropin(branch, gsp_policy, unlock_active):
+    if branch not in ("open", "580xx"):
+        return None
+    lines = [
+        f"# Managed by locachy-nvidia (branch: {branch}, gsp: {gsp_policy})",
+        "blacklist nouveau",
+        "options nouveau modeset=0",
+        "options nvidia-drm modeset=1",
+        "softdep nvidia post: nvidia-uvm",
+    ]
+    if branch == "580xx":
+        if should_disable_gsp(branch, gsp_policy, unlock_active):
+            lines.append("options nvidia NVreg_EnableGpuFirmware=0")
+        elif gsp_policy == "on":
+            lines.append("options nvidia NVreg_EnableGpuFirmware=1")
+    return "\n".join(lines) + "\n"
+
+
+def write_dropin(branch, gsp_policy=None, unlock_active=None):
+    if gsp_policy is None:
+        gsp_policy = configured_gsp_policy()
+    if unlock_active is None:
+        unlock_active = gpu_unlock_is_active()
+    mp = root_path() / "etc/modprobe.d" / MODPROBE_NAME
+    text = render_modprobe_dropin(branch, gsp_policy, unlock_active)
+    if text is None:
+        try:
+            mp.unlink()
+        except FileNotFoundError:
+            pass
+        return False
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    tmp = mp.with_name(mp.name + f".tmp.{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, mp)
+    return True
+
+
+def netns_prefix():
+    if os.environ.get("LOCACHY_NVIDIA_NO_NETNS") == "1":
+        return []
+    if os.path.exists("/run/netns/locachy-net"):
+        return ["ip", "netns", "exec", "locachy-net"]
+    return []
+
+
+def inherited_domain_fds():
+    try:
+        want = os.stat(DOMAIN_LOCK_PATH)
+    except OSError:
+        return ()
+    found = []
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        return ()
+    for name in names:
+        try:
+            fd = int(name)
+            if fd <= 2 or fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC:
+                continue
+            got = os.fstat(fd)
+        except (OSError, ValueError):
+            continue
+        if stat.S_ISREG(got.st_mode) and (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
+            found.append(fd)
+    return tuple(found)
+
+
+def run_cmd(cmd, check=True, **kwargs):
+    print("+", " ".join(str(c) for c in cmd), flush=True)
+    return subprocess.run(cmd, check=check, **kwargs)
+
+
+def run_domain_cmd(cmd, check=True, **kwargs):
+    fds = inherited_domain_fds()
+    if fds:
+        kwargs["pass_fds"] = fds
+    return run_cmd(cmd, check=check, **kwargs)
+
+
+def pacman_has_package(pkg_name):
+    res = subprocess.run(
+        ["pacman", "-Sp", "--", pkg_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=dict(os.environ, LC_ALL="C"),
+    )
+    return res.returncode == 0
+
+
+def package_needs_multilib(pkg_name):
+    res = subprocess.run(
+        ["pacman", "-Si", "--", pkg_name],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, LC_ALL="C"),
+    )
+    if res.returncode != 0:
+        return False
+    for line in (res.stdout or "").splitlines():
+        if line.startswith("Depends On") and " : " in line:
+            deps = line.split(" : ", 1)[1].split()
+            if any(d.startswith("lib32-") for d in deps):
+                return True
+    return False
+
+
+def loaded_driver_info():
+    mod_dir = sys_module_path()
+    if not mod_dir.is_dir():
+        return "", ""
+    ver = ""
+    try:
+        ver = (mod_dir / "version").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        pass
+    return "nvidia", ver
+
+
+def sync_nvidia_powerd():
+    power = power_cmd_path()
+    if not power or not os.path.exists(power):
+        return
+    want = (read_rc_layered("nvidia_powerd") or "").strip()
+    if want == "1":
+        run_domain_cmd([power, "nvidia-powerd", "on"], check=False)
+
+
+def run_boot_rebuild():
+    boot = boot_cmd_path()
+    if boot and os.path.exists(boot):
+        run_domain_cmd([boot])
+
+
+def status_dict():
+    gpus = detect_nvidia_gpus()
+    inst = detect_installed_branch()
+    cfg = configured_branch()
+    gsp = configured_gsp_policy()
+    unlock_on = gpu_unlock_is_active()
+    gsp_off = should_disable_gsp(cfg if cfg in ("open", "580xx") else inst, gsp, unlock_on)
+
+    dkms_pkg = ""
+    utils_pkg = ""
+    if inst == "open":
+        dkms_pkg, utils_pkg = BRANCH_PACKAGES["open"]
+    elif inst == "580xx":
+        dkms_pkg, utils_pkg = BRANCH_PACKAGES["580xx"]
+    dkms_ver = installed_pkg_version(dkms_pkg) if dkms_pkg else ""
+    utils_ver = installed_pkg_version(utils_pkg) if utils_pkg else ""
+
+    boot_k = read_rc_layered("boot_kernel") or "linux-cachyos-bore"
+    headers_inst = bool(installed_pkg_version(f"{boot_k}-headers"))
+    dkms_tool_inst = bool(installed_pkg_version("dkms"))
+
+    loaded_mod, loaded_ver = loaded_driver_info()
+    if not loaded_mod:
+        for g in gpus:
+            if g.get("driver"):
+                loaded_mod = g["driver"]
+                break
+
+    advisory = ""
+    if unlock_on and (cfg == "open" or (cfg == "off" and inst == "open")):
+        advisory = (
+            "gpu-unlock is enabled with nvidia-open-dkms (GSP-RM required); "
+            "if GSP-RM resets unlocked clocks on your laptop GPU, switch to the 580xx DKMS branch (GSP off)."
+        )
+
+    mp_file = root_path() / "etc/modprobe.d" / MODPROBE_NAME
+    return {
+        "configured_branch": cfg,
+        "installed_branch": inst,
+        "dkms_package": dkms_pkg,
+        "dkms_version": dkms_ver,
+        "utils_package": utils_pkg,
+        "utils_version": utils_ver,
+        "boot_kernel": boot_k,
+        "kernel_headers_installed": headers_inst,
+        "dkms_installed": dkms_tool_inst,
+        "gsp_policy": gsp,
+        "gsp_disabled_configured": gsp_off,
+        "gpu_unlock_active": unlock_on,
+        "gpu_unlock_advisory": advisory,
+        "modprobe_configured": mp_file.is_file(),
+        "loaded_driver": loaded_mod or "none",
+        "loaded_version": loaded_ver,
+        "nvidia_gpus": gpus,
+        "branches": ["open", "580xx", "off"],
+    }
+
+
+def cmd_status(args):
+    data = status_dict()
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    if args.tsv:
+        print(f"configured\t{data['configured_branch']}")
+        print(f"installed\t{data['installed_branch']}")
+        print(f"dkms_version\t{data['dkms_version']}")
+        print(f"utils_version\t{data['utils_version']}")
+        print(f"gsp_policy\t{data['gsp_policy']}")
+        print(f"gsp_disabled\t{1 if data['gsp_disabled_configured'] else 0}")
+        print(f"gpu_unlock\t{1 if data['gpu_unlock_active'] else 0}")
+        print(f"gpu_count\t{len(data['nvidia_gpus'])}")
+        print(f"loaded\t{data['loaded_driver']}")
+        print(f"loaded_version\t{data['loaded_version']}")
+        return 0
+    print(f"configured_branch: {data['configured_branch']}")
+    print(f"installed_branch: {data['installed_branch']}"
+          + (f" ({data['dkms_package']} {data['dkms_version']})" if data["dkms_version"] else ""))
+    print(f"gsp_policy: {data['gsp_policy']} (NVreg_EnableGpuFirmware=0: {'yes' if data['gsp_disabled_configured'] else 'no'})")
+    print(f"loaded_driver: {data['loaded_driver']}"
+          + (f" ({data['loaded_version']})" if data["loaded_version"] else ""))
+    print(f"nvidia_gpus: {', '.join(g['bdf'] + '(' + g['device'] + ')' for g in data['nvidia_gpus']) or 'none'}")
+    if data["gpu_unlock_advisory"]:
+        print(f"advisory: {data['gpu_unlock_advisory']}")
+    return 0
+
+
+def cmd_set(args):
+    branch = args.branch
+    if branch not in BRANCHES:
+        raise ValueError(f"unsupported NVIDIA driver branch: {branch!r} (expected one of {', '.join(BRANCHES)})")
+
+    pkg = pkg_cmd_path()
+    has_pkg = bool(pkg and os.path.exists(pkg))
+
+    if branch == "off":
+        write_dropin("off")
+        write_rc_key("nvidia_driver", "off")
+        manifest_names = load_manifest_names()
+        to_remove = [p for p in ALL_DRIVER_PACKAGES if p in manifest_names or installed_pkg_version(p)]
+        if to_remove:
+            if has_pkg:
+                run_domain_cmd([pkg, "remove", *to_remove])
+            else:
+                update_manifest(remove=to_remove)
+                inst_rem = [p for p in to_remove if installed_pkg_version(p)]
+                if inst_rem:
+                    run_cmd(["pacman", "-Rns", "--noconfirm", *inst_rem], check=False)
+        sync_nvidia_powerd()
+        run_boot_rebuild()
+        print("locachy-nvidia: NVIDIA driver removed and boot image rebuilt", flush=True)
+        return 0
+
+    target_pkgs = list(BRANCH_PACKAGES[branch])
+    opposite_pkgs = [p for p in ALL_DRIVER_PACKAGES if p not in target_pkgs]
+
+    # Pre-flight check before touching any installed driver.
+    missing_repo = [p for p in target_pkgs if not pacman_has_package(p)]
+    if missing_repo:
+        raise RuntimeError(
+            f"NVIDIA driver branch {branch!r} packages not found in enabled repositories: {', '.join(missing_repo)}"
+        )
+    if branch == "580xx" and read_rc_layered("repo_multilib") == "0" and package_needs_multilib("nvidia-580xx-utils"):
+        raise RuntimeError(
+            "nvidia-580xx-utils requires lib32-* dependencies from [multilib]; "
+            "enable Multilib in Settings -> System -> Software Sources first"
+        )
+
+    # DKMS always needs active kernel headers and dkms.
+    if has_pkg:
+        run_domain_cmd([pkg, "kernel", "headers", "on"])
+        if not installed_pkg_version("dkms") or "dkms" not in load_manifest_names():
+            run_domain_cmd([pkg, "install", "dkms"])
+
+    opposite_installed = [p for p in opposite_pkgs if installed_pkg_version(p)]
+    if opposite_installed:
+        # Atomically replace conflicting NVIDIA driver branch (--ask 4 = confirm conflict removal)
+        # so reverse dependencies (vulkan-driver, CUDA consumers) are never broken mid-switch.
+        net = netns_prefix()
+        run_cmd([*net, "pacman", "-S", "--needed", "--noconfirm", "--ask", "4", *target_pkgs])
+        update_manifest(add=[*target_pkgs, "dkms"], remove=opposite_pkgs)
+        if has_pkg:
+            run_domain_cmd([pkg, "sync"])
+    else:
+        update_manifest(remove=opposite_pkgs)
+        if has_pkg:
+            run_domain_cmd([pkg, "install", *target_pkgs])
+        else:
+            net = netns_prefix()
+            run_cmd([*net, "pacman", "-S", "--needed", "--noconfirm", *target_pkgs])
+            update_manifest(add=[*target_pkgs, "dkms"])
+
+    write_rc_key("nvidia_driver", branch)
+    if not read_rc_file_value(rc_path(), "nvidia_gsp"):
+        write_rc_key("nvidia_gsp", "auto")
+    write_dropin(branch)
+    sync_nvidia_powerd()
+    run_boot_rebuild()
+    print(f"locachy-nvidia: installed branch={branch} ({', '.join(target_pkgs)}) and rebuilt boot image", flush=True)
+    return 0
+
+
+def cmd_gsp(args):
+    mode = args.mode
+    if mode not in GSP_MODES:
+        raise ValueError(f"unsupported GSP mode: {mode!r} (expected one of {', '.join(GSP_MODES)})")
+    write_rc_key("nvidia_gsp", mode)
+    branch = configured_branch()
+    if branch in ("open", "580xx"):
+        write_dropin(branch, gsp_policy=mode)
+    run_boot_rebuild()
+    print(f"locachy-nvidia: nvidia_gsp set to {mode} (active branch: {branch})", flush=True)
+    return 0
+
+
+def cmd_sync_dropin(_args):
+    branch = configured_branch()
+    write_dropin(branch)
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="locachy-nvidia", description="Manage Arch/CachyOS DKMS NVIDIA drivers on LOCachy.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp_st = sub.add_parser("status", help="Show installed/configured NVIDIA driver branch, GSP state, and GPUs")
+    sp_st.add_argument("--json", action="store_true")
+    sp_st.add_argument("--tsv", action="store_true")
+    sp_st.set_defaults(func=cmd_status)
+
+    sp_set = sub.add_parser("set", help="Install/switch NVIDIA DKMS driver branch (open, 580xx) or remove (off)")
+    sp_set.add_argument("branch", choices=BRANCHES)
+    sp_set.set_defaults(func=cmd_set)
+
+    sp_gsp = sub.add_parser("gsp", help="Configure NVIDIA GSP firmware policy (auto, off, on; off applies to 580xx)")
+    sp_gsp.add_argument("mode", choices=GSP_MODES)
+    sp_gsp.set_defaults(func=cmd_gsp)
+
+    sp_sync = sub.add_parser("sync-dropin", help="Rewrite /etc/modprobe.d/40-locachy-nvidia.conf from current rc.conf")
+    sp_sync.set_defaults(func=cmd_sync_dropin)
+
+    args = p.parse_args(argv)
+    try:
+        return args.func(args)
+    except Exception as exc:
+        print(f"locachy-nvidia: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

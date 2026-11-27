@@ -9,7 +9,7 @@
  * Configuration follows kmod and systemd-modules-load precedence (/etc over
  * /usr/local/lib over /usr/lib, basename shadowing, lexicographical order):
  *   modprobe.d (.conf)     options, blacklist, softdep
- *   /proc/cmdline          modprobe.blacklist=mod1,mod2
+ *   /proc/cmdline          modprobe.blacklist=mod1,mod2 and mod.param[=val]
  *   modules-load.d (.conf) modules loaded explicitly before coldplug
  * At start, explicit modules are loaded, then every device under /sys/devices
  * with a modalias gets its modules (coldplug); after that, devices that appear
@@ -716,9 +716,26 @@ static void collect_conf_dir(const char *dirpath, struct conf_entry **entries, i
     closedir(d);
 }
 
-/* Parse /proc/cmdline for modprobe.blacklist=mod1,mod2,... tokens, handling
- * whitespace separation and double-quoted segments as the kernel does. */
-static void load_cmdline_blacklist(const char *cmdline_path)
+static int valid_mod_ident(const char *s, size_t len)
+{
+    if (len == 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Parse /proc/cmdline for modprobe.blacklist=mod1,mod2,... and <mod>.<param>[=<val>]
+ * tokens (matching libkmod's kcmdline handling, since finit_module() does not
+ * automatically apply kernel cmdline module parameters for loadable modules).
+ * Runs after modprobe.d so kernel command-line parameters take precedence. */
+static void load_cmdline_config(const char *cmdline_path)
 {
     char *buf = read_proc_file(cmdline_path);
     if (buf == NULL) {
@@ -761,6 +778,34 @@ static void load_cmdline_blacklist(const char *cmdline_path)
                 }
                 q = comma + 1;
             }
+            continue;
+        }
+        char *eq = strchr(tok, '=');
+        char *dot = strchr(tok, '.');
+        if (dot == NULL || (eq != NULL && dot > eq)) {
+            continue;
+        }
+        size_t mlen = (size_t)(dot - tok);
+        const char *param = dot + 1;
+        size_t plen = eq != NULL ? (size_t)(eq - param) : strlen(param);
+        if (!valid_mod_ident(tok, mlen) || !valid_mod_ident(param, plen)) {
+            continue;
+        }
+        if (mlen == 8 && memcmp(tok, "modprobe", 8) == 0) {
+            continue;
+        }
+        *dot = '\0';
+        if (eq != NULL && strpbrk(eq + 1, " \t") != NULL) {
+            /* Re-quote values containing whitespace so finit_module's parse_args keeps them intact. */
+            size_t need = strlen(param) + 3;
+            char *quoted = malloc(need);
+            if (quoted != NULL) {
+                snprintf(quoted, need, "%.*s=\"%s\"", (int)plen, param, eq + 1);
+                add_module_options(tok, quoted);
+                free(quoted);
+            }
+        } else {
+            add_module_options(tok, param);
         }
     }
     free(buf);
@@ -770,7 +815,7 @@ static void load_cmdline_blacklist(const char *cmdline_path)
  * precedence: /etc/modprobe.d > /usr/local/lib/modprobe.d > /usr/lib/modprobe.d
  * (earlier matching basenames shadow later ones, so an empty file or /dev/null
  * symlink masks lower-priority files), parsed in lexicographical basename
- * order, plus modprobe.blacklist= from the kernel command line. */
+ * order, plus modprobe.blacklist= and mod.param=val from the kernel command line. */
 static void load_modprobe_config(const char *root)
 {
     struct conf_entry *entries = NULL;
@@ -792,7 +837,7 @@ static void load_modprobe_config(const char *root)
         free(entries[i].path);
     }
     free(entries);
-    load_cmdline_blacklist(modload_cmdline_path);
+    load_cmdline_config(modload_cmdline_path);
 }
 
 static void load_modules_softdep(void)

@@ -573,6 +573,72 @@ static void test_modules_load_before_coldplug(const char *base)
     modload_reset_for_test();
 }
 
+static void test_cmdline_module_options(const char *base)
+{
+    char root[384], moddir[512], p[1024], cmdline[1024];
+    struct utsname u;
+    uname(&u);
+    assert(snprintf(root, sizeof root, "%s/t5", base) < (int)sizeof root);
+    assert(snprintf(moddir, sizeof moddir, "%s/lib/modules/%s", root, u.release) < (int)sizeof moddir);
+    mkdir_p(moddir);
+
+    make_mod(moddir, "kernel/i915.ko.zst", "i915");
+    make_mod(moddir, "kernel/xe.ko.zst", "xe");
+    make_mod(moddir, "kernel/nvidia_drm.ko.zst", "nvidia_drm");
+    make_mod(moddir, "kernel/gpu_unlock.ko.zst", "gpu_unlock");
+    make_mod(moddir, "kernel/spaced.ko.zst", "spaced");
+
+    snprintf(p, sizeof p, "%s/modules.dep", moddir);
+    write_file(p,
+               "kernel/i915.ko.zst:\n"
+               "kernel/xe.ko.zst:\n"
+               "kernel/nvidia_drm.ko.zst:\n"
+               "kernel/gpu_unlock.ko.zst:\n"
+               "kernel/spaced.ko.zst:\n");
+    snprintf(p, sizeof p, "%s/modules.alias", moddir);
+    write_file(p, "");
+
+    snprintf(p, sizeof p, "%s/etc/modprobe.d", root);
+    mkdir_p(p);
+    snprintf(p, sizeof p, "%s/etc/modprobe.d/10-test.conf", root);
+    write_file(p, "options i915 enable_psr=0\n");
+
+    snprintf(cmdline, sizeof cmdline, "%s/cmdline", root);
+    write_file(cmdline,
+               "quiet nouveau.modeset=0 nvidia-drm.modeset=1 "
+               "i915.force_probe=!4688 xe.force_probe=4688 "
+               "gpu_unlock.targets=0000:01:00.0 "
+               "spaced.msg=\"hello world\" spaced.debug "
+               "modprobe.blacklist=not_an_option\n");
+
+    modload_reset_for_test();
+    reset_mock();
+    modload_cmdline_path = cmdline;
+    set_moddir(moddir);
+    load_modprobe_config(root);
+    assert(load_tables() == 0);
+
+    assert(load_named("i915", 0) == 0);
+    assert(load_named("xe", 0) == 0);
+    assert(load_named("nvidia_drm", 0) == 0);
+    assert(load_named("gpu_unlock", 0) == 0);
+    assert(load_named("spaced", 0) == 0);
+
+    int idx_i915 = find_rec("i915");
+    int idx_xe = find_rec("xe");
+    int idx_nvdrm = find_rec("nvidia_drm");
+    int idx_gu = find_rec("gpu_unlock");
+    int idx_sp = find_rec("spaced");
+    assert(idx_i915 >= 0 && strcmp(recs[idx_i915].opts, "enable_psr=0 force_probe=!4688") == 0);
+    assert(idx_xe >= 0 && strcmp(recs[idx_xe].opts, "force_probe=4688") == 0);
+    assert(idx_nvdrm >= 0 && strcmp(recs[idx_nvdrm].opts, "modeset=1") == 0);
+    assert(idx_gu >= 0 && strcmp(recs[idx_gu].opts, "targets=0000:01:00.0") == 0);
+    assert(idx_sp >= 0 && strcmp(recs[idx_sp].opts, "msg=\"hello world\" debug") == 0);
+    assert(strcmp(options_for("modprobe"), "") == 0);
+
+    modload_reset_for_test();
+}
+
 int main(int argc, char **argv)
 {
     char tmpl[] = "/tmp/test-modload-XXXXXX";
@@ -592,6 +658,7 @@ int main(int argc, char **argv)
     test_cmdline_blacklist(base);
     test_softdep_and_cycles(base);
     test_modules_load_before_coldplug(base);
+    test_cmdline_module_options(base);
 
     if (own_dir) {
         rm_rf(base);

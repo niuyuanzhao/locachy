@@ -101,6 +101,23 @@ def pkg_cmd_path():
     return os.environ.get("LOCACHY_GPU_UNLOCK_PKG", "/usr/local/bin/locachy-pkg")
 
 
+def nvidia_cmd_path():
+    return os.environ.get("LOCACHY_GPU_UNLOCK_NVIDIA", "/usr/local/bin/locachy-nvidia")
+
+
+def sync_nvidia_dropin():
+    nv = nvidia_cmd_path()
+    if nv and os.path.exists(nv):
+        env = dict(os.environ)
+        if os.environ.get("LOCACHY_GPU_UNLOCK_ROOT"):
+            env["LOCACHY_NVIDIA_ROOT"] = os.environ["LOCACHY_GPU_UNLOCK_ROOT"]
+        if os.environ.get("LOCACHY_GPU_UNLOCK_RC"):
+            env["LOCACHY_NVIDIA_RC"] = os.environ["LOCACHY_GPU_UNLOCK_RC"]
+        if os.environ.get("LOCACHY_GPU_UNLOCK_LOCAL_DB"):
+            env["LOCACHY_NVIDIA_LOCAL_DB"] = os.environ["LOCACHY_GPU_UNLOCK_LOCAL_DB"]
+        subprocess.run([nv, "sync-dropin"], check=False, env=env)
+
+
 def load_upstream_meta():
     p = upstream_meta_path()
     if p.is_file():
@@ -503,6 +520,7 @@ def cmd_install(args):
         update_manifest(add=meta.get("packages") or DEFAULT_PACKAGES)
         write_dropins(True)
         write_rc_key("gpu_unlock_targets", target)
+        sync_nvidia_dropin()
         run_boot_rebuild()
         print(f"locachy-gpu-unlock: installed and enabled for targets={target}", flush=True)
         return 0
@@ -515,6 +533,7 @@ def cmd_set(args):
     if target == "off":
         write_dropins(False)
         write_rc_key("gpu_unlock_targets", None)
+        sync_nvidia_dropin()
         run_boot_rebuild()
         print("locachy-gpu-unlock: disabled (boot image rebuilt)", flush=True)
         return 0
@@ -522,6 +541,7 @@ def cmd_set(args):
         raise RuntimeError("gpu-unlock packages are not installed yet; run 'locachy-gpu-unlock install' first")
     write_dropins(True)
     write_rc_key("gpu_unlock_targets", target)
+    sync_nvidia_dropin()
     run_boot_rebuild()
     print(f"locachy-gpu-unlock: enabled for targets={target} (boot image rebuilt)", flush=True)
     return 0
@@ -534,6 +554,7 @@ def cmd_remove(_args):
     present = [p for p in DEFAULT_PACKAGES if installed_pkg_version(p)]
     if present:
         run_cmd(["pacman", "-Rns", "--noconfirm", *present])
+    sync_nvidia_dropin()
     run_boot_rebuild()
     print("locachy-gpu-unlock: removed and boot image rebuilt", flush=True)
     return 0
