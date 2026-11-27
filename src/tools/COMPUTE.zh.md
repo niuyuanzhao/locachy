@@ -164,7 +164,7 @@ scp locachy-gpu:/srv/storage/experiments/work/probe-001/out/probe.txt .
 
 ## GPU
 
-创建环境时加上 `--gpu`（且 `compute_gpu` 不为 `"0"`），容器会获得 `/dev/nvidiactl`、`/dev/nvidia-modeset`、`/dev/nvidia-uvm*`、`/dev/nvidiaN`、`/dev/nvidia-caps/*` 和 `/dev/dri/renderD*`，以及主机 NVIDIA 用户态库的只读绑定挂载（`libcuda.so*`、`libnvidia-*.so*`、`libnvcuvid.so*`、`libnvoptix.so*`），位于 `/usr/local/lib/locachy-gpu`。`locachy-compute gpu-probe` 列出主机上实际存在的设备。不存在的设备会被跳过。
+创建环境时加上 `--gpu`（且 `compute_gpu` 不为 `"0"`），若主机已加载 `nvidia` 内核模块，`locachy-compute` 会先确保主机上的 NVIDIA 字符设备节点（`/dev/nvidiactl`、`/dev/nvidia-modeset`、`/dev/nvidiaN`、`/dev/nvidia-uvm`、`/dev/nvidia-uvm-tools`）已就绪，再将这些节点、`/dev/nvidia-caps/*` 和 `/dev/dri/renderD*` 绑定进容器。主机 NVIDIA 用户态库（`libcuda.so*`、`libnvidia-*.so*`、`libnvcuvid.so*`、`libnvoptix.so*`、`libcudadebugger.so*`）只读绑定在 `/usr/local/lib/locachy-gpu` 的独立 tmpfs 上（写入 `/etc/ld.so.conf.d/locachy-gpu.conf`、设置 `LD_LIBRARY_PATH` 并在容器启动时刷新容器内 `ldconfig`），主机 `nvidia-smi` 也只读暴露到 `/usr/local/bin/nvidia-smi`。`locachy-compute gpu-probe` 列出主机当前已存在的设备。不存在的设备会被跳过。
 
 ## KVM 微型虚拟机
 

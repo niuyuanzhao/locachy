@@ -62,7 +62,7 @@ locachy-gpu-unlock remove
 
 实现机制：
 
-1. **上游跟踪与最小 PCI ID 补丁**：上游仓库元数据存放在 `/usr/local/share/locachy/gpu-unlock/upstream.json`。执行 `install` 时，`locachy-gpu-unlock` 通过 `locachy-net`（若启用）浅克隆上游仓库，幂等地将 `extra_pci_ids` 中上游尚未收录的 PCI ID（例如 RTX 3080 Ti Laptop 对应的 `GA103(0x2460)`）插入 `kernel/gpu_unlock/recipes.c`，随后通过 `setpriv` 切换到隔离的非 root 构建用户（`locachy-builder` / `builder` / `nobody`）执行 `makepkg`。上游 `PKGBUILD` 自行下载固定版本的官方 NVIDIA 固件输入并做 SHA-256 校验。
+1. **上游跟踪与最小 PCI ID 补丁**：上游仓库元数据存放在 `/usr/local/share/locachy/gpu-unlock/upstream.json`。执行 `install` 时，`locachy-gpu-unlock` 通过 `locachy-net`（若启用）克隆上游仓库，幂等地将 `extra_pci_ids` 中上游尚未收录的 PCI ID（例如 RTX 3080 Ti Laptop 对应的 `GA103(0x2460)`）插入 `kernel/gpu_unlock/recipes.c`，随后通过 `setpriv` 切换到隔离的非 root 构建用户（`locachy-builder` / `builder` / `nobody`）执行 `makepkg`。上游 `PKGBUILD` 自行下载固定版本的官方 NVIDIA 固件输入并做 SHA-256 校验。
 2. **包清单与 DKMS**：`locachy-gpu-unlock` 通过 `locachy-pkg` 确保内核头文件与构建依赖（`dkms`、`git`、`python`、`zstd`、`openssl`）已就位，安装生成的 `gpu-unlock-dkms` 与 `gpu-unlock-firmware`，并将两者登记到 `/etc/locachy/packages`。
 3. **原生启动顺序（无需改动 initramfs）**：LOCachy 不将 `nvidia` 打进 initramfs。`switch_root` 之后，1 号进程调用 `modules_start()`（`src/base/modload.c`），严格先于 PCI `coldplug()` 加载 `/etc/modules-load.d/*.conf`，并解析 `/etc/modprobe.d/` 中的 `softdep`。`locachy-gpu-unlock` 写入：
    - `/etc/modules-load.d/50-locachy-gpu-unlock.conf`（`gpu_unlock`）

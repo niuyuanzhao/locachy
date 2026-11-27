@@ -480,9 +480,101 @@ def discover_gpu_resources() -> dict[str, list[str]]:
     return {"devices": devices, "nvidia_libs": libs}
 
 
+def _char_device_majors(proc_devices: Path) -> dict[str, int]:
+    majors: dict[str, int] = {}
+    if not proc_devices.is_file():
+        return majors
+    in_char = False
+    for line in proc_devices.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.endswith(":"):
+            in_char = stripped.lower().startswith("character")
+            continue
+        if not in_char:
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            majors[parts[1].strip()] = int(parts[0])
+    return majors
+
+
+def _nvidia_gpu_minors(proc_root: Path) -> list[int]:
+    gpus_dir = proc_root / "driver/nvidia/gpus"
+    if not gpus_dir.is_dir():
+        return []
+    minors: set[int] = set()
+    for entry in sorted(gpus_dir.iterdir()):
+        info = entry / "information"
+        if not info.is_file():
+            continue
+        for line in info.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = re.match(r"^\s*Device Minor:\s*([0-9]+)\s*$", line)
+            if m:
+                minors.add(int(m.group(1)))
+                break
+    return sorted(minors)
+
+
+def ensure_nvidia_device_nodes(
+    *,
+    dev_root: Path = Path("/dev"),
+    proc_root: Path = Path("/proc"),
+    sys_root: Path = Path("/sys"),
+    mknod_fn=None,
+    chmod_fn=None,
+    run_tools: bool = True,
+) -> list[str]:
+    """Ensure host /dev/nvidia* and /dev/nvidia-uvm* char nodes exist before --gpu launch.
+
+    Safe no-op when the nvidia kernel module is not loaded on this host.
+    Returns the list of device paths newly created.
+    """
+    if not (sys_root / "module/nvidia").is_dir():
+        return []
+    if run_tools:
+        nv_mp = shutil.which("nvidia-modprobe")
+        if nv_mp:
+            subprocess.run([nv_mp], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run([nv_mp, "-u", "-c=0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if not (sys_root / "module/nvidia_uvm").is_dir():
+            mp = shutil.which("modprobe")
+            if mp:
+                subprocess.run([mp, "nvidia_uvm"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    majors = _char_device_majors(proc_root / "devices")
+    wanted: list[tuple[Path, int, int]] = []
+    nv_major = majors.get("nvidia-frontend", majors.get("nvidia"))
+    if nv_major is not None:
+        wanted.append((dev_root / "nvidiactl", nv_major, 255))
+        if (sys_root / "module/nvidia_modeset").is_dir():
+            wanted.append((dev_root / "nvidia-modeset", nv_major, 254))
+        for minor in _nvidia_gpu_minors(proc_root):
+            wanted.append((dev_root / f"nvidia{minor}", nv_major, minor))
+    uvm_major = majors.get("nvidia-uvm")
+    if uvm_major is not None:
+        wanted.append((dev_root / "nvidia-uvm", uvm_major, 0))
+        wanted.append((dev_root / "nvidia-uvm-tools", uvm_major, 1))
+
+    mk = mknod_fn or os.mknod
+    ch = chmod_fn or os.chmod
+    created: list[str] = []
+    for path, major, minor in wanted:
+        if path.exists():
+            continue
+        try:
+            mk(str(path), stat.S_IFCHR | 0o666, os.makedev(major, minor))
+            ch(str(path), 0o666)
+            created.append(str(path))
+        except OSError:
+            continue
+    return created
+
+
 def _safe_extract_tar(tf: tarfile.TarFile, dest: Path) -> None:
     dest_real = os.path.realpath(dest)
-    for member in tf.getmembers():
+    for member in tf:
         name = member.name.lstrip("/")
         if not name or name in (".", "./"):
             continue
@@ -561,13 +653,27 @@ def _extract_tar_path(tar_path: Path, dest: Path) -> None:
         if not zstd:
             raise ComputeError("zstd is required to extract .tar.zst images")
         proc = subprocess.Popen([zstd, "-dc", str(tar_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        assert proc.stdout is not None
+        assert proc.stdout is not None and proc.stderr is not None
+        failed = False
         try:
             with tarfile.open(fileobj=proc.stdout, mode="r|*") as tf:
                 _safe_extract_tar(tf, dest)
+            # Drain trailing tar EOF padding so zstd finishes cleanly without SIGPIPE.
+            while proc.stdout.read(65536):
+                pass
+        except Exception:
+            failed = True
+            proc.terminate()
+            raise
         finally:
-            _, err = proc.communicate()
-            if proc.returncode != 0:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+            err = proc.stderr.read()
+            proc.stderr.close()
+            rc = proc.wait()
+            if not failed and rc != 0:
                 raise ComputeError(f"zstd extract failed: {err.decode('utf-8', 'replace').strip()}")
         return
     with tarfile.open(tar_path, mode="r:*") as tf:
@@ -969,6 +1075,7 @@ else
     ip link set lo up 2>/dev/null || true
 fi
 
+have_nv_libs=0
 if [ "$want_gpu" = 1 ]; then
     mkdir -p "$merged/dev/dri"
     for node in /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia[0-9]*; do
@@ -989,26 +1096,54 @@ if [ "$want_gpu" = 1 ]; then
         touch "$merged/dev/dri/${node##*/}"
         mount --bind "$node" "$merged/dev/dri/${node##*/}"
     done
+    # Mount a fresh tmpfs for host NVIDIA libs so persistent OverlayFS upperdir
+    # never retains stale zero-byte placeholders across runs or driver upgrades.
     gpu_lib_dir="$merged/usr/local/lib/locachy-gpu"
-    have_nv_libs=0
-    for ldir in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu; do
+    mkdir -p "$gpu_lib_dir"
+    mount -t tmpfs locachy-gpu "$gpu_lib_dir" -o mode=0755,nosuid,nodev
+    for ldir in ${LOCACHY_COMPUTE_GPU_LIBDIRS:-/usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu}; do
         [ -d "$ldir" ] || continue
-        for lib in "$ldir"/libcuda.so* "$ldir"/libnvidia-*.so* "$ldir"/libnvcuvid.so* "$ldir"/libnvoptix.so*; do
+        for lib in "$ldir"/libcuda.so* "$ldir"/libnvidia-*.so* "$ldir"/libnvcuvid.so* "$ldir"/libnvoptix.so* "$ldir"/libcudadebugger.so*; do
             [ -e "$lib" ] || continue
-            mkdir -p "$gpu_lib_dir"
             base=${lib##*/}
             [ ! -e "$gpu_lib_dir/$base" ] || continue
             touch "$gpu_lib_dir/$base"
-            mount --bind -o ro "$lib" "$gpu_lib_dir/$base" 2>/dev/null || rm -f "$gpu_lib_dir/$base"
-            have_nv_libs=1
+            if mount --bind "$lib" "$gpu_lib_dir/$base" 2>/dev/null &&
+                mount -o remount,bind,ro "$gpu_lib_dir/$base" 2>/dev/null; then
+                have_nv_libs=1
+            else
+                umount "$gpu_lib_dir/$base" 2>/dev/null || true
+                rm -f "$gpu_lib_dir/$base"
+            fi
         done
+    done
+    for smi in ${LOCACHY_COMPUTE_NVIDIA_SMI:-/usr/bin/nvidia-smi /usr/local/bin/nvidia-smi}; do
+        [ -f "$smi" ] && [ -x "$smi" ] || continue
+        mkdir -p "$merged/run/locachy-gpu/bin" "$merged/usr/local/bin"
+        touch "$merged/run/locachy-gpu/bin/nvidia-smi"
+        if mount --bind "$smi" "$merged/run/locachy-gpu/bin/nvidia-smi" 2>/dev/null &&
+            mount -o remount,bind,ro "$merged/run/locachy-gpu/bin/nvidia-smi" 2>/dev/null; then
+            if [ ! -e "$merged/usr/local/bin/nvidia-smi" ] || [ -L "$merged/usr/local/bin/nvidia-smi" ]; then
+                ln -sfn /run/locachy-gpu/bin/nvidia-smi "$merged/usr/local/bin/nvidia-smi"
+            fi
+        else
+            umount "$merged/run/locachy-gpu/bin/nvidia-smi" 2>/dev/null || true
+            rm -f "$merged/run/locachy-gpu/bin/nvidia-smi"
+        fi
+        break
     done
     if [ "$have_nv_libs" = 1 ]; then
         mkdir -p "$merged/etc/ld.so.conf.d"
         printf '/usr/local/lib/locachy-gpu\n' >"$merged/etc/ld.so.conf.d/locachy-gpu.conf"
         export LD_LIBRARY_PATH="/usr/local/lib/locachy-gpu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     fi
+else
+    if [ -L "$merged/usr/local/bin/nvidia-smi" ] && [ "$(readlink "$merged/usr/local/bin/nvidia-smi" 2>/dev/null || true)" = "/run/locachy-gpu/bin/nvidia-smi" ]; then
+        rm -f "$merged/usr/local/bin/nvidia-smi"
+    fi
+    rm -f "$merged/etc/ld.so.conf.d/locachy-gpu.conf"
 fi
+unset LOCACHY_COMPUTE_GPU_LIBDIRS LOCACHY_COMPUTE_NVIDIA_SMI
 
 # Bind-mount explicit host data directories.
 if [ -n "$mounts_json" ] && [ "$mounts_json" != "[]" ]; then
@@ -1052,7 +1187,8 @@ import ctypes, errno, os, signal, struct, sys
 
 merged, workdir, use_init = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 ready_fd = int(sys.argv[4])
-cmd = sys.argv[5:]
+refresh_ldconfig = sys.argv[5] == "1"
+cmd = sys.argv[6:]
 libc = ctypes.CDLL(None, use_errno=True)
 sys_pivot = 155 if os.uname().machine in ("x86_64", "amd64") else 41
 MNT_DETACH = 2
@@ -1092,6 +1228,25 @@ if libc.umount2(ctypes.c_char_p(b"."), MNT_DETACH) != 0:
     e = ctypes.get_errno()
     raise OSError(e, f"umount2 old root failed: {os.strerror(e)}")
 os.chdir("/")
+if refresh_ldconfig:
+    for ldc in ("/sbin/ldconfig", "/usr/sbin/ldconfig", "/usr/bin/ldconfig"):
+        if os.path.isfile(ldc) and os.access(ldc, os.X_OK):
+            try:
+                ld_pid = os.fork()
+                if ld_pid == 0:
+                    os.close(ready_fd)
+                    devnull = os.open(os.devnull, os.O_RDWR)
+                    os.dup2(devnull, 0)
+                    os.dup2(devnull, 1)
+                    os.dup2(devnull, 2)
+                    if devnull > 2:
+                        os.close(devnull)
+                    os.execv(ldc, [ldc])
+                    os._exit(127)
+                os.waitpid(ld_pid, 0)
+            except OSError:
+                pass
+            break
 if os.path.isdir(workdir):
     os.chdir(workdir)
 
@@ -1140,7 +1295,7 @@ while True:
     if wpid == pid:
         rc = os.waitstatus_to_exitcode(status)
         sys.exit(rc if rc >= 0 else 128 - rc)
-' "$merged" "$workdir" "$use_init" "$ready_fd" "$@"
+' "$merged" "$workdir" "$use_init" "$ready_fd" "$have_nv_libs" "$@"
 """
 
 
@@ -1439,6 +1594,9 @@ def _prepare_container_launch(
     if not os.path.isabs(workdir):
         raise ComputeError(f"workdir must be absolute: {workdir!r}")
 
+    if want_gpu and os.geteuid() == 0:
+        ensure_nvidia_device_nodes()
+
     run_env = {"PATH": os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}
     if preserve_term:
         run_env["TERM"] = os.environ.get("TERM") or "xterm-256color"
@@ -1449,6 +1607,11 @@ def _prepare_container_launch(
             raise ComputeError(f"invalid --env entry: {item!r}")
         k, v = item.split("=", 1)
         run_env[k] = v
+    for seam in ("LOCACHY_COMPUTE_GPU_LIBDIRS", "LOCACHY_COMPUTE_NVIDIA_SMI"):
+        if seam in os.environ:
+            run_env[seam] = os.environ[seam]
+        else:
+            run_env.pop(seam, None)
 
     unshare_cmd = ["unshare", "--mount", "--pid", "--fork", "--kill-child", "--forward-signals", "--propagation", "slave"]
     net_prefix: list[str] = []

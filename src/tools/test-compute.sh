@@ -146,6 +146,46 @@ check("image: tarball import succeeds", r.returncode == 0, r.stderr)
 r = run_cli(COMPUTE, "image", "list", "--json")
 check("image: list reports imported image", r.returncode == 0 and "mini-ubuntu" in r.stdout, r.stdout)
 
+# 1b. Streaming .tar.zst import (multi-file archive + unsafe path rejection)
+if shutil.which("zstd"):
+    zst_src = OUT / "zst-rootfs-src"
+    (zst_src / "etc").mkdir(parents=True, exist_ok=True)
+    (zst_src / "usr/bin").mkdir(parents=True, exist_ok=True)
+    (zst_src / "etc/zst-one").write_text("alpha-1\n", encoding="utf-8")
+    (zst_src / "etc/zst-two").write_text("beta-2\n" * 4096, encoding="utf-8")
+    os.symlink("zst-one", zst_src / "etc/zst-link")
+    raw_tar = OUT / "mini-zst.tar"
+    with tarfile.open(raw_tar, "w") as tf:
+        for item in sorted(zst_src.iterdir()):
+            tf.add(item, arcname=item.name)
+    zst_tar = OUT / "mini-zst.tar.zst"
+    subprocess.run(["zstd", "-q", "-f", str(raw_tar), "-o", str(zst_tar)], check=True)
+    r_zst = run_cli(COMPUTE, "image", "import", "mini-zst", str(zst_tar))
+    zst_root = Path(env["LOCACHY_COMPUTE_BASE"]) / "images/mini-zst/rootfs"
+    check("image: .tar.zst streaming import extracts multi-file archive and symlinks",
+          r_zst.returncode == 0
+          and (zst_root / "etc/zst-one").read_text(encoding="utf-8") == "alpha-1\n"
+          and (zst_root / "etc/zst-two").read_text(encoding="utf-8") == "beta-2\n" * 4096
+          and (zst_root / "etc/zst-link").is_symlink()
+          and os.readlink(zst_root / "etc/zst-link") == "zst-one",
+          f"rc={r_zst.returncode} err={r_zst.stderr!r}")
+    if r_zst.returncode == 0:
+        run_cli(COMPUTE, "image", "remove", "mini-zst", check_rc=True)
+
+    bad_raw = OUT / "bad-zst.tar"
+    with tarfile.open(bad_raw, "w") as tf:
+        ti = tarfile.TarInfo("../escape.txt")
+        ti.size = 4
+        import io as _io
+        tf.addfile(ti, _io.BytesIO(b"nope"))
+    bad_zst = OUT / "bad-zst.tar.zst"
+    subprocess.run(["zstd", "-q", "-f", str(bad_raw), "-o", str(bad_zst)], check=True)
+    r_bad_zst = run_cli(COMPUTE, "image", "import", "bad-zst", str(bad_zst))
+    check("image: .tar.zst unsafe ../ path is refused cleanly",
+          r_bad_zst.returncode != 0 and "unsafe path" in r_bad_zst.stderr, r_bad_zst.stderr)
+else:
+    print("SKIP: image .tar.zst import: zstd not installed", flush=True)
+
 # 2. Data mount outside /home + security rejection of sensitive host paths
 data_dir = OUT / "nvme-dataset"
 data_dir.mkdir(parents=True)
@@ -333,6 +373,154 @@ if gpu_info.get("devices"):
     run_cli(COMPUTE, "env", "remove", "gpu0", check_rc=True)
 else:
     print("SKIP: gpu passthrough: no host GPU device nodes on this machine", flush=True)
+
+# 5b. Host NVIDIA char-device node provisioning (ensure_nvidia_device_nodes)
+import importlib.machinery as _imach
+import importlib.util as _iutil
+import stat as _stat
+_cloader = _imach.SourceFileLoader("locachy_compute_mod", COMPUTE)
+_cspec = _iutil.spec_from_loader("locachy_compute_mod", _cloader)
+_cmod = _iutil.module_from_spec(_cspec)
+_cloader.exec_module(_cmod)
+
+fake_host = OUT / "fake-nv-host"
+(fake_host / "sys/module/nvidia").mkdir(parents=True)
+(fake_host / "sys/module/nvidia_modeset").mkdir(parents=True)
+(fake_host / "sys/module/nvidia_uvm").mkdir(parents=True)
+(fake_host / "proc/driver/nvidia/gpus/0000:01:00.0").mkdir(parents=True)
+(fake_host / "proc/driver/nvidia/gpus/0000:01:00.0/information").write_text(
+    "Model: NVIDIA GeForce RTX 3080 Ti Laptop GPU\nDevice Minor: 0\n", encoding="utf-8"
+)
+(fake_host / "proc/devices").write_text(
+    "Character devices:\n195 nvidia-frontend\n509 nvidia-uvm\n\nBlock devices:\n259 blkext\n",
+    encoding="utf-8",
+)
+(fake_host / "dev").mkdir(parents=True)
+(fake_host / "dev/nvidiactl").write_text("", encoding="utf-8")  # already present
+
+made_nodes = []
+chmod_nodes = []
+def _rec_mknod(path, mode, dev):
+    made_nodes.append((Path(path).name, mode, os.major(dev), os.minor(dev)))
+def _rec_chmod(path, mode):
+    chmod_nodes.append((Path(path).name, mode))
+
+ensure_fn = getattr(_cmod, "ensure_nvidia_device_nodes", None) or (lambda **kwargs: [])
+created = ensure_fn(
+    dev_root=fake_host / "dev",
+    proc_root=fake_host / "proc",
+    sys_root=fake_host / "sys",
+    mknod_fn=_rec_mknod,
+    chmod_fn=_rec_chmod,
+    run_tools=False,
+)
+check("gpu: ensure_nvidia_device_nodes creates missing nvidia0/modeset/uvm/uvm-tools with 0666 and leaves existing nvidiactl untouched",
+      made_nodes == [
+          ("nvidia-modeset", _stat.S_IFCHR | 0o666, 195, 254),
+          ("nvidia0", _stat.S_IFCHR | 0o666, 195, 0),
+          ("nvidia-uvm", _stat.S_IFCHR | 0o666, 509, 0),
+          ("nvidia-uvm-tools", _stat.S_IFCHR | 0o666, 509, 1),
+      ] and chmod_nodes == [
+          ("nvidia-modeset", 0o666),
+          ("nvidia0", 0o666),
+          ("nvidia-uvm", 0o666),
+          ("nvidia-uvm-tools", 0o666),
+      ] and len(created) == 4,
+      f"made={made_nodes!r} chmod={chmod_nodes!r}")
+
+empty_sys = OUT / "fake-no-nv-sys"
+empty_sys.mkdir()
+noop_nodes = []
+noop_created = ensure_fn(
+    dev_root=fake_host / "dev",
+    proc_root=fake_host / "proc",
+    sys_root=empty_sys,
+    mknod_fn=lambda *a: noop_nodes.append(a),
+    chmod_fn=lambda *a: None,
+    run_tools=False,
+)
+check("gpu: ensure_nvidia_device_nodes is a no-op when nvidia module is absent",
+      noop_created == [] and noop_nodes == [], f"created={noop_created!r}")
+
+# 5c. Container GPU libs (including libcudadebugger), nvidia-smi, guest ldconfig,
+#     persistent-env second run (tmpfs prevents stale 0-byte upperdir files), and --no-gpu cleanup.
+gpu_rootfs = OUT / "gpu-rootfs-src"
+shutil.copytree(rootfs_src, gpu_rootfs, symlinks=True)
+(gpu_rootfs / "sbin").mkdir(parents=True, exist_ok=True)
+(gpu_rootfs / "sbin/ldconfig").write_text("#!/bin/sh\necho ldconfig-ran >/etc/ldconfig-marker\n", encoding="utf-8")
+os.chmod(gpu_rootfs / "sbin/ldconfig", 0o755)
+
+fake_nv_libs = OUT / "fake-nv-libs"
+fake_nv_libs.mkdir(parents=True)
+(fake_nv_libs / "libcuda.so.1").write_text("CUDA-LIB-PAYLOAD\n", encoding="utf-8")
+(fake_nv_libs / "libcudadebugger.so.1").write_text("DBG-LIB-PAYLOAD\n", encoding="utf-8")
+fake_smi = OUT / "fake-nvidia-smi"
+fake_smi.write_text("#!/bin/sh\necho fake-nvidia-smi-ok\n", encoding="utf-8")
+os.chmod(fake_smi, 0o755)
+
+run_cli(COMPUTE, "image", "import", "mini-gpu-sim", str(gpu_rootfs), check_rc=True)
+run_cli(COMPUTE, "env", "create", "gpu-sim", "--image", "mini-gpu-sim", "--gpu", "--net", "none", check_rc=True)
+
+gpu_env = dict(env)
+gpu_env["LOCACHY_COMPUTE_GPU_LIBDIRS"] = str(fake_nv_libs)
+gpu_env["LOCACHY_COMPUTE_NVIDIA_SMI"] = str(fake_smi)
+def run_gpu_cli(*args):
+    return subprocess.run(["python3", COMPUTE, *args], env=gpu_env, capture_output=True, text=True, errors="replace", timeout=60)
+
+r_g1 = run_gpu_cli(
+    "run", "gpu-sim", "--", "/bin/sh", "-ec",
+    "cat /usr/local/lib/locachy-gpu/libcuda.so.1; "
+    "cat /usr/local/lib/locachy-gpu/libcudadebugger.so.1; "
+    "cat /etc/ld.so.conf.d/locachy-gpu.conf; "
+    "cat /etc/ldconfig-marker; "
+    "nvidia-smi; "
+    "(! (echo tamper >>/usr/local/lib/locachy-gpu/libcuda.so.1) 2>/dev/null) && echo ro-lib-ok; "
+    "(! (echo tamper >>/run/locachy-gpu/bin/nvidia-smi) 2>/dev/null) && echo ro-smi-ok; "
+    "echo SEAMS=${LOCACHY_COMPUTE_GPU_LIBDIRS:-UNSET}:${LOCACHY_COMPUTE_NVIDIA_SMI:-UNSET}; "
+    "rm -f /etc/ldconfig-marker"
+)
+check("gpu: run 1 mounts ro libcuda/libcudadebugger, ro nvidia-smi, runs guest ldconfig, strips seams",
+      r_g1.returncode == 0
+      and "CUDA-LIB-PAYLOAD" in r_g1.stdout
+      and "DBG-LIB-PAYLOAD" in r_g1.stdout
+      and "/usr/local/lib/locachy-gpu" in r_g1.stdout
+      and "ldconfig-ran" in r_g1.stdout
+      and "fake-nvidia-smi-ok" in r_g1.stdout
+      and "ro-lib-ok" in r_g1.stdout
+      and "ro-smi-ok" in r_g1.stdout
+      and "SEAMS=UNSET:UNSET" in r_g1.stdout,
+      f"rc={r_g1.returncode} out={r_g1.stdout!r} err={r_g1.stderr!r}")
+
+r_g2 = run_gpu_cli(
+    "run", "gpu-sim", "--", "/bin/sh", "-ec",
+    "cat /usr/local/lib/locachy-gpu/libcuda.so.1; "
+    "cat /usr/local/lib/locachy-gpu/libcudadebugger.so.1; "
+    "cat /etc/ldconfig-marker; "
+    "nvidia-smi"
+)
+upper_gpu_dir = Path(env["LOCACHY_COMPUTE_BASE"]) / "envs/gpu-sim/upper/usr/local/lib/locachy-gpu"
+upper_gpu_files = list(upper_gpu_dir.iterdir()) if upper_gpu_dir.is_dir() else []
+check("gpu: run 2 on persistent env keeps non-empty libs, nvidia-smi, and ldconfig without polluting upperdir",
+      r_g2.returncode == 0
+      and "CUDA-LIB-PAYLOAD" in r_g2.stdout
+      and "DBG-LIB-PAYLOAD" in r_g2.stdout
+      and "ldconfig-ran" in r_g2.stdout
+      and "fake-nvidia-smi-ok" in r_g2.stdout
+      and upper_gpu_files == [],
+      f"rc={r_g2.returncode} out={r_g2.stdout!r} err={r_g2.stderr!r} upper={upper_gpu_files!r}")
+
+r_g3 = run_gpu_cli(
+    "run", "gpu-sim", "--no-gpu", "--", "/bin/sh", "-ec",
+    "test ! -e /usr/local/lib/locachy-gpu/libcuda.so.1 && "
+    "test ! -e /usr/local/bin/nvidia-smi && "
+    "test ! -e /etc/ld.so.conf.d/locachy-gpu.conf && echo nogpu-clean"
+)
+check("gpu: --no-gpu override on same env exposes no libs, no nvidia-smi, and no ld.so.conf.d entry",
+      r_g3.returncode == 0 and "nogpu-clean" in r_g3.stdout,
+      f"rc={r_g3.returncode} out={r_g3.stdout!r} err={r_g3.stderr!r}")
+
+run_cli(COMPUTE, "env", "remove", "gpu-sim", check_rc=True)
+run_cli(COMPUTE, "image", "remove", "mini-gpu-sim", check_rc=True)
 
 r_wc = run_cli(COMPUTE, "serve", "--bind", "0.0.0.0", "--port", "27189")
 check("serve: wildcard bind 0.0.0.0 is refused", r_wc.returncode != 0 and "wildcard" in r_wc.stderr, r_wc.stderr)

@@ -282,6 +282,10 @@ assert setpriv_cmds[0][:8] == [
     "setpriv", "--reuid=968", "--regid=968", "--clear-groups",
 ], f"unexpected setpriv argv: {setpriv_cmds[0]}"
 assert not any("su" in c for c in root_cmds), f"PAM su must never be invoked: {root_cmds}"
+git_cmds = [c for c in root_cmds if "git" in c and "clone" in c]
+assert len(git_cmds) == 1 and "--single-branch" in git_cmds[0] and "--depth" not in git_cmds[0], (
+    f"upstream snapshot.sh requires non-shallow clone, got: {git_cmds}"
+)
 print("PASS locachy-gpu-unlock install, overlay, drop-ins, manifest, set, remove, and setpriv build drop")
 
 # 4. locachy-gpu-power tests (hp-omen-17-ck1 layering, modes, AC/auto, nvidia-powerd, remove)

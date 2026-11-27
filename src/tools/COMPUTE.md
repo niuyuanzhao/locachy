@@ -227,7 +227,7 @@ To work inside a container or micro-VM like an ordinary machine:
 
 ## GPU
 
-When the environment is created with `--gpu` (and `compute_gpu` is not `"0"`), the container receives `/dev/nvidiactl`, `/dev/nvidia-modeset`, `/dev/nvidia-uvm*`, `/dev/nvidiaN`, `/dev/nvidia-caps/*`, and `/dev/dri/renderD*`, plus read-only bind mounts of the host NVIDIA user-space libraries (`libcuda.so*`, `libnvidia-*.so*`, `libnvcuvid.so*`, `libnvoptix.so*`) in `/usr/local/lib/locachy-gpu`. `locachy-compute gpu-probe` lists what the host has. Devices that are absent are skipped.
+When the environment is created with `--gpu` (and `compute_gpu` is not `"0"`), `locachy-compute` first ensures the host NVIDIA character device nodes (`/dev/nvidiactl`, `/dev/nvidia-modeset`, `/dev/nvidiaN`, `/dev/nvidia-uvm`, `/dev/nvidia-uvm-tools`) exist whenever the `nvidia` kernel module is loaded, then binds those nodes, `/dev/nvidia-caps/*`, and `/dev/dri/renderD*` into the container. Host NVIDIA user-space libraries (`libcuda.so*`, `libnvidia-*.so*`, `libnvcuvid.so*`, `libnvoptix.so*`, `libcudadebugger.so*`) are bind-mounted read-only into a fresh tmpfs at `/usr/local/lib/locachy-gpu` (with `/etc/ld.so.conf.d/locachy-gpu.conf`, `LD_LIBRARY_PATH`, and guest `ldconfig` refreshed on start), and host `nvidia-smi` is exposed read-only at `/usr/local/bin/nvidia-smi`. `locachy-compute gpu-probe` lists what the host currently exposes. Devices that are absent are skipped.
 
 ## KVM micro-VMs
 

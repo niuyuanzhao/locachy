@@ -481,7 +481,10 @@ def cmd_install(args):
         os.chmod(stage, 0o755)
         repo_dir = stage / "gpu-unlock"
         net = netns_prefix()
-        run_cmd([*net, "git", "clone", "--depth", "1", "--branch", branch, repo, str(repo_dir)])
+        # Upstream packaging/arch/PKGBUILD runs packaging/snapshot.sh and clones
+        # via git+file://#commit=<snapshot>; a shallow (--depth 1) clone causes
+        # makepkg's mirror+shared clone to fail with "unable to read tree".
+        run_cmd([*net, "git", "clone", "--single-branch", "--branch", branch, repo, str(repo_dir)])
         added_ids = apply_extra_pci_ids(repo_dir, meta)
         if added_ids:
             print(f"locachy-gpu-unlock: applied local PCI ID overlay: {', '.join(added_ids)}", flush=True)
