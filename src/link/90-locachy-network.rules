@@ -7,3 +7,9 @@
 # interface (a NAME= rule, a .link file), so $kernel would be the old name.
 ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", DEVPATH!="/devices/virtual/*", \
     RUN+="/usr/local/lib/locachy/network-client --ifindex $env{IFINDEX}"
+
+# Wake runtime-suspended Thunderbolt/USB4 host controllers on Type-C cable plug:
+# some controllers (e.g. Alpine Ridge JHL6540 in D3) miss host-to-host replugs
+# until runtime-resumed, while typec_ucsi still reports the partner appearing.
+ACTION=="add", SUBSYSTEM=="typec", ENV{DEVTYPE}=="typec_partner", \
+    RUN+="/usr/local/lib/locachy/network-client --wake-tb"

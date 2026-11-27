@@ -52,6 +52,25 @@
 #include "extdisplay-broker.h"
 #include "extdisplay-discovery.h"
 
+/* While waiting for thunderbolt-net carrier (IFF_LOWER_UP), Linux's tbnet
+ * stops sending TBIP_LOGIN after a remote logout, a DMA/HopID setup failure,
+ * or 60 failed attempts until the interface is bounced DOWN -> UP
+ * (tbnet_stop -> tbnet_open). Re-kick periodically with bounded backoff. */
+#ifdef EXTDISPLAY_BROKER_TEST_CARRIER_KICK_MS
+#define BROKER_CARRIER_KICK_MS EXTDISPLAY_BROKER_TEST_CARRIER_KICK_MS
+#else
+#define BROKER_CARRIER_KICK_MS 10000LL
+#endif
+#ifdef EXTDISPLAY_BROKER_TEST_CARRIER_BOUNCE_MS
+#define BROKER_CARRIER_BOUNCE_MS EXTDISPLAY_BROKER_TEST_CARRIER_BOUNCE_MS
+#else
+#define BROKER_CARRIER_BOUNCE_MS 500LL
+#endif
+/* Each bounce makes the Mac see a fresh ThunderboltIP login, which can take the
+ * shared port from another healthy peer; a peer that stays silent gets this
+ * many bounces per lease and is then left alone. */
+#define BROKER_CARRIER_MAX_KICKS 3
+
 enum attempt_state { IDLE, WAIT_CARRIER, WAIT_ADDRESS, DISCOVERY, STARTING, ATTEMPT, SESSION };
 
 static int control = -1, home_ns = -1, nl_home = -1, home_monitor = -1, lock_fd = -1, signals = -1, log_fd = 2;
@@ -62,12 +81,107 @@ static uid_t pump_uid;
 static gid_t pump_gid;
 static char boot_id[64];
 
+/* Runtime-PM hold on Thunderbolt/USB4 host controllers while extdisplay-broker
+ * is open: some controllers (notably Alpine Ridge JHL6540 in runtime D3) miss
+ * host-to-host replugs while suspended. Opened before enter_home() overmounts
+ * /sys read-only, and restored to "auto" on exit so idle battery draw stays 0. */
+#define TB_PM_MAX 16
+static int tb_pm_fds[TB_PM_MAX];
+static int tb_pm_count;
+
+static void tb_pm_close_fds(void)
+{
+    for (int i = 0; i < tb_pm_count; i++) {
+        if (tb_pm_fds[i] >= 0) close(tb_pm_fds[i]);
+        tb_pm_fds[i] = -1;
+    }
+    tb_pm_count = 0;
+}
+
+static void tb_pm_release(void)
+{
+    for (int i = tb_pm_count - 1; i >= 0; i--) {
+        int fd = tb_pm_fds[i];
+        if (fd < 0) continue;
+        if (lseek(fd, 0, SEEK_SET) != 0 || write(fd, "auto\n", 5) != 5)
+            broker_log("cannot restore Thunderbolt runtime PM to auto");
+        close(fd);
+        tb_pm_fds[i] = -1;
+    }
+    tb_pm_count = 0;
+}
+
+static void tb_pm_hold_one(const char *path)
+{
+    if (tb_pm_count >= TB_PM_MAX) return;
+    int fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return;
+    char buf[16];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    if (n <= 0) {
+        close(fd);
+        return;
+    }
+    buf[n] = '\0';
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ')) buf[--n] = '\0';
+    if (strcmp(buf, "auto") != 0) {
+        close(fd);
+        return;
+    }
+    if (lseek(fd, 0, SEEK_SET) != 0 || write(fd, "on\n", 3) != 3) {
+        close(fd);
+        return;
+    }
+#ifdef EXTDISPLAY_BROKER_TEST_DRIVER
+    if (ftruncate(fd, 3) < 0) {}
+#endif
+    tb_pm_fds[tb_pm_count++] = fd;
+}
+
+static int is_tb_host_router(const char *name)
+{
+    const char *p = name;
+    if (*p < '0' || *p > '9') return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    return p[0] == '-' && p[1] == '0' && p[2] == '\0';
+}
+
+static void tb_pm_hold(void)
+{
+    DIR *dir = opendir(BROKER_TB_PCI_DIR);
+    if (dir) {
+        struct dirent *e;
+        while ((e = readdir(dir))) {
+            if (e->d_name[0] == '.') continue;
+            char cfg[PATH_MAX], ctrl[PATH_MAX];
+            int cn = snprintf(cfg, sizeof cfg, "%s/%s/config", BROKER_TB_PCI_DIR, e->d_name);
+            if (cn <= 0 || (size_t)cn >= sizeof cfg || access(cfg, F_OK) != 0) continue;
+            int pn = snprintf(ctrl, sizeof ctrl, "%s/%s/power/control", BROKER_TB_PCI_DIR, e->d_name);
+            if (pn > 0 && (size_t)pn < sizeof ctrl) tb_pm_hold_one(ctrl);
+        }
+        closedir(dir);
+    }
+    dir = opendir(BROKER_TB_BUS_DIR);
+    if (dir) {
+        struct dirent *e;
+        while ((e = readdir(dir))) {
+            if (!is_tb_host_router(e->d_name)) continue;
+            char ctrl[PATH_MAX];
+            int pn = snprintf(ctrl, sizeof ctrl, "%s/%s/power/control", BROKER_TB_BUS_DIR, e->d_name);
+            if (pn > 0 && (size_t)pn < sizeof ctrl) tb_pm_hold_one(ctrl);
+        }
+        closedir(dir);
+    }
+    if (tb_pm_count > 0) broker_log("holding %d Thunderbolt runtime PM device(s) active", tb_pm_count);
+}
+
 static struct lease {
     enum attempt_state state;
     char name[IFNAMSIZ];
     int ifindex;
     struct identity id;
     int recorded, moved, shared;
+    int link_bouncing, carrier_kicks;
     int sess_ns, nl_sess, nl_mon, sess_ifindex;
     struct in6_addr linklocal;
     pid_t pump;
@@ -380,6 +494,8 @@ static void stop_attempt(void)
     close_fd(&L.status);
     close_fd(&L.front);
     L.state = IDLE;
+    L.link_bouncing = 0;
+    L.carrier_kicks = 0;
     L.deadline = 0;
 }
 
@@ -389,11 +505,14 @@ static void stop_attempt(void)
 static void lease_release(void)
 {
     int returned = 0;
+    int restore_shared_up = L.shared && L.link_bouncing;
     stop_attempt();
     close_fd(&L.nl_mon);
     if (L.shared) {
         /* Shared-link mode left the device in locachy-net: never move or close
-         * home_ns / nl_home, only detach our lease handle. */
+         * home_ns / nl_home, only detach our lease handle. If we were mid-bounce
+         * during WAIT_CARRIER recovery, leave the link administratively UP. */
+        if (restore_shared_up && L.nl_sess >= 0) (void)nl_link_up(L.nl_sess, L.sess_ifindex);
         L.nl_sess = -1;
         L.sess_ns = -1;
         returned = 1;
@@ -667,7 +786,10 @@ static const char *start_attempt(void)
     a.parent = getpid();
     a.deadline_ms = extdisplay_broker_now_ms() + EXTDISPLAY_BROKER_ATTEMPT_SECONDS * 1000LL;
     L.pump = fork();
-    if (L.pump == 0) pump_main(&a);
+    if (L.pump == 0) {
+        tb_pm_close_fds();
+        pump_main(&a);
+    }
     close_fd(&plain[1]);
     close_fd(&status[1]);
     L.front = plain[0];
@@ -728,12 +850,24 @@ static void preparing(const char *step)
     send_line(line);
 }
 
+static void schedule_carrier_kick(int immediate)
+{
+    if (immediate) {
+        L.deadline = extdisplay_broker_now_ms() + BROKER_CARRIER_BOUNCE_MS;
+    } else if (L.carrier_kicks >= BROKER_CARRIER_MAX_KICKS) {
+        L.deadline = 0;
+    } else {
+        L.deadline = extdisplay_broker_now_ms() + BROKER_CARRIER_KICK_MS;
+    }
+}
+
 /* Called only after link/address events (and once after bringing the device
  * up). There is no periodic scan while a cable is absent. */
 static const char *prepare_link(void)
 {
     struct link_info info;
     int other = 0;
+    if (L.state == WAIT_CARRIER && L.link_bouncing) return NULL;
     if (nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !same_device(L.nl_sess, L.sess_ifindex, &L.id))
         return "the cable interface disappeared";
     if (!(info.flags & IFF_LOWER_UP)) {
@@ -741,6 +875,8 @@ static const char *prepare_link(void)
         return "the cable link went down while preparing";
     }
     if (L.state == WAIT_CARRIER) {
+        L.link_bouncing = 0;
+        L.carrier_kicks = 0;
         L.state = WAIT_ADDRESS;
         L.deadline = extdisplay_broker_now_ms() + 10000;
         preparing("address");
@@ -764,9 +900,13 @@ static const char *lease_start(const char *name, int expected_index, const char 
             same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
             (void)nl_prepare_event(L.nl_mon, L.sess_ifindex);
             L.state = WAIT_CARRIER;
+            L.link_bouncing = 0;
+            L.carrier_kicks = 0;
             L.deadline = 0;
             preparing("carrier");
-            return prepare_link();
+            const char *err = prepare_link();
+            if (!err && L.state == WAIT_CARRIER) schedule_carrier_kick(0);
+            return err;
         }
         lease_release();
     }
@@ -786,19 +926,26 @@ static const char *lease_start(const char *name, int expected_index, const char 
          * interface in locachy-net so service_compute and other host-to-host
          * links continue using it concurrently. The TLS pump still binds
          * strictly to fe80::%ifindex + SO_BINDTOIFINDEX inside its sandbox. */
+        struct link_info pre;
         L.shared = 1;
         L.sess_ns = home_ns;
         L.nl_sess = nl_home;
         L.sess_ifindex = L.ifindex;
         L.nl_mon = nl_open(RTMGRP_LINK | RTMGRP_IPV6_IFADDR);
         if (L.nl_mon < 0) return "cannot monitor the link";
+        int was_up_no_carrier = (nl_link_get(L.nl_sess, L.sess_ifindex, &pre) == 0 &&
+                                 (pre.flags & IFF_UP) && !(pre.flags & IFF_LOWER_UP));
         if (device_settings(L.name) < 0) return "cannot set the interface's IPv6 settings";
         if (nl_link_up(L.nl_sess, L.sess_ifindex) < 0) return "cannot bring the interface up";
         (void)nl_prepare_event(L.nl_mon, L.sess_ifindex);
         L.state = WAIT_CARRIER;
+        L.link_bouncing = 0;
+        L.carrier_kicks = 0;
         L.deadline = 0;
         preparing("carrier");
-        return prepare_link();
+        const char *err = prepare_link();
+        if (!err && L.state == WAIT_CARRIER) schedule_carrier_kick(was_up_no_carrier);
+        return err;
     }
     if (record_write() < 0) return "cannot record the lease";
     L.recorded = 1;
@@ -814,9 +961,13 @@ static const char *lease_start(const char *name, int expected_index, const char 
     if (nl_link_up(L.nl_sess, L.sess_ifindex) < 0) return "cannot bring the interface up";
     (void)nl_prepare_event(L.nl_mon, L.sess_ifindex); /* discard our own move/up events */
     L.state = WAIT_CARRIER;
+    L.link_bouncing = 0;
+    L.carrier_kicks = 0;
     L.deadline = 0;
     preparing("carrier");
-    return prepare_link();
+    const char *err = prepare_link();
+    if (!err && L.state == WAIT_CARRIER) schedule_carrier_kick(0);
+    return err;
 }
 
 static int compare_names(const void *a, const void *b)
@@ -958,6 +1109,7 @@ static int handle_control(void)
         if (L.state != IDLE) end_attempt("cancelled");
     } else if (!strcmp(line, "release")) {
         end_attempt("released");
+        tb_pm_release();
         exit(0);
     } else {
         send_line("error unknown command");
@@ -1156,6 +1308,8 @@ int main(int argc, char **argv)
     fclose(f);
     boot_id[strcspn(boot_id, "\n")] = 0;
     if (state_dir() < 0) startup_fail("another broker is running, or its state directory is unusable");
+    atexit(tb_pm_release);
+    tb_pm_hold();
     int cli_shared = shared_netns_mode, cli_paired_only = paired_only_mode;
     load_rc_options();
     if (cli_shared) shared_netns_mode = 1;
@@ -1188,12 +1342,14 @@ int main(int argc, char **argv)
             struct signalfd_siginfo info;
             if (read(signals, &info, sizeof info) == sizeof info) {
                 lease_release();
+                tb_pm_release();
                 return 0;
             }
         }
         if (p[0].revents & (POLLIN | POLLHUP | POLLERR)) {
             if (handle_control() < 0) {
                 lease_release();
+                tb_pm_release();
                 return 0;
             }
             continue; /* the lease may have changed */
@@ -1266,7 +1422,37 @@ int main(int argc, char **argv)
         }
         if (L.deadline && extdisplay_broker_now_ms() >= L.deadline + (L.state == ATTEMPT ? 2000 : 0)) {
             if (L.state == ATTEMPT) end_attempt("timeout");
-            else if (L.state == WAIT_ADDRESS) fail_preparation("the cable has carrier but no usable IPv6 link-local address");
+            else if (L.state == WAIT_CARRIER) {
+                struct link_info info;
+                if (nl_link_get(L.nl_sess, L.sess_ifindex, &info) < 0 || !same_device(L.nl_sess, L.sess_ifindex, &L.id)) {
+                    fail_preparation("the cable interface disappeared");
+                } else if (!L.link_bouncing) {
+                    if (info.flags & IFF_LOWER_UP) {
+                        const char *error = prepare_link();
+                        if (error) fail_preparation(error);
+                    } else {
+                        broker_log("bouncing %s to restart ThunderboltIP login (attempt %d)", L.name, L.carrier_kicks + 1);
+                        if (nl_link_down(L.nl_sess, L.sess_ifindex) < 0) {
+                            fail_preparation("cannot reset the interface");
+                        } else {
+                            (void)nl_prepare_event(L.nl_mon, L.sess_ifindex);
+                            L.link_bouncing = 1;
+                            L.deadline = extdisplay_broker_now_ms() + BROKER_CARRIER_BOUNCE_MS;
+                        }
+                    }
+                } else {
+                    L.link_bouncing = 0;
+                    if (nl_link_up(L.nl_sess, L.sess_ifindex) < 0) {
+                        fail_preparation("cannot bring the interface up");
+                    } else {
+                        (void)nl_prepare_event(L.nl_mon, L.sess_ifindex);
+                        if (L.carrier_kicks < 1000) L.carrier_kicks++;
+                        const char *error = prepare_link();
+                        if (error) fail_preparation(error);
+                        else if (L.state == WAIT_CARRIER) schedule_carrier_kick(0);
+                    }
+                }
+            } else if (L.state == WAIT_ADDRESS) fail_preparation("the cable has carrier but no usable IPv6 link-local address");
             else if (L.state == DISCOVERY) fail_preparation("cable discovery did not become ready");
             else if (L.state == STARTING) fail_preparation("the TLS listener did not become ready");
         }

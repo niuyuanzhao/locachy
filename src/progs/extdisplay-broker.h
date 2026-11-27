@@ -51,6 +51,21 @@
 #else
 #define BROKER_RC_CONF "/etc/locachy/rc.conf"
 #endif
+#ifdef EXTDISPLAY_BROKER_TEST_TB_PCI_DIR
+#define BROKER_TB_PCI_DIR EXTDISPLAY_BROKER_TEST_TB_PCI_DIR
+#elif defined(EXTDISPLAY_BROKER_TEST_DRIVER)
+/* Test builds never toggle the host's real Thunderbolt runtime PM. */
+#define BROKER_TB_PCI_DIR "/nonexistent/locachy-test-tb-pci"
+#else
+#define BROKER_TB_PCI_DIR "/sys/bus/pci/drivers/thunderbolt"
+#endif
+#ifdef EXTDISPLAY_BROKER_TEST_TB_BUS_DIR
+#define BROKER_TB_BUS_DIR EXTDISPLAY_BROKER_TEST_TB_BUS_DIR
+#elif defined(EXTDISPLAY_BROKER_TEST_DRIVER)
+#define BROKER_TB_BUS_DIR "/nonexistent/locachy-test-tb-bus"
+#else
+#define BROKER_TB_BUS_DIR "/sys/bus/thunderbolt/devices"
+#endif
 #define BROKER_PUMP_USER "nobody"
 
 #define HWADDR_MAX 32
@@ -77,6 +92,7 @@ int nl_link_list(int nl, struct link_info *links, int max);
  * taken there. Returns 0 or -errno. */
 int nl_link_move(int nl, int ifindex, int netns_fd, const char *pattern);
 int nl_link_up(int nl, int ifindex);
+int nl_link_down(int nl, int ifindex);
 /* 1: a usable fe80::/10 address is on ifindex (copied out); 0: none yet;
  * -1: error. *other is set when any other address exists in the namespace
  * besides loopback's. */

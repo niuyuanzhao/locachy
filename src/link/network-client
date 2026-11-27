@@ -248,6 +248,34 @@ case "${1:-}" in
     sync_tb_filter
     exit 0
     ;;
+--wake-tb) # one-shot read-only runtime-PM wake of Thunderbolt/USB4 host routers (Type-C partner add)
+    # Never writes power/control: extdisplay-broker holds that while it is open,
+    # and a value written here would outlive it. The reads wake by themselves:
+    # a host router's nvm_active0/nvmem read (switch.c nvm_read) resumes the router,
+    # domainN/boot_acl (ICM only, domain.c boot_acl_show) resumes the domain and,
+    # through it, the NHI. Both call pm_runtime_get_sync, then put the device back
+    # with an autosuspend delay. The PCI config read resumes only a D3cold device
+    # (pci_config_pm_runtime_get), so a D3hot NHI is woken by the two above.
+    # Only while a background Thunderbolt mode is on (tools/COMPUTE.md): nothing
+    # else needs the controllers awake, and a USB-C charger's plug would wake them.
+    tb_shared_enabled || tb_compute_enabled || exit 0
+    tb_bus=${LOCACHY_TB_BUS_DIR:-/sys/bus/thunderbolt/devices}
+    tb_pci=${LOCACHY_TB_PCI_DIR:-/sys/bus/pci/drivers/thunderbolt}
+    for _s in "$tb_bus"/*-0; do
+        [ -d "$_s" ] || continue
+        _n=${_s##*/}
+        _n=${_n%-0}
+        case $_n in
+        ''|*[!0-9]*) continue ;;
+        esac
+        [ -r "$_s/nvm_active0/nvmem" ] && head -c 1 "$_s/nvm_active0/nvmem" >/dev/null 2>&1 || :
+        [ -r "$tb_bus/domain$_n/boot_acl" ] && head -c 1 "$tb_bus/domain$_n/boot_acl" >/dev/null 2>&1 || :
+    done
+    for _p in "$tb_pci"/*/config; do
+        [ -r "$_p" ] && head -c 4 "$_p" >/dev/null 2>&1 || :
+    done
+    exit 0
+    ;;
 --udevd) # the udevd of locachy-net, in a mount namespace of its own (below)
     # Only there, over the /run/udev of locachy-net: never the host's.
     [ "$(stat -L -c %i /proc/self/ns/net)" = "$(stat -L -c %i /run/netns/"$NS")" ] &&

@@ -54,6 +54,7 @@ Thunderbolt/USB4 网络支持线缆直连，或经过兼容的雷电／USB4 Hub�
 - 合盖会强制退出 `extdisplay`（在挂起前先结束解码工作进程并归还雷电接口租约，不再自动重连），锁屏策略取合盖与拔线退出既有规则的并集。
 - 扩展屏活动期间不触发空闲自动锁屏；若本机空闲已达锁屏时长，在拔出线缆或退出会话后立即锁屏。
 - 拔出线缆或发送端重启后，会话结束且 `extdisplay` 回到等待状态，线缆重新接入时自动重新连接，无需重启或重新打开；等待界面下 `Esc` 取消配对、`Super+Esc` 返回首页、`Ctrl+Q` 退出。
+- `extdisplay` 打开期间，其 broker 让雷电／USB4 主控制器不进入自动休眠（`power/control` 设为 `on`），避免控制器休眠时漏掉线缆重插事件；退出时恢复为 `auto`。`extdisplay` 关闭时不保持任何控制器唤醒。Type-C 设备接入时（`90-locachy-network.rules`），若后台雷电模式开启（`extdisplay_tb_shared="1"`，或 `service_compute` 且 `compute_bind_tb="1"`），`network-client --wake-tb` 会通过 sysfs 属性对主控制器做一次只读唤醒，从不写入 `power/control`。
 
 ## 测试
 

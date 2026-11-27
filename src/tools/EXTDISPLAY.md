@@ -54,6 +54,7 @@ While the link is active:
 - Closing the lid force-exits `extdisplay` (stopping the worker and returning the Thunderbolt interface lease before sleep, without auto-reconnecting) and applies the union of the lid-close and cable-unplug lock rules.
 - Idle auto-lock is deferred while the live extended display is shown, and takes effect immediately once the cable is unplugged or the session closes.
 - When the cable is unplugged or the sender restarts, the session ends and `extdisplay` returns to the waiting state, reconnecting automatically when a cable link returns without rebooting or relaunching. While waiting, `Esc` cancels pairing, `Super+Esc` goes home, and `Ctrl+Q` quits.
+- While `extdisplay` is open, its broker keeps the Thunderbolt/USB4 host controllers out of automatic suspend (`power/control` is `on`), so a replug is not missed while a controller sleeps; it returns them to `auto` when it exits. Nothing is held while `extdisplay` is closed. Separately, when a Type-C partner appears (`90-locachy-network.rules`) and a background Thunderbolt mode is on (`extdisplay_tb_shared="1"`, or `service_compute` with `compute_bind_tb="1"`), `network-client --wake-tb` makes one read-only wake of the host controllers through their sysfs attributes; it never writes `power/control`.
 
 ## Tests
 

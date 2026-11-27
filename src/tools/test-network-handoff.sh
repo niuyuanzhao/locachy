@@ -23,6 +23,8 @@
 #      host (udev-client's coldplug), and the preset rule moves them
 #  10. the udevd of locachy-net: the rules of interfaces only (/etc first,
 #      masked ones none), a /dev of its own, never on the host
+#  11. the Type-C wake of the host routers (--wake-tb): read only, and only
+#      while a background Thunderbolt mode is on; power/control untouched
 set -u
 src=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:-/var/tmp/locachy-network-handoff-test}
@@ -259,6 +261,56 @@ check "the other rules directories hidden from it" "[ ! -s $out/netns-hidden ]"
 check "its /dev: $(cat "$out/netns-dev")" \
     "! tr ' ' '\n' <$out/netns-dev | grep -qvxE 'null|zero|full|random|urandom|kmsg|char|block|'"
 check "it set no mode of the host's device nodes" "! grep -q 'Failed to set owner/mode' $out/netns-udevd.log"
+
+# 11. Type-C partner Thunderbolt runtime-PM wake (--wake-tb, read-only):
+#     ICM host router (0-0/nvm_active0/nvmem + domain0/boot_acl), USB4 SW CM
+#     host router (1-0/nvm_active0/nvmem), and PCI NHI config read; downstream
+#     0-1 and non-host 0-1-0 skipped; no-op when background TB modes are off;
+#     power/control never modified; missing directories succeed cleanly.
+check "the preset rule triggers --wake-tb on typec_partner add" \
+    "grep -q 'ENV{DEVTYPE}==\"typec_partner\"' $src/link/90-locachy-network.rules && grep -q -- '--wake-tb' $src/link/90-locachy-network.rules"
+mkdir -p "$out/tb-bus/domain0" "$out/tb-bus/0-0/power" "$out/tb-bus/0-0/nvm_active0" \
+    "$out/tb-bus/1-0/power" "$out/tb-bus/1-0/nvm_active0" \
+    "$out/tb-bus/0-1/nvm_active0" "$out/tb-bus/0-1-0/nvm_active0" \
+    "$out/tb-pci/0000:07:00.0/power"
+printf 'auto\n' >"$out/tb-bus/0-0/power/control"
+printf 'auto\n' >"$out/tb-bus/1-0/power/control"
+printf 'auto\n' >"$out/tb-pci/0000:07:00.0/power/control"
+mkfifo "$out/tb-bus/0-0/nvm_active0/nvmem" "$out/tb-bus/domain0/boot_acl" \
+    "$out/tb-bus/1-0/nvm_active0/nvmem" "$out/tb-pci/0000:07:00.0/config"
+# FIFOs with no writer block until timeout if mistakenly read: 0-1 and 0-1-0 must be skipped.
+mkfifo "$out/tb-bus/0-1/nvm_active0/nvmem" "$out/tb-bus/0-1-0/nvm_active0/nvmem"
+(printf 'M' >"$out/tb-bus/0-0/nvm_active0/nvmem" && : >"$out/wake-nvm0") &
+wp0=$!
+(printf ',' >"$out/tb-bus/domain0/boot_acl" && : >"$out/wake-bootacl") &
+wp1=$!
+(printf 'N' >"$out/tb-bus/1-0/nvm_active0/nvmem" && : >"$out/wake-nvm1") &
+wp2=$!
+(printf '1234' >"$out/tb-pci/0000:07:00.0/config" && : >"$out/wake-pci") &
+wp3=$!
+printf 'extdisplay_tb_shared="1"\n' >"$out/rc-tb.conf"
+: >"$out/rc-off.conf"
+timeout 5 env LOCACHY_TB_BUS_DIR="$out/tb-bus" LOCACHY_TB_PCI_DIR="$out/tb-pci" \
+    LOCACHY_NETWORK_RC="$out/rc-tb.conf" bash "$NC" --wake-tb
+wake_rc=$?
+if [ "$wake_rc" = 0 ]; then
+    # Writers unblock as soon as --wake-tb reads their FIFOs; give them a moment
+    # to create the marker files before cleaning up any stuck writer.
+    for _ in $(seq 1 40); do
+        [ -e "$out/wake-nvm0" ] && [ -e "$out/wake-bootacl" ] && [ -e "$out/wake-nvm1" ] && [ -e "$out/wake-pci" ] && break
+        sleep 0.05
+    done
+fi
+kill "$wp0" "$wp1" "$wp2" "$wp3" 2>/dev/null || :
+wait "$wp0" "$wp1" "$wp2" "$wp3" 2>/dev/null || :
+check "--wake-tb wakes ICM router+boot_acl, USB4 router and PCI config without touching 0-1 or 0-1-0" \
+    "[ $wake_rc = 0 ] && [ -e $out/wake-nvm0 ] && [ -e $out/wake-bootacl ] && [ -e $out/wake-nvm1 ] && [ -e $out/wake-pci ]"
+check "--wake-tb is a no-op when background Thunderbolt modes are off" \
+    "timeout 5 env LOCACHY_TB_BUS_DIR=$out/tb-bus LOCACHY_TB_PCI_DIR=$out/tb-pci LOCACHY_NETWORK_RC=$out/rc-off.conf bash $NC --wake-tb"
+check "--wake-tb never modifies power/control" \
+    "[ \"\$(cat $out/tb-bus/0-0/power/control)\" = auto ] && [ \"\$(cat $out/tb-bus/1-0/power/control)\" = auto ] && [ \"\$(cat $out/tb-pci/0000:07:00.0/power/control)\" = auto ]"
+check "--wake-tb exits 0 when no Thunderbolt sysfs exists" \
+    "LOCACHY_TB_BUS_DIR=$out/absent-bus LOCACHY_TB_PCI_DIR=$out/absent-pci LOCACHY_NETWORK_RC=$out/rc-tb.conf bash $NC --wake-tb"
 
 [ "$fail" = 0 ] && echo "PASS network-client: no interface left on the host, by the kernel's rules" ||
     echo "FAIL network-client handoff (files in $out)"

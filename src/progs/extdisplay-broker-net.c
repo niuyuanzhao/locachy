@@ -220,6 +220,18 @@ int nl_link_up(int nl, int ifindex)
     return replies(nl, r.header.nlmsg_seq, 0, NULL, NULL) == 0 ? 0 : -1;
 }
 
+int nl_link_down(int nl, int ifindex)
+{
+    struct request r = { .header = { .nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg)),
+                                     .nlmsg_type = RTM_NEWLINK, .nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK } };
+    r.link.ifi_family = AF_UNSPEC;
+    r.link.ifi_index = ifindex;
+    r.link.ifi_flags = 0;
+    r.link.ifi_change = IFF_UP;
+    if (send_request(nl, &r) < 0) return -1;
+    return replies(nl, r.header.nlmsg_seq, 0, NULL, NULL) == 0 ? 0 : -1;
+}
+
 struct address_scan {
     int ifindex, found, other;
     struct in6_addr address;

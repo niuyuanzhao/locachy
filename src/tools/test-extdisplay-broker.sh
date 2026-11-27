@@ -782,6 +782,139 @@ def scenario_hotplug():
         finish(b)
 
 
+def scenario_carrier_kick():
+    # Stalled carrier (peer down, link administratively UP without IFF_LOWER_UP):
+    # the broker must bounce the leased link DOWN -> UP to re-trigger tbnet_open,
+    # then progress automatically once carrier comes up.
+    sh("ip", "link", "set", "dev", "extdisplay0", "up")
+    sh("ip", "link", "set", "dev", "extdisplaypeer", "down")
+    b = Broker()
+    b.send("watch")
+    listing = b.collect("< end")
+    fields = next(x.split() for x in listing if x.startswith("< iface extdisplay0 "))
+    check("carrier_kick: starts with carrier down", fields[4] == "down", str(fields))
+    b.send("pair " + fields[2] + " " + fields[5] + " " + fields[6])
+    check("carrier_kick: enters carrier wait", b.expect("< preparing ") == "< preparing extdisplay0 carrier")
+    # Three bounces at 600 ms spacing (+150 ms each), then none while the peer stays silent.
+    time.sleep(3.0)
+    b.stderr_drain()
+    bounces = [x for x in b.stderr_lines if "bouncing extdisplay0 to restart ThunderboltIP login" in x]
+    check("carrier_kick: broker bounced the stalled link to restart ThunderboltIP login",
+          any("(attempt 1)" in x for x in bounces), " | ".join(b.stderr_lines))
+    check("carrier_kick: bounces stop after three per lease",
+          len(bounces) == 3 and not any("(attempt 4)" in x for x in bounces), " | ".join(bounces))
+    # Bring peer up; the next carrier event must advance cleanly to lease + code.
+    sh("ip", "link", "set", "dev", "extdisplaypeer", "up")
+    got_lease = False
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        line = b.expect("< ", timeout=max(0.5, deadline - time.time()))
+        if line.startswith("< lease extdisplay0 "):
+            got_lease = True
+            break
+    check("carrier_kick: recovers to lease once carrier returns", got_lease)
+    if got_lease:
+        code = b.expect("< code ", timeout=10)
+        check("carrier_kick: produces pairing code after recovery", code.startswith("< code "), code)
+    b.send("cancel")
+    check("carrier_kick: cancel ends cleanly", b.expect("< ended ") == "< ended cancelled")
+    check("carrier_kick: device returns to home namespace", home_has("extdisplay0"))
+    sh("ip", "link", "set", "dev", "extdisplay0", "up")
+    sh("ip", "link", "set", "dev", "extdisplaypeer", "up")
+    finish(b)
+
+
+def scenario_tb_pm():
+    import shutil
+    import signal
+    pci_dir = os.path.join(W, "tb-pci")
+    bus_dir = os.path.join(W, "tb-bus")
+    dev_dir = os.path.join(W, "tb-dev")
+    for d in (pci_dir, bus_dir, dev_dir):
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d, exist_ok=True)
+
+    def mkctrl(base, rel, val):
+        p = os.path.join(base, rel, "power")
+        os.makedirs(p, exist_ok=True)
+        f = os.path.join(p, "control")
+        with open(f, "w") as fp:
+            fp.write(val + "\n")
+        return f
+
+    def rd(path):
+        return open(path).read().strip()
+
+    # PCI NHI devices (real sysfs layout: symlinks into devices/)
+    nhi_auto = mkctrl(dev_dir, "0000:07:00.0", "auto")
+    open(os.path.join(dev_dir, "0000:07:00.0", "config"), "wb").write(b"\x86\x80\xd2\x15")
+    os.symlink(os.path.join(dev_dir, "0000:07:00.0"), os.path.join(pci_dir, "0000:07:00.0"))
+
+    nhi_on = mkctrl(dev_dir, "0000:08:00.0", "on")
+    open(os.path.join(dev_dir, "0000:08:00.0", "config"), "wb").write(b"\x86\x80\xd2\x15")
+    os.symlink(os.path.join(dev_dir, "0000:08:00.0"), os.path.join(pci_dir, "0000:08:00.0"))
+
+    # Driver-dir non-device entries must be ignored.
+    open(os.path.join(pci_dir, "bind"), "w").write("")
+    mod_ctrl = mkctrl(pci_dir, "module", "auto")
+
+    # Thunderbolt bus devices: host router 0-0 held; downstream 0-1 and domain0 untouched.
+    host_ctrl = mkctrl(dev_dir, "0-0", "auto")
+    os.symlink(os.path.join(dev_dir, "0-0"), os.path.join(bus_dir, "0-0"))
+    peer_ctrl = mkctrl(dev_dir, "0-1", "auto")
+    os.symlink(os.path.join(dev_dir, "0-1"), os.path.join(bus_dir, "0-1"))
+    dom_ctrl = mkctrl(dev_dir, "domain0", "auto")
+    os.symlink(os.path.join(dev_dir, "domain0"), os.path.join(bus_dir, "domain0"))
+
+    try:
+        b = Broker()
+        # Synchronize past startup (tb_pm_hold + enter_home).
+        b.send("scan")
+        b.collect("< end")
+        check("tb_pm: PCI NHI in auto is held on while broker runs", rd(nhi_auto) == "on", rd(nhi_auto))
+        check("tb_pm: host router 0-0 in auto is held on while broker runs", rd(host_ctrl) == "on", rd(host_ctrl))
+        check("tb_pm: PCI NHI already on stays on", rd(nhi_on) == "on", rd(nhi_on))
+        check("tb_pm: driver non-device entry (module) untouched", rd(mod_ctrl) == "auto", rd(mod_ctrl))
+        check("tb_pm: downstream peer router 0-1 untouched", rd(peer_ctrl) == "auto", rd(peer_ctrl))
+        check("tb_pm: domain0 entry untouched", rd(dom_ctrl) == "auto", rd(dom_ctrl))
+
+        # Forking and cancelling a pump/discovery attempt must not release the hold early.
+        b.send("pair extdisplay0")
+        b.expect("< lease extdisplay0 ")
+        b.expect("< code ")
+        b.send("cancel")
+        b.expect("< ended ")
+        check("tb_pm: hold survives pump/discovery child exit",
+              rd(nhi_auto) == "on" and rd(host_ctrl) == "on",
+              f"nhi={rd(nhi_auto)} host={rd(host_ctrl)}")
+
+        # Clean release restores auto for held devices and preserves user-configured on.
+        finish(b)
+        b.wait_exit(timeout=10)
+        check("tb_pm: release restores PCI NHI to auto", rd(nhi_auto) == "auto", rd(nhi_auto))
+        check("tb_pm: release restores host router 0-0 to auto", rd(host_ctrl) == "auto", rd(host_ctrl))
+        check("tb_pm: release preserves pre-existing on", rd(nhi_on) == "on", rd(nhi_on))
+
+        # Signal termination (SIGTERM) also restores auto cleanly.
+        b2 = Broker()
+        b2.send("scan")
+        b2.collect("< end")
+        check("tb_pm: second run holds on again",
+              rd(nhi_auto) == "on" and rd(host_ctrl) == "on",
+              f"nhi={rd(nhi_auto)} host={rd(host_ctrl)}")
+        os.kill(b2.pid, signal.SIGTERM)
+        ex = b2.expect("exit ", timeout=10)
+        b2.p.stdin.close()
+        b2.wait_exit(timeout=10)
+        check("tb_pm: SIGTERM exits cleanly", ex == "exit 0", ex)
+        check("tb_pm: SIGTERM restores PCI NHI to auto", rd(nhi_auto) == "auto", rd(nhi_auto))
+        check("tb_pm: SIGTERM restores host router 0-0 to auto", rd(host_ctrl) == "auto", rd(host_ctrl))
+        check("tb_pm: SIGTERM preserves pre-existing on", rd(nhi_on) == "on", rd(nhi_on))
+    finally:
+        for d in (pci_dir, bus_dir, dev_dir):
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     names = sys.argv[2:] or ["lease"]
     for name in names:
@@ -850,9 +983,11 @@ SHEOF
         -DEXTDISPLAY_DISCOVERY_PATH=\"$lw/extdisplay-advertise-test\" \
         -DEXTDISPLAY_BROKER_TEST_DRIVER=\"veth\" -DEXTDISPLAY_BROKER_TEST_HOME_NETNS=\"$lw/home\" \
         -DEXTDISPLAY_BROKER_TEST_STATE_DIR=\"$lw/state\" -DEXTDISPLAY_BROKER_TEST_ATTEMPT_SECONDS=8 \
+        -DEXTDISPLAY_BROKER_TEST_CARRIER_KICK_MS=600 -DEXTDISPLAY_BROKER_TEST_CARRIER_BOUNCE_MS=150 \
+        -DEXTDISPLAY_BROKER_TEST_TB_PCI_DIR=\"$lw/tb-pci\" -DEXTDISPLAY_BROKER_TEST_TB_BUS_DIR=\"$lw/tb-bus\" \
         -DEXTDISPLAY_BROKER_TEST_PROBES -o "$lw/extdisplay-broker-test" $broker_src $(pkg-config --libs openssl)
     cp "$out/test-extdisplay-broker-ctl" "$lw/test-extdisplay-broker-ctl"
-    scenarios="lease pair refuse cancel_paired timeout carrier eof protocol watch kill rename hotplug"
+    scenarios="lease pair refuse cancel_paired timeout carrier eof protocol watch kill rename hotplug carrier_kick tb_pm"
     unshare --user --map-auto --map-root-user --net --mount --propagation private \
         sh "$lw/inner.sh" "$lw" $scenarios >"$lw/driver.log" 2>&1 || :
     grep -E '^(== |PASS: |FAIL: |SUMMARY: )' "$lw/driver.log" || :
