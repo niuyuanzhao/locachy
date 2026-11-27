@@ -374,6 +374,9 @@ static void stop_while_starting(void)
           event_count("start", n) == 1,
           "while it starts: open is the start under way, show says closed, resume, start and open with a target "
           "are refused; one launcher");
+    /* Gate the stop helper so reap_all() inside is_state("stopping") cannot race
+     * an ungated stop helper all the way to "closed" before the checks run. */
+    gate(n, "stop");
     check(answered("stop", n, "stop accepted") && is_state(n, "stopping"), "a stop while it starts: accepted, stopping");
     check(refused("open", n, busy) && refused("show", n, busy) && refused("start", n, busy) &&
           answered("stop", n, "stop already in progress"),
@@ -384,8 +387,10 @@ static void stop_while_starting(void)
           "the launcher outside app_NAME is killed (SIGKILL) with its process group, and reaped");
     pid_t stop = wait_event("stop", n, 1, 5000);
     snprintf(text, sizeof text, "reaped - %d ", (int)launcher);
-    check(stop && event_at(text) >= 0 && event_at(text) < event_at("stop a1 "),
+    check(stop && wait_event("gate-stop", n, 1, 5000) != 0 &&
+          event_at(text) >= 0 && event_at(text) < event_at("stop a1 "),
           "the stop helper starts only once the killed launcher has been reaped");
+    release(n, "stop");
     check(closed_clean(n) && event_count("app", n) == 0 && event_count("start", n) == 1,
           "it ends closed without an error: the old launcher's status changed nothing, nothing entered app_NAME, "
           "nothing started again");
