@@ -75,6 +75,46 @@ NVIDIA_LIB_PATTERNS = (
     "libcudadebugger.so*",
 )
 
+IMAGE_PRESETS = (
+    {
+        "id": "ubuntu-24.04",
+        "label": "Ubuntu 24.04 LTS Base (~30 MB)",
+        "kind": "ubuntu-sha256sums",
+        "base_url": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/",
+        "index_url": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/SHA256SUMS",
+        "pattern": r"^ubuntu-base-24\.04(?:\.(\d+))?-base-amd64\.tar\.gz$",
+        "strip": 0,
+    },
+    {
+        "id": "ubuntu-22.04",
+        "label": "Ubuntu 22.04 LTS Base (~30 MB)",
+        "kind": "ubuntu-sha256sums",
+        "base_url": "https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/",
+        "index_url": "https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/SHA256SUMS",
+        "pattern": r"^ubuntu-base-22\.04(?:\.(\d+))?-base-amd64\.tar\.gz$",
+        "strip": 0,
+    },
+    {
+        "id": "arch-linux",
+        "label": "Arch Linux Bootstrap (~170 MB)",
+        "kind": "exact-sha256sums",
+        "base_url": "https://geo.mirror.pkgbuild.com/iso/latest/",
+        "index_url": "https://geo.mirror.pkgbuild.com/iso/latest/sha256sums.txt",
+        "filename": "archlinux-bootstrap-x86_64.tar.zst",
+        "strip": 1,
+    },
+    {
+        "id": "alpine-stable",
+        "label": "Alpine Linux Minirootfs (~4 MB)",
+        "kind": "alpine-yaml",
+        "base_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/",
+        "index_url": "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/latest-releases.yaml",
+        "strip": 0,
+    },
+)
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+HTTPS_URL_RE = re.compile(r"^https://[^\s\"'<>]{4,2048}$")
+
 
 def _load_peers_module():
     here = Path(__file__).resolve().parent
@@ -572,7 +612,16 @@ def ensure_nvidia_device_nodes(
     return created
 
 
-def _safe_extract_tar(tf: tarfile.TarFile, dest: Path) -> None:
+def _strip_tar_path(norm: str, strip_components: int) -> str | None:
+    if strip_components <= 0:
+        return norm
+    parts = [p for p in norm.split("/") if p and p != "."]
+    if len(parts) <= strip_components:
+        return None
+    return "/".join(parts[strip_components:])
+
+
+def _safe_extract_tar(tf: tarfile.TarFile, dest: Path, strip_components: int = 0) -> None:
     dest_real = os.path.realpath(dest)
     for member in tf:
         name = member.name.lstrip("/")
@@ -581,6 +630,10 @@ def _safe_extract_tar(tf: tarfile.TarFile, dest: Path) -> None:
         norm = os.path.normpath(name)
         if norm.startswith("..") or os.path.isabs(norm):
             raise ComputeError(f"unsafe path in tarball: {member.name!r}")
+        stripped = _strip_tar_path(norm, strip_components)
+        if not stripped:
+            continue
+        norm = stripped
         base = os.path.basename(norm)
         parent = Path(dest_real) / os.path.dirname(norm)
         if base == ".wh..wh..opq":
@@ -612,7 +665,10 @@ def _safe_extract_tar(tf: tarfile.TarFile, dest: Path) -> None:
             link_norm = os.path.normpath(member.linkname.lstrip("/"))
             if link_norm.startswith(".."):
                 raise ComputeError(f"unsafe hardlink in tarball: {member.linkname!r}")
-            src = Path(dest_real) / link_norm
+            link_stripped = _strip_tar_path(link_norm, strip_components)
+            if not link_stripped:
+                continue
+            src = Path(dest_real) / link_stripped
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() or target.is_symlink():
                 target.unlink()
@@ -646,7 +702,7 @@ def _safe_extract_tar(tf: tarfile.TarFile, dest: Path) -> None:
                     pass
 
 
-def _extract_tar_path(tar_path: Path, dest: Path) -> None:
+def _extract_tar_path(tar_path: Path, dest: Path, strip_components: int = 0) -> None:
     name = tar_path.name.lower()
     if name.endswith(".tar.zst") or name.endswith(".zst"):
         zstd = shutil.which("zstd") or shutil.which("unzstd")
@@ -657,7 +713,7 @@ def _extract_tar_path(tar_path: Path, dest: Path) -> None:
         failed = False
         try:
             with tarfile.open(fileobj=proc.stdout, mode="r|*") as tf:
-                _safe_extract_tar(tf, dest)
+                _safe_extract_tar(tf, dest, strip_components=strip_components)
             # Drain trailing tar EOF padding so zstd finishes cleanly without SIGPIPE.
             while proc.stdout.read(65536):
                 pass
@@ -692,11 +748,19 @@ def _extract_tar_path(tar_path: Path, dest: Path) -> None:
                     with tarfile.open(layer_path, mode="r:*") as ltf:
                         _safe_extract_tar(ltf, dest)
             return
-        _safe_extract_tar(tf, dest)
+        _safe_extract_tar(tf, dest, strip_components=strip_components)
 
 
-def image_import(name: str, source: str) -> dict:
+def image_import(
+    name: str,
+    source: str,
+    *,
+    strip_components: int = 0,
+    source_label: str | None = None,
+) -> dict:
     validate_name(name, "image name")
+    if strip_components < 0 or strip_components > 8:
+        raise ComputeError(f"invalid strip_components: {strip_components}")
     src = Path(source)
     if not src.exists():
         raise ComputeError(f"image source does not exist: {source}")
@@ -712,11 +776,11 @@ def image_import(name: str, source: str) -> dict:
         if src.is_dir():
             shutil.copytree(src, rootfs, symlinks=True, dirs_exist_ok=True)
         else:
-            _extract_tar_path(src, rootfs)
+            _extract_tar_path(src, rootfs, strip_components=strip_components)
         meta = {
             "version": 1,
             "name": name,
-            "source": str(src.resolve()),
+            "source": source_label or str(src.resolve()),
             "imported_at": _utc_now(),
         }
         _atomic_write_json(stage / "image.json", meta, 0o644)
@@ -728,6 +792,185 @@ def image_import(name: str, source: str) -> dict:
         # from a moved or empty value).
         if stage is not None and stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
+
+
+def _resolve_preset_manifest(preset: dict, manifest_text: str) -> tuple[str, str]:
+    """Parse an official upstream checksum/release manifest -> (download_url, expected_sha256)."""
+    kind = preset["kind"]
+    base_url = preset["base_url"]
+    if kind == "ubuntu-sha256sums":
+        rx = re.compile(preset["pattern"])
+        best: tuple[int, str, str] | None = None
+        for line in manifest_text.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2 or not SHA256_RE.match(parts[0]):
+                continue
+            fname = parts[1].lstrip("*").strip()
+            m = rx.match(fname)
+            if not m:
+                continue
+            point = int(m.group(1)) if m.group(1) else 0
+            if best is None or point > best[0]:
+                best = (point, fname, parts[0].lower())
+        if best is None:
+            raise ComputeError(f"no matching amd64 rootfs entry in {preset['index_url']}")
+        return base_url + best[1], best[2]
+    if kind == "exact-sha256sums":
+        want = preset["filename"]
+        for line in manifest_text.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2 or not SHA256_RE.match(parts[0]):
+                continue
+            fname = parts[1].lstrip("*").strip()
+            if fname == want:
+                return base_url + want, parts[0].lower()
+        raise ComputeError(f"missing {want} in {preset['index_url']}")
+    if kind == "alpine-yaml":
+        in_flavor = False
+        fname = ""
+        digest = ""
+        for raw in manifest_text.splitlines():
+            line = raw.strip()
+            if line.startswith("-"):
+                if in_flavor and fname and digest:
+                    break
+                in_flavor = False
+                fname = ""
+                digest = ""
+                line = line[1:].strip()
+            if line.startswith("flavor:"):
+                in_flavor = line.split(":", 1)[1].strip().strip("\"'") == "alpine-minirootfs"
+            elif in_flavor and line.startswith("file:"):
+                fname = line.split(":", 1)[1].strip().strip("\"'")
+            elif in_flavor and line.startswith("sha256:"):
+                cand = line.split(":", 1)[1].strip().strip("\"'")
+                if SHA256_RE.match(cand):
+                    digest = cand.lower()
+        if not (fname and digest) or "/" in fname or ".." in fname:
+            raise ComputeError(f"no alpine-minirootfs entry with sha256 in {preset['index_url']}")
+        return base_url + fname, digest
+    raise ComputeError(f"unsupported preset kind: {kind!r}")
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest().lower()
+
+
+def _download_https(url: str, dest: Path, *, progress: bool = False) -> None:
+    if not HTTPS_URL_RE.match(url):
+        raise ComputeError(f"only https:// URLs are allowed for image fetch: {url!r}")
+    curl = shutil.which("curl")
+    if not curl:
+        raise ComputeError("curl is required to fetch base rootfs images")
+    cmd: list[str] = []
+    ns_path = Path("/run/netns/locachy-net")
+    if ns_path.exists():
+        try:
+            if os.stat(ns_path).st_ino != os.stat("/proc/self/ns/net").st_ino:
+                ip_bin = shutil.which("ip")
+                if ip_bin:
+                    # ip netns exec mounts /etc/netns/locachy-net/resolv.conf onto /etc/resolv.conf
+                    # so DNS resolution works inside the isolated network namespace.
+                    cmd.extend([ip_bin, "netns", "exec", "locachy-net"])
+                else:
+                    cmd.extend(["nsenter", f"--net={ns_path}", "--"])
+        except OSError:
+            pass
+    if os.geteuid() == 0:
+        cmd.extend(["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--no-new-privs", "--"])
+    cmd.extend([
+        curl, "-fL", "--proto", "=https", "--tlsv1.2",
+        "--retry", "2", "--connect-timeout", "20",
+        "--progress-bar" if progress else "-sS",
+        url,
+    ])
+    # Open dest in the caller so unprivileged curl writes strictly to the inherited
+    # stdout fd and needs no traverse/write permission on compute_base() or tmp_dir.
+    with open(dest, "wb") as out:
+        res = subprocess.run(cmd, stdout=out, cwd="/", check=False)
+    if res.returncode != 0:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ComputeError(f"download failed ({res.returncode}): {url}")
+
+
+def image_fetch(
+    preset_or_none: str | None,
+    *,
+    name: str | None = None,
+    url: str | None = None,
+    sha256: str = "",
+    strip_components: int | None = None,
+    download_fn=None,
+) -> dict:
+    if bool(preset_or_none) == bool(url):
+        raise ComputeError("specify either a preset id or --url https://...")
+    if sha256 and not SHA256_RE.match(sha256):
+        raise ComputeError("invalid --sha256 (expected 64 hex characters)")
+    preset = None
+    if preset_or_none:
+        for p in IMAGE_PRESETS:
+            if p["id"] == preset_or_none:
+                preset = p
+                break
+        if preset is None:
+            known = ", ".join(p["id"] for p in IMAGE_PRESETS)
+            raise ComputeError(f"unknown image preset {preset_or_none!r}; available: {known}")
+        img_name = name or preset["id"]
+        strip = preset["strip"] if strip_components is None else strip_components
+    else:
+        assert url is not None
+        if not HTTPS_URL_RE.match(url):
+            raise ComputeError(f"only https:// URLs are allowed: {url!r}")
+        if not name:
+            raise ComputeError("--name is required when fetching from --url")
+        img_name = name
+        strip = 0 if strip_components is None else strip_components
+
+    validate_name(img_name, "image name")
+    img_dir = compute_base() / "images" / img_name
+    if img_dir.exists():
+        raise ComputeError(f"image already exists: {img_name}")
+
+    dl = download_fn or _download_https
+    base_dir = compute_base() / "images"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f".fetch-{img_name}-", dir=base_dir))
+    try:
+        expected_sha = sha256.lower()
+        if preset is not None:
+            print(f"Fetching checksum manifest from {preset['index_url']} ...", flush=True)
+            idx_path = tmp_dir / "manifest.txt"
+            dl(preset["index_url"], idx_path, progress=False)
+            dl_url, expected_sha = _resolve_preset_manifest(preset, idx_path.read_text(encoding="utf-8", errors="replace"))
+        else:
+            assert url is not None
+            dl_url = url
+        fname = os.path.basename(urllib.parse.urlparse(dl_url).path) or "rootfs.tar.gz"
+        if not any(fname.lower().endswith(ext) for ext in (".tar.zst", ".zst", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tar")):
+            fname = "rootfs.tar.gz"
+        arc_path = tmp_dir / fname
+        print(f"Downloading {dl_url} ...", flush=True)
+        dl(dl_url, arc_path, progress=sys.stdout.isatty())
+        if expected_sha:
+            print("Verifying SHA-256 checksum ...", flush=True)
+            got = _sha256_file(arc_path)
+            if got != expected_sha:
+                raise ComputeError(f"SHA-256 mismatch for {dl_url}: expected {expected_sha}, got {got}")
+            print(f"SHA-256 OK ({got[:16]}...)", flush=True)
+        print(f"Extracting base rootfs into image '{img_name}' ...", flush=True)
+        return image_import(img_name, str(arc_path), strip_components=strip, source_label=dl_url)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def image_list() -> list[dict]:
@@ -842,6 +1085,57 @@ def env_create(
         "env": env_map,
     }
     _atomic_write_json(edir / "env.json", meta, 0o644)
+    return meta
+
+
+def env_set(
+    name: str,
+    *,
+    gpu: bool | None = None,
+    net: str | None = None,
+    mounts: list[str] | None = None,
+    clear_mounts: bool = False,
+    volumes: list[str] | None = None,
+    clear_volumes: bool = False,
+    memory_max: str | None = None,
+    cpu_max: str | None = None,
+    workdir: str | None = None,
+) -> dict:
+    meta = env_load(name)
+    if gpu is not None:
+        meta["gpu"] = bool(gpu)
+    if net is not None:
+        if net not in ("locachy-net", "none"):
+            raise ComputeError(f"invalid network mode: {net!r}")
+        meta["net"] = net
+    if memory_max is not None:
+        if memory_max and not MEM_RE.match(memory_max):
+            raise ComputeError(f"invalid memory limit: {memory_max!r}")
+        meta["memory_max"] = memory_max
+    if cpu_max is not None:
+        if cpu_max and not CPU_RE.match(cpu_max):
+            raise ComputeError(f"invalid cpu limit: {cpu_max!r}")
+        meta["cpu_max"] = cpu_max
+    if workdir is not None:
+        if not os.path.isabs(workdir):
+            raise ComputeError(f"workdir must be absolute: {workdir!r}")
+        meta["workdir"] = workdir
+    if clear_mounts or mounts is not None:
+        base_mounts = [] if clear_mounts else list(meta.get("mounts", []))
+        for spec in mounts or []:
+            parsed = parse_mount_spec(spec)
+            base_mounts = [m for m in base_mounts if m.get("target") != parsed["target"]]
+            base_mounts.append(parsed)
+        meta["mounts"] = base_mounts
+    if clear_volumes or volumes is not None:
+        base_vols = [] if clear_volumes else list(meta.get("volumes", []))
+        for spec in volumes or []:
+            resolved = resolve_volume_mount_spec(spec)
+            entry = {"name": resolved["volume"], "target": resolved["target"], "mode": resolved["mode"]}
+            base_vols = [v for v in base_vols if v.get("name") != entry["name"]]
+            base_vols.append(entry)
+        meta["volumes"] = base_vols
+    _atomic_write_json(_env_dir(name) / "env.json", meta, 0o644)
     return meta
 
 
@@ -3392,6 +3686,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub_img.add_parser("import", help="Import rootfs directory, tarball, or OCI/Docker save tar")
     sp.add_argument("name")
     sp.add_argument("source")
+    sp.add_argument("--strip", type=int, default=0, help="Strip leading path components from tar archive")
+    sp = sub_img.add_parser("presets", help="List built-in official native Linux rootfs presets")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--tsv", action="store_true")
+    sp = sub_img.add_parser("fetch", help="Download, SHA-256 verify, and import an official rootfs preset or HTTPS tarball")
+    sp.add_argument("preset", nargs="?", default=None, help="Built-in preset id (e.g. ubuntu-24.04, arch-linux)")
+    sp.add_argument("--name", default=None, help="Target image name (defaults to preset id)")
+    sp.add_argument("--url", default=None, help="Custom https:// tarball URL")
+    sp.add_argument("--sha256", default="", help="Optional expected SHA-256 hex digest for --url")
+    sp.add_argument("--strip", type=int, default=None, help="Override leading path components to strip")
     sp = sub_img.add_parser("list", help="List imported images")
     sp.add_argument("--json", action="store_true")
     sp = sub_img.add_parser("remove", help="Remove an unused image")
@@ -3403,7 +3707,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub_env.add_parser("create", help="Create a compute environment over a base image")
     sp.add_argument("name")
     sp.add_argument("--image", required=True)
-    sp.add_argument("--gpu", action="store_true")
+    sp.add_argument("--gpu", dest="gpu", action="store_true", default=False)
+    sp.add_argument("--no-gpu", dest="gpu", action="store_false")
     sp.add_argument("--net", choices=("locachy-net", "none"), default="locachy-net")
     sp.add_argument("--mount", action="append", default=[])
     sp.add_argument("--volume", action="append", default=[], help="Storage volume NAME[:CONTAINER_PATH[:ro|rw]]")
@@ -3411,6 +3716,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cpu", default="")
     sp.add_argument("--workdir", default="/")
     sp.add_argument("--env", action="append", default=[])
+    sp = sub_env.add_parser("set", help="Update configuration of an existing compute environment")
+    sp.add_argument("name")
+    sp.add_argument("--gpu", dest="gpu", action="store_true", default=None)
+    sp.add_argument("--no-gpu", dest="gpu", action="store_false")
+    sp.add_argument("--net", choices=("locachy-net", "none"), default=None)
+    sp.add_argument("--mount", action="append", default=None)
+    sp.add_argument("--clear-mounts", action="store_true")
+    sp.add_argument("--volume", action="append", default=None, help="Storage volume NAME[:CONTAINER_PATH[:ro|rw]]")
+    sp.add_argument("--clear-volumes", action="store_true")
+    sp.add_argument("--memory", default=None)
+    sp.add_argument("--cpu", default=None)
+    sp.add_argument("--workdir", default=None)
     sp = sub_env.add_parser("list", help="List compute environments")
     sp.add_argument("--json", action="store_true")
     sp = sub_env.add_parser("reset", help="Wipe OverlayFS upper/work while preserving base rootfs & data")
@@ -3595,7 +3912,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "image":
             if args.img_cmd == "import":
-                meta = image_import(args.name, args.source)
+                meta = image_import(args.name, args.source, strip_components=args.strip)
+                print(json.dumps(meta, sort_keys=True))
+            elif args.img_cmd == "presets":
+                items = [{"id": p["id"], "label": p["label"], "index_url": p["index_url"]} for p in IMAGE_PRESETS]
+                if args.json:
+                    print(json.dumps(items, indent=2, sort_keys=True))
+                elif args.tsv:
+                    for it in items:
+                        print(f"{it['id']}\t{it['label']}\t{it['index_url']}")
+                else:
+                    for it in items:
+                        print(f"{it['id']:16s}  {it['label']}")
+            elif args.img_cmd == "fetch":
+                meta = image_fetch(
+                    args.preset,
+                    name=args.name,
+                    url=args.url,
+                    sha256=args.sha256,
+                    strip_components=args.strip,
+                )
                 print(json.dumps(meta, sort_keys=True))
             elif args.img_cmd == "list":
                 items = image_list()
@@ -3621,6 +3957,20 @@ def main(argv: list[str] | None = None) -> int:
                     cpu_max=args.cpu,
                     workdir=args.workdir,
                     env_vars=args.env,
+                )
+                print(json.dumps(meta, sort_keys=True))
+            elif args.env_cmd == "set":
+                meta = env_set(
+                    args.name,
+                    gpu=args.gpu,
+                    net=args.net,
+                    mounts=args.mount,
+                    clear_mounts=args.clear_mounts,
+                    volumes=args.volume,
+                    clear_volumes=args.clear_volumes,
+                    memory_max=args.memory,
+                    cpu_max=args.cpu,
+                    workdir=args.workdir,
                 )
                 print(json.dumps(meta, sort_keys=True))
             elif args.env_cmd == "list":
@@ -3820,7 +4170,21 @@ def main(argv: list[str] | None = None) -> int:
                 for it in st_info["images"]:
                     print(f"image\t{_tsv_clean(it.get('name', ''), 64)}\t{_tsv_clean(it.get('imported_at', ''), 32)}\t{_tsv_clean(it.get('source', ''), 160)}")
                 for it in st_info["envs"]:
-                    print(f"env\t{_tsv_clean(it.get('name', ''), 64)}\t{_tsv_clean(it.get('image', ''), 64)}\t{int(bool(it.get('gpu')))}\t{_tsv_clean(it.get('net', 'none'), 24)}")
+                    vols_csv = ",".join(
+                        f"{v.get('name', '')}:{v.get('target', '')}:{v.get('mode', 'rw')}"
+                        for v in (it.get("volumes") or [])
+                    )
+                    mounts_csv = ",".join(
+                        f"{m.get('host', '')}:{m.get('target', '')}:{m.get('mode', 'rw')}"
+                        for m in (it.get("mounts") or [])
+                    )
+                    print(
+                        f"env\t{_tsv_clean(it.get('name', ''), 64)}\t{_tsv_clean(it.get('image', ''), 64)}\t"
+                        f"{int(bool(it.get('gpu')))}\t{_tsv_clean(it.get('net', 'none'), 24)}\t"
+                        f"{_tsv_clean(vols_csv, 240)}\t{_tsv_clean(mounts_csv, 240)}\t"
+                        f"{_tsv_clean(it.get('memory_max', ''), 32)}\t{_tsv_clean(it.get('cpu_max', ''), 32)}\t"
+                        f"{_tsv_clean(it.get('workdir', '/'), 120)}"
+                    )
                 for it in st_info["jobs"]:
                     cmd_txt = " ".join(str(x) for x in (it.get("command") or []))
                     ec = "" if it.get("exit_code") is None else str(it.get("exit_code"))

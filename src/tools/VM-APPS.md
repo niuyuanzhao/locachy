@@ -4,7 +4,7 @@
 
 A VM app is a KVM virtual machine declared in `/etc/locachy/containers/NAME.conf` with `vm="1"`. Home lists it alongside containers, and `locachy-app` handles its `start`, `resume`, `freeze`, `stop`, and `remove` lifecycle in the shared `labwc` Wayland compositor inside its own `/sys/fs/cgroup/app_NAME` cgroup.
 
-VM apps have no OverlayFS layer and no container package build. `locachy-app build`, `install`, and `rollback` refuse them, `locachy-pkg` skips them when planning container updates, and `packages` does not list them.
+VM apps have no OverlayFS layer and no container package build. `locachy-app build`, `install`, and `rollback` refuse them, `locachy-pkg` skips them when planning container updates, and `packages` does not list them. **Settings → Compute & VMs → Virtual Machines** lists all non-`winmaint` VM apps (`Enter`: open on desktop, `e`: edit settings form, `s`: stop, `Delete` twice: `app-remove`) and provides **New virtual machine app** to create blank qcow2 disks in `/var/lib/locachy/vm-disks/` or attach existing `vm_base`/`vm_disk` images.
 
 ## Configuration keys
 

@@ -92,7 +92,7 @@ fwupd's whole report in a terminal, with the fixes fwupd offers.
 
 ## Idle lock and display power
 
-In **Settings → Security → Screen Locking**, **Auto-lock** controls idle locking
+In **Settings → Security & Privacy → Screen Locking**, **Auto-lock** controls idle locking
 and locking before lid sleep or critical-battery hibernation. Its independent
 idle time (`lock_after`, 10 minutes by default) is kept when the switch is off.
 A saved time of `0` means never lock for idle alone. After an idle lock, the
@@ -102,7 +102,7 @@ password. It does not apply to the lock key, lid, sleep, critical-battery lock,
 or a high-threat lock. Both manual locking and the separate boot lock still
 work. The high threat level keeps Auto-lock enabled and disables the grace.
 
-In **Settings → Power → Display**, **Automatic display-off** and its idle time
+In **Settings → Power & Battery → Display**, **Automatic display-off** and its idle time
 (`auto_blank` and `blank_after`, off and 5 minutes by default) affect the
 outputs only. Input lights them without dismissing an existing lock. Either
 idle action can fire first; turning one off does not turn the other off. An

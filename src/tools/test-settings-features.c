@@ -16,7 +16,13 @@
 #include <unistd.h>
 
 static char fake_winmaint_state[256] = "/tmp/nonexistent-winmaint-state.json";
+static char fake_vm_conf_dir[256] = "/tmp/nonexistent-vm-conf";
+static char fake_vm_disks_dir[256] = "/tmp/nonexistent-vm-disks";
+static char fake_vm_run_dir[256] = "/tmp/nonexistent-vm-run";
 #define WINMAINT_STATE_FILE fake_winmaint_state
+#define VM_CONF_DIR fake_vm_conf_dir
+#define VM_DISKS_DIR fake_vm_disks_dir
+#define VM_APPS_RUN_DIR fake_vm_run_dir
 #define SETTINGS_COMMAND_OUTPUT
 #define SETTINGS_SSH_ADMIN
 #define SETTINGS_COMPUTE_RUN
@@ -50,8 +56,10 @@ static int reloads, fail_rc;
 static char rc_name[32][64], rc_value[32][256];
 static int rc_count;
 static int fake_pair_installed, fake_winmaint_installed, fake_gpu_unlock_installed;
-static int fake_nvidia_installed = 1, fake_compute_installed = 1;
+static int fake_nvidia_installed = 1, fake_compute_installed = 1, fake_winiso_installed = 1;
 static int fake_ssh_installed = 1;
+static const char *fake_winiso_win_path = "";
+static const char *fake_winiso_virtio_path = "";
 static int ssh_reload_calls, ssh_regen_calls, ssh_keys_add_calls, ssh_keys_remove_calls;
 static int ssh_admin_fail_next;
 static char ssh_last_user[64], ssh_last_added[256], ssh_last_removed[16];
@@ -230,6 +238,10 @@ static void command_output(char *const argv[], char *buf, size_t size)
         argv[2] && strcmp(argv[2], "--tsv") == 0 && argv[3] == NULL) {
         snprintf(buf, size, "%s", fake_compute_status);
     }
+    if (argv[0] && strcmp(argv[0], LOCACHY_WINISO) == 0 && argv[1] && strcmp(argv[1], "path") == 0 && argv[2]) {
+        if (strcmp(argv[2], "windows") == 0) snprintf(buf, size, "%s", fake_winiso_win_path);
+        else if (strcmp(argv[2], "virtio-win") == 0) snprintf(buf, size, "%s", fake_winiso_virtio_path);
+    }
 }
 
 int rc_set(const char *name, const char *value)
@@ -301,6 +313,11 @@ int settings_access(const char *path, int mode)
     }
     if (strcmp(path, LOCACHY_COMPUTE) == 0) {
         if (fake_compute_installed) return 0;
+        errno = ENOENT;
+        return -1;
+    }
+    if (strcmp(path, LOCACHY_WINISO) == 0) {
+        if (fake_winiso_installed) return 0;
         errno = ENOENT;
         return -1;
     }
@@ -376,6 +393,12 @@ int main(void)
     char tmpdir[] = "/tmp/locachy-settings-feat-XXXXXX";
     assert(mkdtemp(tmpdir) != NULL);
     snprintf(fake_winmaint_state, sizeof fake_winmaint_state, "%s/state.json", tmpdir);
+    snprintf(fake_vm_conf_dir, sizeof fake_vm_conf_dir, "%s/containers", tmpdir);
+    snprintf(fake_vm_disks_dir, sizeof fake_vm_disks_dir, "%s/vm-disks", tmpdir);
+    snprintf(fake_vm_run_dir, sizeof fake_vm_run_dir, "%s/apps-run", tmpdir);
+    mkdir(fake_vm_conf_dir, 0755);
+    mkdir(fake_vm_disks_dir, 0755);
+    mkdir(fake_vm_run_dir, 0755);
 
     /* 1. Category coverage: every setting index appears exactly once. */
     int counted[512] = { 0 };
@@ -394,8 +417,8 @@ int main(void)
     assert(category_of(extd_tb_shared_index()) == CAT_INPUT);
     assert(category_of(extd_paired_only_index()) == CAT_INPUT);
     assert(category_of(paired_devices_index()) == CAT_DEVICES);
-    assert(category_of(compute_index()) == CAT_NETWORK);
-    assert(category_of(winmaint_index()) == CAT_SYSTEM);
+    assert(category_of(compute_index()) == CAT_COMPUTE);
+    assert(category_of(winmaint_index()) == CAT_COMPUTE);
     puts("PASS category placement and unique index chain for all new rows");
 
     /* 2. Display GPU and Extended display GPU selectors. */
@@ -718,9 +741,9 @@ int main(void)
     assert(compute_gpu == 1);
 
     /* Compute status TSV parsing, 6-row rendering, SSH config viewer + clipboard copy, and Compute Node Manager TUI. */
-    assert(category_of(compute_index() + 3) == CAT_NETWORK &&
-           category_of(compute_index() + 4) == CAT_NETWORK &&
-           category_of(compute_index() + 5) == CAT_NETWORK);
+    assert(category_of(compute_index() + 3) == CAT_COMPUTE &&
+           category_of(compute_index() + 4) == CAT_COMPUTE &&
+           category_of(compute_index() + 5) == CAT_COMPUTE);
     assert(enter_row(compute_index() + 4) && enter_row(compute_index() + 5));
     fake_compute_status =
         "meta\tservice_enabled\t1\n"
@@ -743,7 +766,7 @@ int main(void)
         "meta\tssh_port\t22222\n"
         "meta\tssh_prefix\tcompute-node\n"
         "image\tpytorch-cu12\t2026-11-26T00:00:00Z\t/tmp/pt.tar.zst\n"
-        "env\ttrain1\tpytorch-cu12\t1\tnone\n"
+        "env\ttrain1\tpytorch-cu12\t1\tnone\tdata:/volumes/data:rw\t\t16G\t800000 100000\t/root\n"
         "job\tjob-42\ttrain1\trunning\t\tpython train.py\n"
         "vm\tdevvm\t0\t4096\t4\t2222\troot\n";
     compute_on = 1;
@@ -751,7 +774,11 @@ int main(void)
     load_compute_status();
     assert(compute_snap.loaded && compute_snap.daemon_running && compute_snap.nimages == 1 &&
            compute_snap.nenvs == 1 && compute_snap.njobs == 1 && compute_snap.njobs_running == 1 &&
-           compute_snap.nvms == 1 && compute_snap.nvms_running == 0);
+           compute_snap.nvms == 1 && compute_snap.nvms_running == 0 &&
+           strcmp(compute_snap.envs[0].volumes, "data:/volumes/data:rw") == 0 &&
+           strcmp(compute_snap.envs[0].memory_max, "16G") == 0 &&
+           strcmp(compute_snap.envs[0].cpu_max, "800000 100000") == 0 &&
+           strcmp(compute_snap.envs[0].workdir, "/root") == 0);
     item_text(compute_index(), line, sizeof line);
     assert(strstr(line, "port 27184, running"));
     item_text(compute_index() + 2, line, sizeof line);
@@ -772,21 +799,116 @@ int main(void)
     compute_view_ssh_config();
     assert(clip_calls == 1 && strstr(clip_last, "Host compute-node") && strstr(notice, "Copied"));
 
-    /* Compute Node Manager TUI: switch to Jobs tab (3), open job log (Enter), exit log (Esc), stop job (s),
-     * switch to Envs tab (2), move to train1 (Down), confirm reset (x, x), exit manager (Esc). */
+    /* Single-page sectioned Compute Node Manager TUI (zero tabs):
+     * With 1 env, 1 img, 1 vm, 1 job, selectable rows are:
+     *   0: default(train1), 1: env(train1), 2: +New env, 3: img(pytorch-cu12),
+     *   4: +New img, 5: vm(vm1), 6: +New vm, 7: job(job-001), 8..10: storage/ssh/pair.
+     * Navigate to job-001 (7x Down), view log (Enter), exit log (Esc), stop job (s),
+     * move up 6 rows to env(train1), confirm reset (x, x), exit manager (Esc). */
     compute_exec_calls = 0;
     nfake_keys = fake_key_pos = 0;
-    fake_keys[nfake_keys++] = '3';
+    for (int d = 0; d < 7; d++) fake_keys[nfake_keys++] = K_DOWN;
     fake_keys[nfake_keys++] = '\n';
     fake_keys[nfake_keys++] = 27;
     fake_keys[nfake_keys++] = 's';
-    fake_keys[nfake_keys++] = '2';
-    fake_keys[nfake_keys++] = K_DOWN;
+    for (int u = 0; u < 6; u++) fake_keys[nfake_keys++] = K_UP;
     fake_keys[nfake_keys++] = 'x';
     fake_keys[nfake_keys++] = 'x';
     fake_keys[nfake_keys++] = 27;
     manage_compute_node();
     assert(compute_exec_calls == 3 && strstr(compute_exec_last, "env reset train1"));
+
+    /* Interactive Container Settings form (Edit mode via 'e' right on default row 0):
+     * initial row on edit is 2 (GPU); toggle GPU OFF (Enter), Down to Net (3),
+     * toggle Net ON to locachy-net (Enter), Down to Mem (4), Right from 16G -> 24G,
+     * Down through CPU(5), Workdir(6), Add-Mount(7) to Save(8) (0 eligible storage_vols here), Enter. */
+    compute_exec_calls = 0;
+    compute_exec_last[0] = '\0';
+    nstorage_vols = 0;
+    nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = 'e';
+    fake_keys[nfake_keys++] = '\n';     /* GPU: ON -> OFF */
+    fake_keys[nfake_keys++] = K_DOWN;   /* Net (row 3) */
+    fake_keys[nfake_keys++] = '\n';     /* Net: none -> locachy-net */
+    fake_keys[nfake_keys++] = K_DOWN;   /* Memory (row 4) */
+    fake_keys[nfake_keys++] = K_RIGHT;  /* 16G -> 24G */
+    fake_keys[nfake_keys++] = K_DOWN;   /* CPU (5) */
+    fake_keys[nfake_keys++] = K_DOWN;   /* Workdir (6) */
+    fake_keys[nfake_keys++] = K_DOWN;   /* Add mount (7) */
+    fake_keys[nfake_keys++] = K_DOWN;   /* Save (8) */
+    fake_keys[nfake_keys++] = '\n';     /* Save! */
+    fake_keys[nfake_keys++] = 27;       /* Exit manager */
+    manage_compute_node();
+    assert(compute_exec_calls == 1
+           && strstr(compute_exec_last, "env set train1")
+           && strstr(compute_exec_last, "--no-gpu")
+           && strstr(compute_exec_last, "--net locachy-net")
+           && strstr(compute_exec_last, "--memory 24G")
+           && strstr(compute_exec_last, "--clear-volumes"));
+
+    /* Interactive Container Settings form (Create mode via +New container at 2x Down):
+     * verify defaults use --gpu and --net locachy-net (NOT --net none). */
+    compute_exec_calls = 0;
+    compute_exec_last[0] = '\0';
+    nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = '\n';     /* Open Create form (starts at row 0) */
+    for (int d = 0; d < 8; d++) fake_keys[nfake_keys++] = K_DOWN; /* Move 0 -> 8 (Save) */
+    fake_keys[nfake_keys++] = '\n';     /* Save & Create */
+    fake_keys[nfake_keys++] = 27;       /* Exit manager */
+    manage_compute_node();
+    assert(compute_exec_calls == 1
+           && strstr(compute_exec_last, "env create compute2 --image pytorch-cu12 --gpu --net locachy-net"));
+
+    /* Compute Micro-VM: export to Home ('a' on vm1 at 5x Down) and create form (6x Down). */
+    compute_exec_calls = 0;
+    compute_exec_last[0] = '\0';
+    nfake_keys = fake_key_pos = 0;
+    for (int d = 0; d < 5; d++) fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = 'a';
+    fake_keys[nfake_keys++] = 27;
+    manage_compute_node();
+    assert(compute_exec_calls == 1
+           && strstr(compute_exec_last, "vm export-app devvm --display gtk --freeze qmp --network 1"));
+
+    compute_exec_calls = 0;
+    compute_exec_last[0] = '\0';
+    nfake_keys = fake_key_pos = 0;
+    for (int d = 0; d < 6; d++) fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = '\n';     /* Open New Compute Micro-VM form */
+    fake_keys[nfake_keys++] = K_DOWN;   /* Row 1: Base qcow2 disk */
+    fake_keys[nfake_keys++] = '\n';     /* Prompt for path */
+    for (const char *s = "/var/lib/locachy/vm-disks/base.qcow2"; *s; s++) fake_keys[nfake_keys++] = (unsigned char)*s;
+    fake_keys[nfake_keys++] = '\n';     /* Confirm path */
+    for (int d = 0; d < 6; d++) fake_keys[nfake_keys++] = K_DOWN; /* Row 1 -> Row 7 (Create) */
+    fake_keys[nfake_keys++] = '\n';     /* Create! */
+    fake_keys[nfake_keys++] = 27;       /* Exit manager */
+    manage_compute_node();
+    assert(compute_exec_calls == 1
+           && strstr(compute_exec_last, "vm create vm1 --disk /var/lib/locachy/vm-disks/base.qcow2 --memory-mb 4096 --cpus 4 --net user"));
+
+    /* Default working container switching: Left/Right on default row and 'p' in Containers section. */
+    fake_compute_status =
+        "meta\tservice_enabled\t1\n"
+        "meta\tdaemon_running\t1\n"
+        "meta\tport\t27184\n"
+        "image\tubuntu-24.04\t2026-11-27\tpreset\n"
+        "env\ttrain1\tubuntu-24.04\t1\tlocachy-net\t\t\t16G\t\t/root\n"
+        "env\teval2\tubuntu-24.04\t0\tnone\t\t\t8G\t\t/root\n";
+    compute_default_env[0] = '\0';
+    nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = K_RIGHT;  /* Default: train1 -> eval2 */
+    fake_keys[nfake_keys++] = 27;
+    manage_compute_node();
+    assert(!strcmp(compute_default_env, "eval2") && !strcmp(test_rc("compute_default_env"), "eval2"));
+    nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = K_DOWN;   /* env(train1) */
+    fake_keys[nfake_keys++] = 'p';      /* Pin train1 back as default */
+    fake_keys[nfake_keys++] = 27;
+    manage_compute_node();
+    assert(!strcmp(compute_default_env, "train1") && !strcmp(test_rc("compute_default_env"), "train1"));
+    compute_default_env[0] = '\0';
 
     /* Unmounted compute storage shows [UNMOUNTED] in settings row and still renders fallback SSH config. */
     fake_compute_status =
@@ -919,9 +1041,9 @@ int main(void)
     static const char windows_state[] =
         "{\n  \"boot_default\": \"windows\",\n  \"boot_default_boot_id\": \"b0\",\n  \"disk\": \"/dev/nvme0n1\",\n"
         "  \"partitions\": {\n    \"c\": { \"sectors\": 100663296 }\n  },\n  \"schema\": 1\n}\n";
-    assert(category_of(winmaint_mode_index()) == CAT_SYSTEM && category_of(winmaint_mode_index() + 1) == CAT_SYSTEM);
+    assert(category_of(winmaint_mode_index()) == CAT_COMPUTE && category_of(winmaint_mode_index() + 1) == CAT_COMPUTE);
     nentries = 0;
-    category_entries(CAT_SYSTEM);
+    category_entries(CAT_COMPUTE);
     int k_once = entry_of(winmaint_index() + 2), k_mode = entry_of(winmaint_mode_index());
     int k_reboot = entry_of(winmaint_mode_index() + 1), k_heal = entry_of(winmaint_index() + 3);
     assert(k_once >= 0 && k_mode == k_once + 1 && k_reboot == k_mode + 1 && k_heal == k_reboot + 1);
@@ -1026,6 +1148,137 @@ int main(void)
     jobs_double_nmine = 0;
     fake_winmaint_status = "";
     puts("PASS Maintenance Windows start mode: two-step on, one-step back, pending/overridden shown, reboot now");
+
+    /* 6c. Inline Virtual Machines, Maintenance VM settings, and Windows Installation Media. */
+    assert(category_of(vm_new_index()) == CAT_COMPUTE && category_of(winmaint_conf_index()) == CAT_COMPUTE &&
+           category_of(winiso_index()) == CAT_COMPUTE && category_of(winiso_index() + 2) == CAT_COMPUTE);
+    assert(enter_row(vm_new_index()) && enter_row(winmaint_conf_index()) &&
+           enter_row(winiso_index()) && !enter_row(winiso_index() + 1) && enter_row(winiso_index() + 2));
+
+    /* Create a new custom Windows VM app via vm_new_app_row(): default profile is win11 (Windows),
+     * disk mode 0 (create blank 64 GiB qcow2); move from row 0 to Save (row 16) and press Enter. */
+    compute_exec_calls = 0;
+    compute_exec_last[0] = '\0';
+    fake_compute_exec_rc = 0;
+    nfake_keys = fake_key_pos = 0;
+    for (int d = 0; d < 16; d++) fake_keys[nfake_keys++] = K_DOWN;
+    fake_keys[nfake_keys++] = '\n';
+    vm_new_app_row();
+    assert(compute_exec_calls == 1 && strstr(compute_exec_last, "qemu-img create -f qcow2") &&
+           strstr(compute_exec_last, "win11.qcow2 64G"));
+    assert(nvm_apps == 1 && !strcmp(vm_apps[0].name, "win11") && !strcmp(vm_apps[0].vm_kind, "custom") &&
+           !strcmp(vm_apps[0].vm_os, "windows") && vm_apps[0].vm_uefi == 1 && vm_apps[0].vm_tpm == 1 &&
+           !strcmp(vm_apps[0].vm_disk_bus, "nvme") && !strcmp(vm_apps[0].vm_nic, "e1000e") &&
+           vm_apps[0].running == 0);
+    assert(category_of(vm_apps_index()) == CAT_COMPUTE && enter_row(vm_apps_index()));
+    item_text(vm_apps_index(), line, sizeof line);
+    assert(strstr(line, "VM: win11") && strstr(line, "stopped") && strstr(line, "windows"));
+
+    /* Start, stop, running-marker check (.ready blocks removal), then two-press remove. */
+    fake_winmaint_app = 1;
+    vm_app_start_row(0);
+    assert(!strcmp(app_last, "start win11"));
+    vm_app_stop_row(0);
+    assert(!strcmp(app_last, "stop win11"));
+    char ready_file[320];
+    snprintf(ready_file, sizeof ready_file, "%s/win11.ready", fake_vm_run_dir);
+    FILE *rf = fopen(ready_file, "w");
+    assert(rf != NULL);
+    fclose(rf);
+    load_vm_apps();
+    assert(vm_apps[0].running == 1);
+    jobs_double_last[0] = '\0';
+    vm_app_remove_row(0);
+    assert(strstr(notice, "Stop VM") && !jobs_double_last[0]);
+    unlink(ready_file);
+    load_vm_apps();
+    assert(vm_apps[0].running == 0);
+    vm_app_remove_row(0);
+    assert(vm_apps_remove_asked == 0 && !jobs_double_last[0]);
+    vm_app_remove_row(0);
+    assert(vm_remove_job != 0 && !strcmp(jobs_double_last, "app-remove win11"));
+    jobs_double_ended = 1;
+    winiso_check();
+    assert(vm_remove_job == 0);
+
+    /* Maintenance Windows VM settings form writes winmaint.conf with ONLY closed winmaint keys,
+     * and shrink_plan_armed / lock_held render live status and QMP stop. */
+    nfake_keys = fake_key_pos = 0;
+    fake_keys[nfake_keys++] = K_UP;     /* Edit starts at row 1 (vCPUs): go to row 0 (Memory) */
+    fake_keys[nfake_keys++] = K_RIGHT;  /* 4096 -> 8192 MiB */
+    for (int d = 0; d < 9; d++) fake_keys[nfake_keys++] = K_DOWN; /* Move 0 -> 9 (Save) */
+    fake_keys[nfake_keys++] = '\n';
+    winmaint_conf_row();
+    char wm_conf[320], wm_text[1024] = "";
+    snprintf(wm_conf, sizeof wm_conf, "%s/winmaint.conf", fake_vm_conf_dir);
+    FILE *wf = fopen(wm_conf, "r");
+    assert(wf != NULL);
+    size_t wn = fread(wm_text, 1, sizeof wm_text - 1, wf);
+    wm_text[wn] = '\0';
+    fclose(wf);
+    assert(strstr(wm_text, "vm=\"1\"") && strstr(wm_text, "vm_kind=\"winmaint\"") &&
+           strstr(wm_text, "vm_memory=\"8192\"") && !strstr(wm_text, "vm_os=") &&
+           !strstr(wm_text, "vm_disk=\"") && !strstr(wm_text, "vm_uefi="));
+    item_text(winmaint_conf_index(), line, sizeof line);
+    assert(strstr(line, "8192 MiB"));
+    fake_winmaint_status = "{\"shrink_plan_armed\": true, \"lock_held\": true}";
+    winmaint_load_targets();
+    assert(winmaint_shrink_armed == 1 && winmaint_vm_locked == 1);
+    unlink(fake_winmaint_state);
+    item_text(winmaint_index() + 1, line, sizeof line);
+    assert(strstr(line, "shrink plan armed"));
+    write_state("{\"disk\":\"/dev/nvme0n1\",\"partitions\":{\"c\":{\"size_sectors\":100663296}}}\n");
+    item_text(winmaint_index() + 4, line, sizeof line);
+    assert(strstr(line, "RUNNING") && strstr(line, "QMP stop"));
+    winmaint_stop_vm_row();
+    assert(!strcmp(app_last, "stop winmaint"));
+    unlink(fake_winmaint_state);
+    fake_winmaint_status = "";
+    winmaint_load_targets();
+    load_winmaint_status();
+
+    /* Windows Installation Media: language cycle, winiso-fetch submit, adopt_jobs, winiso_check. */
+    fake_winiso_installed = 1;
+    fake_winiso_win_path = "";
+    fake_winiso_virtio_path = "";
+    load_winiso_status();
+    selected = winiso_index() + 1;
+    assert(!strcmp(winiso_lang_sel, "en-US"));
+    adjust(+1);
+    assert(!strcmp(winiso_lang_sel, "zh-CN"));
+    jobs_double_last[0] = '\0';
+    winiso_fetch_row();
+    assert(winiso_job != 0 && !strcmp(jobs_double_last, "winiso-fetch --lang zh-CN"));
+    item_text(winiso_index(), line, sizeof line);
+    assert(strstr(line, "downloading") && strstr(line, "zh-CN"));
+    char fake_iso[320];
+    snprintf(fake_iso, sizeof fake_iso, "%s/windows-11-zh-CN.iso", tmpdir);
+    FILE *isf = fopen(fake_iso, "w");
+    assert(isf != NULL);
+    fputs("iso-placeholder", isf);
+    fclose(isf);
+    fake_winiso_win_path = fake_iso;
+    jobs_double_ended = 1;
+    winiso_check();
+    assert(winiso_job == 0 && !strcmp(winiso_st.win_lang, "zh-CN"));
+    item_text(winiso_index(), line, sizeof line);
+    assert(strstr(line, "READY") && strstr(line, "zh-CN"));
+    /* Verify adopt_jobs picks up a running winiso-fetch job after restart. */
+    jobs_double_mine[0] = (struct jobs_row){ .id = 7401, .kind = "winiso-fetch", .args = "--lang ja-JP", .state = "running", .position = 0 };
+    jobs_double_nmine = 1;
+    adopt_jobs();
+    assert(winiso_job == 7401 && !strcmp(winiso_job_lang, "ja-JP"));
+    winiso_job = 0;
+    winiso_job_lang[0] = '\0';
+    jobs_double_nmine = 0;
+    unlink(fake_iso);
+    unlink(wm_conf);
+    char w11_conf[320];
+    snprintf(w11_conf, sizeof w11_conf, "%s/win11.conf", fake_vm_conf_dir);
+    unlink(w11_conf);
+    load_vm_apps();
+    assert(nvm_apps == 0);
+    puts("PASS Virtual Machines apps, Maintenance VM settings, and Windows Installation Media");
 
     /* 7. Job adoption for winmaint-*, tb-sync, gpu-unlock-*, and gpu-power*. */
     winmaint_job = tb_sync_job = gpu_unlock_job = gpu_power_job = 0;
@@ -1269,6 +1522,9 @@ int main(void)
     puts("PASS hybrid policy and separate firmware MUX/dGPU choices with confirmation and reboot state");
 
     unlink(fake_winmaint_state);
+    rmdir(fake_vm_conf_dir);
+    rmdir(fake_vm_disks_dir);
+    rmdir(fake_vm_run_dir);
     rmdir(tmpdir);
     puts("PASS test-settings-features: all checks passed.");
     return 0;

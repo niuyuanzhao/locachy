@@ -373,6 +373,7 @@ static int compute_on;
 static int compute_bind_tb;
 static int compute_gpu = 1;
 static char compute_storage_cfg[40];
+static char compute_default_env[64];
 /* Storage Volumes (locachy-storage): managed volumes and unmanaged disks from
  * `locachy-storage status --json`. */
 #ifndef LOCACHY_STORAGE
@@ -436,6 +437,8 @@ static int winmaint_default_asked, winmaint_reboot_asked;
  * locachy-winmaint status --json, set in this boot (Windows at the next restart) or
  * overridden (LOCachy runs although Windows starts first: picked in the firmware menu). */
 static int winmaint_windows_first, winmaint_first_pending, winmaint_first_overridden;
+static int winmaint_shrink_armed, winmaint_vm_locked;
+static int nvm_apps, nvm_apps_running;
 static int winmaint_job;
 static char winmaint_what[24];
 /* Where a new partition goes: "" the system disk (auto), else a /dev path that
@@ -614,6 +617,7 @@ static int foot_installed;
 static char tailscale_line[160], clash_line[200], tor_line[200];
 static double ts_status_at = -10.0, cl_status_at = -10.0, tr_status_at = -10.0;
 static int net_due;                        /* network rows refresh once keys settle */
+static int compute_due;                    /* compute/VM rows refresh once keys settle */
 static double net_refreshed_at = -100.0;   /* uptime() when network rows were last read */
 static int job_progress_id;
 static double job_progress_at = -100.0;
@@ -1504,6 +1508,9 @@ static void on_rc(const char *name, const char *value, void *arg)
     } else if (strcmp(name, "compute_storage") == 0) {
         snprintf(compute_storage_cfg, sizeof compute_storage_cfg, "%s",
                  strcmp(value, "none") == 0 ? "" : value);
+    } else if (strcmp(name, "compute_default_env") == 0) {
+        snprintf(compute_default_env, sizeof compute_default_env, "%.*s",
+                 (int)(sizeof compute_default_env - 1), value);
     } else if (strcmp(name, "winmaint_size_gib") == 0 && value[0]) {
         size_t digits = strspn(value, "0123456789");
         int v = digits > 0 && digits <= 4 && value[digits] == '\0' ? atoi(value) : 0;
@@ -3862,16 +3869,12 @@ static int gpu_graphics_index(void)
     return nvidia_powerd_index() + 1;
 }
 
-/* Storage Volumes (System > Storage Volumes): compute default storage,
- * dynamic managed volumes (nstorage_vols), and unmanaged internal disks row. */
-static int storage_compute_index(void)
-{
-    return gpu_graphics_index() + 3;
-}
-
+/* Storage Volumes (Storage > Storage Volumes): dynamic managed volumes
+ * (nstorage_vols) and unmanaged internal disks row. Compute storage selection
+ * lives under Compute & VMs > Compute Node. */
 static int storage_vols_index(void)
 {
-    return storage_compute_index() + 1;
+    return gpu_graphics_index() + 3;
 }
 
 static int storage_disks_index(void)
@@ -3885,9 +3888,31 @@ static int ssh_index(void)
     return storage_disks_index() + 1;
 }
 
-static int num_hw_items(void)
+/* Virtual Machines, Maintenance Windows VM settings, and Windows Installation Media
+ * (Compute & VMs > Virtual Machines / Maintenance Windows / Windows Installation Media). */
+static int vm_apps_index(void)
 {
     return ssh_index() + 5;
+}
+
+static int vm_new_index(void)
+{
+    return vm_apps_index() + nvm_apps;
+}
+
+static int winmaint_conf_index(void)
+{
+    return vm_new_index() + 1;
+}
+
+static int winiso_index(void)
+{
+    return winmaint_conf_index() + 1;
+}
+
+static int num_hw_items(void)
+{
+    return winiso_index() + 3;
 }
 
 /* The cloud service's status (rclone-client): name, path, state, last
@@ -5481,10 +5506,12 @@ static void build_row_maps(void)
  * pages of that category). Keys go to the sidebar or to the page (in_page);
  * / finds settings in every category. A setting is still its index
  * (selected), as the functions above count them. */
-enum { CAT_INPUT, CAT_DEVICES, CAT_POWER, CAT_NETWORK, CAT_APPEARANCE, CAT_APPS, CAT_SECURITY, CAT_TIME, CAT_SYSTEM, NCATS };
+enum { CAT_INPUT, CAT_DEVICES, CAT_POWER, CAT_NETWORK, CAT_STORAGE, CAT_COMPUTE, CAT_APPEARANCE, CAT_TIME,
+       CAT_USERS, CAT_SECURITY, CAT_SOFTWARE, CAT_SYSTEM, NCATS };
 static const char *const cat_names[NCATS] = {
-    N_("Input & Output"), N_("Connected Devices"), N_("Power & Battery"), N_("Networking"), N_("Appearance"),
-    N_("Apps & Windows"), N_("Security & Privacy"), N_("Language & Time"), N_("System"),
+    N_("Input & Output"), N_("Connected Devices"), N_("Power & Battery"), N_("Networking"), N_("Storage"),
+    N_("Compute & VMs"), N_("Appearance & Apps"), N_("Language & Time"), N_("Users & Sign-in"),
+    N_("Security & Privacy"), N_("Software & Updates"), N_("System"),
 };
 static int category, in_page, page_scroll;
 static int opt_cache[NOPT_MODULES];
@@ -5562,6 +5589,8 @@ static void category_entries(int cat)
         add_items(bt_index(), 3);
         add_title(_("Paired Devices"));
         add_items(paired_devices_index(), 1);
+        add_title(_("Debug Cable"));
+        add_items(link_index(), 1);
         break;
     case CAT_POWER:
         add_title(_("Power Management"));
@@ -5592,20 +5621,37 @@ static void category_entries(int cat)
         add_items(cl_index(), 4);
         add_title(_("Tor"));
         add_items(tr_index(), 4);
-        add_title(_("Cloud Drives"));
-        add_items(rclone_index(), 3);
         add_title(_("Terminal"));
         add_items(tnet_index(), 1);
+        break;
+    case CAT_STORAGE:
+        add_title(_("Storage Volumes"));
+        add_items(storage_vols_index(), nstorage_vols);
+        if (nstorage_vols == 0) add_entry(E_NOTE, _("No extra storage volumes configured."));
+        add_items(storage_disks_index(), 1);
+        add_title(_("Cloud Drives"));
+        add_items(rclone_index(), 3);
+        break;
+    case CAT_COMPUTE:
         add_title(_("Compute Node"));
         add_items(compute_index(), 6);
+        add_title(_("Virtual Machines"));
+        add_items(vm_apps_index(), nvm_apps);
+        if (nvm_apps == 0) add_entry(E_NOTE, _("No virtual machine apps configured."));
+        add_items(vm_new_index(), 1);
+        add_title(_("Maintenance Windows"));
+        add_items(winmaint_index(), 3);
+        add_items(winmaint_mode_index(), 2);
+        add_items(winmaint_index() + 3, 3);
+        add_items(winmaint_conf_index(), 1);
+        add_title(_("Windows Installation Media"));
+        add_items(winiso_index(), 3);
         break;
     case CAT_APPEARANCE:
         add_title(_("Colors"));
         add_items(scheme_index(), 2);
         add_title(_("Wallpaper"));
         add_items(wp_index(), 1);
-        break;
-    case CAT_APPS:
         add_title(_("Default Applications"));
         add_items(hw + 1 + nrow_maps, nrules);
         /* TRANSLATORS: A is the A key; keep it. */
@@ -5615,6 +5661,22 @@ static void category_entries(int cat)
         add_items(search_key_index(), 1);
         add_title(_("Global Search"));
         add_items(search_svc_index(), 2);
+        break;
+    case CAT_TIME:
+        add_title(_("Region & Language"));
+        add_items(lang_index(), 1);
+        add_title(_("Date & Time"));
+        add_items(tz_index(), 3);
+        if (tz_auto && zone_paused()) {
+            /* TRANSLATORS: Enter is the Enter key; keep it. */
+            add_entry(E_NOTE, _("Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."));
+        }
+        break;
+    case CAT_USERS:
+        add_title(_("Users"));
+        add_items(sec_index(), 1);
+        add_items(fp_index(), 4);
+        add_items(fc_index(), 7);
         break;
     case CAT_SECURITY:
         add_title(_("Screen Locking"));
@@ -5631,28 +5693,7 @@ static void category_entries(int cat)
         add_title(_("Host Security"));
         add_items(hsi_index(), 1);
         break;
-    case CAT_TIME:
-        add_title(_("Region & Language"));
-        add_items(lang_index(), 1);
-        add_title(_("Date & Time"));
-        add_items(tz_index(), 3);
-        if (tz_auto && zone_paused()) {
-            /* TRANSLATORS: Enter is the Enter key; keep it. */
-            add_entry(E_NOTE, _("Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."));
-        }
-        break;
-    default:
-        add_title(_("About This System"));
-        add_items(host_index(), 1);
-        add_items(mach_index(), 1);
-        add_items(hwinfo_index(), 2);
-        add_about_system_notes();
-        add_title(_("Users"));
-        add_items(sec_index(), 1);
-        add_items(fp_index(), 4);
-        add_items(fc_index(), 7);
-        add_title(_("Boot"));
-        add_items(boot_index(), 5);
+    case CAT_SOFTWARE:
         add_title(_("Software Update"));
         add_items(upd_index(), 5);
         add_items(cpu_opt_index(), 1);
@@ -5663,17 +5704,15 @@ static void category_entries(int cat)
         add_items(repo_index(), NREPO_SECTIONS + 2);
         add_title(_("Optional Components"));
         add_items(opt_index(), NOPT_MODULES);
-        add_title(_("Storage Volumes"));
-        add_items(storage_compute_index(), 1);
-        add_items(storage_vols_index(), nstorage_vols);
-        if (nstorage_vols == 0) add_entry(E_NOTE, _("No extra storage volumes configured."));
-        add_items(storage_disks_index(), 1);
-        add_title(_("Debug Cable"));
-        add_items(link_index(), 1);
-        add_title(_("Maintenance Windows"));
-        add_items(winmaint_index(), 3);
-        add_items(winmaint_mode_index(), 2);
-        add_items(winmaint_index() + 3, 3);
+        break;
+    default:
+        add_title(_("About This System"));
+        add_items(host_index(), 1);
+        add_items(mach_index(), 1);
+        add_items(hwinfo_index(), 2);
+        add_about_system_notes();
+        add_title(_("Boot"));
+        add_items(boot_index(), 5);
         break;
     }
 }
@@ -5774,10 +5813,10 @@ static void show_category(int c, int focus_page)
             load_tpm_status();
         }
     }
-    if ((c == CAT_SECURITY || c == CAT_SYSTEM) && c != category && howdy_installed()) {
+    if ((c == CAT_SECURITY || c == CAT_USERS) && c != category && howdy_installed()) {
         refresh_face_cameras();
     }
-    if (c == CAT_SYSTEM && users_lang_dirty) {
+    if (c == CAT_USERS && users_lang_dirty) {
         users_lang_dirty = 0;
         load_fingers();
         load_face_models();
@@ -5786,9 +5825,10 @@ static void show_category(int c, int focus_page)
         power_refresh_devices_if_stale();
         power_refresh_charge_status();
     }
-    /* Network rows' statuses refresh once keys settle on CAT_NETWORK;
-     * browsing past the category probes none. */
+    /* Network and Compute rows' statuses refresh once keys settle on their pages;
+     * browsing past a category probes nothing. */
     net_due = c == CAT_NETWORK;
+    compute_due = c == CAT_COMPUTE;
     if (c != category || search[0]) {
         category = c;
         search[0] = '\0';
@@ -5828,6 +5868,33 @@ static int page_rows(void)
 {
     int n = screen_rows() - 2 - PAGE_TOP;
     return n > 1 ? n : 1;
+}
+
+/* Visual group gaps in the sidebar when the screen is tall enough (12 categories
+ * + 5 gaps = 17 rows); compact without gaps on shorter screens. */
+static int sidebar_has_gap_before(int c)
+{
+    return c == CAT_NETWORK || c == CAT_COMPUTE || c == CAT_APPEARANCE ||
+           c == CAT_USERS || c == CAT_SOFTWARE;
+}
+
+static int sidebar_row(int c)
+{
+    int row = PAGE_TOP, gaps = page_rows() >= NCATS + 5;
+    for (int i = 0; i < c && i < NCATS; i++) {
+        row++;
+        if (gaps && i + 1 < NCATS && sidebar_has_gap_before(i + 1)) row++;
+    }
+    return row;
+}
+
+static int sidebar_cat_at(int row)
+{
+    if (row < PAGE_TOP || row >= screen_rows() - 2) return -1;
+    for (int c = 0; c < NCATS; c++) {
+        if (sidebar_row(c) == row) return c;
+    }
+    return -1;
 }
 
 /* The selected setting shown, with its group's title when it is the first. */
@@ -8173,6 +8240,7 @@ static void winmaint_load_targets(void)
     nwinmaint_cands = 0;
     winmaint_resolved[0] = '\0';
     winmaint_first_pending = winmaint_first_overridden = 0;
+    winmaint_shrink_armed = winmaint_vm_locked = 0;
     if (access(LOCACHY_WINMAINT, X_OK) != 0) return;
     buf[0] = '\0';
     char *const argv[] = { LOCACHY_WINMAINT, "status", "--json", NULL };
@@ -8198,6 +8266,10 @@ static void winmaint_load_targets(void)
                 ok = json_parse_bool(&p, &winmaint_first_pending);
             } else if (strcmp(key, "boot_default_overridden") == 0) {
                 ok = json_parse_bool(&p, &winmaint_first_overridden);
+            } else if (strcmp(key, "shrink_plan_armed") == 0) {
+                ok = json_parse_bool(&p, &winmaint_shrink_armed);
+            } else if (strcmp(key, "lock_held") == 0) {
+                ok = json_parse_bool(&p, &winmaint_vm_locked);
             } else if (strcmp(key, "candidate_disks") == 0 && *p == '[') {
                 p++;
                 json_skip_ws(&p);
@@ -8407,6 +8479,7 @@ static void storage_manage_disks_row(void)
 }
 
 #include "settings-compute.inc"
+#include "settings-vm.inc"
 
 /* Reopened or polled: the active system jobs (including ones started from
  * packages or firmware, or another settings window), followed while they run
@@ -8420,6 +8493,7 @@ static void adopt_jobs(void)
     int have_security = security_job != 0, have_winmaint = winmaint_job != 0, have_tb = tb_sync_job != 0;
     int have_gpu_unlock = gpu_unlock_job != 0, have_gpu_power = gpu_power_job != 0, have_storage = storage_job != 0;
     int have_gpu_graphics = gpu_graphics_job != 0, have_bat_model = bat_model_job != 0, have_gpu_driver = gpu_driver_job != 0;
+    int have_winiso = winiso_job != 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n; i++) {
             const struct jobs_row *r = &rows[i];
@@ -8444,6 +8518,11 @@ static void adopt_jobs(void)
                 winmaint_job = r->id;
                 have_winmaint = 1;
                 snprintf(winmaint_what, sizeof winmaint_what, "%s", r->kind + 9);
+            } else if (!have_winiso && strcmp(r->kind, "winiso-fetch") == 0) {
+                winiso_job = r->id;
+                have_winiso = 1;
+                const char *lg = strstr(r->args, "--lang ");
+                if (lg) snprintf(winiso_job_lang, sizeof winiso_job_lang, "%.20s", lg + 7);
             } else if (!have_tb && strcmp(r->kind, "tb-sync") == 0) {
                 tb_sync_job = r->id;
                 have_tb = 1;
@@ -8717,7 +8796,10 @@ static int enter_row(int idx)
            idx == gpu_driver_index() ||
            idx == gpu_unlock_index() || idx == gpu_graphics_index() + 1 || idx == gpu_graphics_index() + 2 ||
            idx == storage_disks_index() ||
-           idx == ssh_index() + 1 || idx == ssh_index() + 3 || idx == ssh_index() + 4;
+           idx == ssh_index() + 1 || idx == ssh_index() + 3 || idx == ssh_index() + 4 ||
+           (idx >= vm_apps_index() && idx < vm_apps_index() + nvm_apps) ||
+           idx == vm_new_index() || idx == winmaint_conf_index() ||
+           idx == winiso_index() || idx == winiso_index() + 2;
 }
 
 /* An optional component's line, its packages installed or not: Enter
@@ -8795,8 +8877,8 @@ static int settings_pointer(void)
     }
     if (e->button != BTN_LEFT || !e->pressed) return 0;
     if (on_sidebar) {
-        int c = e->row - PAGE_TOP;
-        if (c < 0 || c >= NCATS || e->row >= screen_rows() - 2) return 0;
+        int c = sidebar_cat_at(e->row);
+        if (c < 0) return 0;
         show_category(c, 1);
         return -1;
     }
@@ -8955,7 +9037,6 @@ static void refresh_net_status(void)
     snprintf(tailscale_line, sizeof tailscale_line, "%s", tailscale_status());
     snprintf(clash_line, sizeof clash_line, "%s", clash_status());
     snprintf(tor_line, sizeof tor_line, "%s", tor_status());
-    load_compute_status();
     net_refreshed_at = uptime();
     net_due = 0;
 }
@@ -8980,6 +9061,7 @@ static void invalidate_translated_caches(void)
     users_lang_dirty = 1;
     if (category == CAT_NETWORK) net_due = 1;
     else net_refreshed_at = -100.0;
+    if (category == CAT_COMPUTE) compute_due = 1;
 }
 
 static void flush_ui_caches(void)
@@ -9032,6 +9114,10 @@ static void item_text(int idx, char *line, size_t size)
             load_gpu_driver_status();
         } else if (idx >= compute_index() && idx < compute_index() + 6 && !compute_snap.loaded) {
             load_compute_status();
+        } else if (idx == winmaint_conf_index()) {
+            load_vm_apps();
+        } else if (idx >= winiso_index() && idx < winiso_index() + 3) {
+            load_winiso_status();
         }
     }
     /* The pointer's rows (first TrackPoint's three, when there is one), then
@@ -9390,6 +9476,8 @@ static void item_text(int idx, char *line, size_t size)
         } else if (i == 1) {
             if (winmaint_job) {
                 snprintf(vbuf, sizeof vbuf, "%s", _("working..."));
+            } else if (!winmaint_created && winmaint_shrink_armed) {
+                snprintf(vbuf, sizeof vbuf, "%s", _("shrink plan armed (reboot to finish)"));
             } else if (!winmaint_created) {
                 snprintf(vbuf, sizeof vbuf, "%s", _("not created"));
             } else if (winmaint_created_gib > 0) {
@@ -9414,7 +9502,9 @@ static void item_text(int idx, char *line, size_t size)
             /* TRANSLATORS: Enter is the Enter key; keep it. */
             snprintf(line, size, "%.95s %s",
                      ui_pad(label, sizeof label, _("Windows virtual machine"), 32),
-                     !winmaint_created ? _("not created") : _("Enter: open on the desktop"));
+                     !winmaint_created ? _("not created") :
+                     winmaint_vm_locked ? _("RUNNING   (s: QMP stop)") :
+                     _("Enter: open on the desktop"));
         }
         return;
     }
@@ -9576,13 +9666,6 @@ static void item_text(int idx, char *line, size_t size)
                  gpu_power_job ? _("working...") : nvidia_powerd_on ? _("ON ") : _("OFF"));
         return;
     }
-    if (idx == storage_compute_index()) {
-        snprintf(line, size, "%.95s < %s >",
-                 ui_pad(label, sizeof label, _("Compute default storage"), 32),
-                 storage_job && strcmp(storage_what, "set-compute") == 0 ? _("working...") :
-                 compute_storage_cfg[0] ? compute_storage_cfg : _("none"));
-        return;
-    }
     if ((i = idx - storage_vols_index()) >= 0 && i < nstorage_vols) {
         const struct storage_vol *v = &storage_vols[i];
         char vlabel[96], spec[48], state[64], health[40] = "";
@@ -9667,6 +9750,59 @@ static void item_text(int idx, char *line, size_t size)
                 snprintf(vbuf, sizeof vbuf, "%s", _("not generated yet   (Enter: generate)"));
             }
             snprintf(line, size, "  %.95s %s", ui_pad(label, sizeof label, _("sshd host key"), 30), vbuf);
+        }
+        return;
+    }
+    if ((i = idx - vm_apps_index()) >= 0 && i < nvm_apps) {
+        const struct vm_app_cfg *v = &vm_apps[i];
+        char vlbl[80];
+        snprintf(vlbl, sizeof vlbl, "VM: %.26s", v->name);
+        snprintf(vbuf, sizeof vbuf, "%-7s  %-8.8s %-7.7s %5dM/%dc  %s/%s",
+                 v->running ? _("RUNNING") : _("stopped"),
+                 v->vm_kind, v->vm_os, v->vm_memory, v->vm_cpus, v->vm_disk_bus, v->vm_nic);
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, vlbl, 32), vbuf);
+        return;
+    }
+    if (idx == vm_new_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("New virtual machine app"), 32),
+                 _("Enter: create Windows or Linux VM for Home"));
+        return;
+    }
+    if (idx == winmaint_conf_index()) {
+        winmaint_conf_summary(vbuf, sizeof vbuf);
+        snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Maintenance VM settings"), 32), vbuf);
+        return;
+    }
+    if ((i = idx - winiso_index()) >= 0 && i < 3) {
+        if (i == 0) {
+            if (winiso_job) {
+                snprintf(vbuf, sizeof vbuf, _("downloading (%s, job #%d)..."),
+                         winiso_job_lang[0] ? winiso_job_lang : winiso_lang_sel, winiso_job);
+            } else if (winiso_st.win_path[0]) {
+                char sz[24];
+                format_bytes_iec(winiso_st.win_size, sz, sizeof sz);
+                snprintf(vbuf, sizeof vbuf, _("READY [%s, %s]   (Enter: re-download %s)"),
+                         winiso_st.win_lang[0] ? winiso_st.win_lang : "default", sz, winiso_lang_sel);
+            } else {
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, _("not downloaded   (Enter: download %s)"), winiso_lang_sel);
+            }
+            snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("Windows 11 ISO"), 32), vbuf);
+        } else if (i == 1) {
+            snprintf(line, size, "%.95s < %s >",
+                     ui_pad(label, sizeof label, _("Windows 11 ISO language"), 32), winiso_lang_sel);
+        } else {
+            if (winiso_st.virtio_path[0]) {
+                char sz[24];
+                format_bytes_iec(winiso_st.virtio_size, sz, sizeof sz);
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, _("READY (%s)   (Enter: check Microsoft download)"), sz);
+            } else {
+                /* TRANSLATORS: Enter is the Enter key; keep it. */
+                snprintf(vbuf, sizeof vbuf, "%s", _("not installed (Optional Components > winmaint)   (Enter: check)"));
+            }
+            snprintf(line, size, "%.95s %s", ui_pad(label, sizeof label, _("virtio-win ISO & check"), 32), vbuf);
         }
         return;
     }
@@ -10080,11 +10216,14 @@ static void item_text(int idx, char *line, size_t size)
 
 static void draw_sidebar(int width)
 {
-    for (int c = 0; c < NCATS && PAGE_TOP + c < screen_rows() - 2; c++) {
+    int limit = screen_rows() - 2;
+    for (int c = 0; c < NCATS; c++) {
+        int y = sidebar_row(c);
+        if (y >= limit) break;
         int on = c == category && !search[0];
         uint32_t bg = on ? (in_page ? SELECTION : ACCENT) : BG;
-        screen_fill(0, PAGE_TOP + c, width, 1, bg);
-        screen_text(1, PAGE_TOP + c, _(cat_names[c]), on && !in_page ? ON_ACCENT : FG, bg);
+        screen_fill(0, y, width, 1, bg);
+        screen_text(1, y, _(cat_names[c]), on && !in_page ? ON_ACCENT : FG, bg);
     }
 }
 
@@ -11296,10 +11435,6 @@ static void adjust(int dir)
         snprintf(notice, sizeof notice, "%s", _("Saving the NVIDIA Dynamic Boost setting..."));
         return;
     }
-    if (selected == storage_compute_index()) {
-        storage_cycle_compute(dir);
-        return;
-    }
     if (selected >= storage_vols_index() && selected < storage_vols_index() + nstorage_vols) {
         storage_cycle_role(selected - storage_vols_index(), dir);
         return;
@@ -11369,6 +11504,36 @@ static void adjust(int dir)
     if (selected == ssh_index() + 4) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(notice, sizeof notice, "%s", _("Enter, twice: regenerate sshd host key."));
+        return;
+    }
+    if (selected >= vm_apps_index() && selected < vm_apps_index() + nvm_apps) {
+        /* TRANSLATORS: Enter, e, s and Delete are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter: open on desktop   e: settings   s: stop   Delete, twice: remove"));
+        return;
+    }
+    if (selected == vm_new_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: create a new Windows or Linux VM app for Home."));
+        return;
+    }
+    if (selected == winmaint_conf_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: configure Maintenance Windows VM hardware, ISO, and freeze."));
+        return;
+    }
+    if (selected == winiso_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: download and verify the Windows 11 ISO in the background."));
+        return;
+    }
+    if (selected == winiso_index() + 1) {
+        winiso_cycle_lang(dir);
+        return;
+    }
+    if (selected == winiso_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(notice, sizeof notice, "%s", _("Enter: test the Microsoft Windows 11 download link without downloading."));
         return;
     }
     if (selected == power_profile_index()) {
@@ -11810,6 +11975,21 @@ static void row_hint_text(int idx, char *out, size_t size)
     } else if (idx == ssh_index() + 4) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter, twice: regenerate sshd host key."));
+    } else if (idx >= vm_apps_index() && idx < vm_apps_index() + nvm_apps) {
+        /* TRANSLATORS: Enter, e, s and Delete are key names; keep them. */
+        snprintf(out, size, "%s", _("Enter: open on desktop   e: settings   s: stop   Delete, twice: remove"));
+    } else if (idx == vm_new_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: create a new Windows or Linux VM app for Home."));
+    } else if (idx == winmaint_conf_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: configure Maintenance Windows VM settings (winmaint.conf)."));
+    } else if (idx == winiso_index()) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: download official Windows 11 ISO with SHA-256 verification."));
+    } else if (idx == winiso_index() + 2) {
+        /* TRANSLATORS: Enter is the Enter key; keep it. */
+        snprintf(out, size, "%s", _("Enter: check Microsoft Windows 11 download service (no download)."));
     } else if (idx == num_hw_items()) {
         /* TRANSLATORS: Enter is the Enter key; keep it. */
         snprintf(out, size, "%s", _("Enter: arrange the screens with the direction buttons."));
@@ -11856,6 +12036,10 @@ static void row_hint(void)
         /* TRANSLATORS: Enter, Left/Right, m, a and Delete are key names; keep them. */
         snprintf(notice, sizeof notice, "%s",
                  _("Enter+Left/Right: role   m: mount/unmount   a: auto-mount   Delete, twice: detach"));
+    } else if (selected == winiso_index() + 1) {
+        /* TRANSLATORS: Enter, Left/Right and e are key names; keep them. */
+        snprintf(notice, sizeof notice, "%s",
+                 _("Enter+Left/Right: cycle language   e: enter custom tag (e.g. zh-CN)"));
     } else {
         /* TRANSLATORS: Enter and Left/Right are key names; keep them. */
         snprintf(notice, sizeof notice, "%s", _("Enter, then Left/Right: change it   Enter again: done"));
@@ -11987,7 +12171,8 @@ static int open_page(const char *name)
 {
     static const struct { const char *name; int category; } pages[] = {
         { "network", CAT_NETWORK }, { "power", CAT_POWER }, { "devices", CAT_DEVICES },
-        { "date-time", CAT_TIME }, { "hardware", CAT_SYSTEM },
+        { "date-time", CAT_TIME }, { "hardware", CAT_SYSTEM }, { "storage", CAT_STORAGE },
+        { "compute", CAT_COMPUTE }, { "users", CAT_USERS }, { "software", CAT_SOFTWARE },
     };
     for (size_t i = 0; i < sizeof pages / sizeof *pages; i++) {
         if (strcmp(name, pages[i].name) != 0) {
@@ -12155,6 +12340,8 @@ int main(int argc, char **argv)
     winmaint_load_targets();
     load_storage_status();
     load_compute_status();
+    load_vm_apps();
+    load_winiso_status();
     refresh_static_text();
     refresh_brightness();
     refresh_opt_cache();
@@ -12181,8 +12368,9 @@ int main(int argc, char **argv)
             return 0; /* the window's close, read in a question or list */
         }
         int timeout = pkg_job || repos_job || boot_job || tpm_job || security_job ||
-                      winmaint_job || tb_sync_job || gpu_unlock_job || gpu_power_job || gpu_graphics_job ||
-                      storage_job || bat_model_job ? 500 : net_due ? 150 : 2000;
+                      winmaint_job || winiso_job || vm_remove_job || tb_sync_job ||
+                      gpu_unlock_job || gpu_power_job || gpu_graphics_job ||
+                      storage_job || bat_model_job ? 500 : (net_due || compute_due) ? 150 : 2000;
         int key;
         if (charge_watch >= 0) {
             struct pollfd extra[] = { { .fd = request_fd, .events = POLLIN },
@@ -12220,7 +12408,8 @@ int main(int argc, char **argv)
                               ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6) |
                               ((gpu_unlock_job != 0) << 7) | ((gpu_power_job != 0) << 8) |
                               ((gpu_graphics_job != 0) << 10) | ((storage_job != 0) << 9) |
-                              ((bat_model_job != 0) << 11) | ((gpu_driver_job != 0) << 12);
+                              ((bat_model_job != 0) << 11) | ((gpu_driver_job != 0) << 12) |
+                              ((winiso_job != 0) << 13) | ((vm_remove_job != 0) << 14);
             last_job_poll = uptime();
             adopt_jobs();
             pkg_check();
@@ -12228,6 +12417,7 @@ int main(int argc, char **argv)
             boot_check();
             security_check();
             winmaint_check();
+            winiso_check();
             gpu_driver_check();
             gpu_graphics_check();
             gpu_unlock_check();
@@ -12252,7 +12442,8 @@ int main(int argc, char **argv)
                              ((winmaint_job != 0) << 5) | ((tb_sync_job != 0) << 6) |
                              ((gpu_unlock_job != 0) << 7) | ((gpu_power_job != 0) << 8) |
                              ((gpu_graphics_job != 0) << 10) | ((storage_job != 0) << 9) |
-                             ((bat_model_job != 0) << 11) | ((gpu_driver_job != 0) << 12);
+                             ((bat_model_job != 0) << 11) | ((gpu_driver_job != 0) << 12) |
+                             ((winiso_job != 0) << 13) | ((vm_remove_job != 0) << 14);
             if (jobs_after != jobs_before) {
                 entries_dirty = 1;
                 full_redraw = 1;
@@ -12272,6 +12463,7 @@ int main(int argc, char **argv)
                 gpu_unlock_remove_asked = 0;
                 bat_model_remove_asked = 0;
                 storage_remove_asked = -1;
+                vm_apps_remove_asked = -1;
             }
             if (key == 0) continue;
             if (key == -1) {
@@ -12295,12 +12487,17 @@ int main(int argc, char **argv)
             gpu_unlock_remove_asked = 0;
             bat_model_remove_asked = 0;
             storage_remove_asked = -1;
+            vm_apps_remove_asked = -1;
         } else if (key == K_DEL) {
             if (selected != gpu_unlock_index()) gpu_unlock_remove_asked = 0;
             if (selected != bat_adaptive_index()) bat_model_remove_asked = 0;
             if (selected < storage_vols_index() || selected >= storage_vols_index() + nstorage_vols ||
                 selected - storage_vols_index() != storage_remove_asked) {
                 storage_remove_asked = -1;
+            }
+            if (selected < vm_apps_index() || selected >= vm_apps_index() + nvm_apps ||
+                selected - vm_apps_index() != vm_apps_remove_asked) {
+                vm_apps_remove_asked = -1;
             }
         }
         if (key == K_ACT_HOME) {
@@ -12333,9 +12530,11 @@ int main(int argc, char **argv)
             continue; /* the table's other keys are nothing here; Alt+m is not m */
         }
         if (key == 0 || key == K_SHOWN) {
-            int settled_only = key == 0 && net_due && !(pkg_job || repos_job || boot_job || tpm_job || security_job ||
-                                                        winmaint_job || tb_sync_job || gpu_unlock_job ||
-                                                        gpu_power_job || storage_job || bat_model_job);
+            int settled_only = key == 0 && (net_due || compute_due) &&
+                               !(pkg_job || repos_job || boot_job || tpm_job || security_job ||
+                                 winmaint_job || winiso_job || vm_remove_job || tb_sync_job ||
+                                 gpu_unlock_job || gpu_power_job || gpu_graphics_job ||
+                                 storage_job || bat_model_job);
             if (!settled_only) {
                 load_monitors();
                 keyboards_dirty = 1;
@@ -12355,12 +12554,22 @@ int main(int argc, char **argv)
                     load_winmaint_status();
                     winmaint_load_targets();
                     load_storage_status();
+                    load_compute_status();
+                    load_vm_apps();
+                    load_winiso_status();
                     refresh_opt_cache();
                     opt_cache_dirty = 0;
                 }
             }
             if (net_due || (category == CAT_NETWORK && uptime() - net_refreshed_at >= 2.0)) {
                 refresh_net_status();
+            }
+            if (compute_due) {
+                load_compute_status();
+                load_vm_apps();
+                load_winiso_status();
+                winmaint_load_targets();
+                compute_due = 0;
             }
             build_row_maps();
             build_entries();
@@ -12387,6 +12596,7 @@ int main(int argc, char **argv)
             if (in_page) {
                 row_hint();
                 if (category == CAT_NETWORK) net_due = 1;
+                if (category == CAT_COMPUTE) compute_due = 1;
             }
             if (full_redraw || in_page != in_before || category != cat0 ||
                 strcmp(search0, search) != 0 || strcmp(notice0, notice) != 0) {
@@ -12750,6 +12960,36 @@ int main(int argc, char **argv)
             draw();
         } else if (key == '\n' && selected == winmaint_index() + 4) {
             winmaint_vm_row();
+            draw();
+        } else if ((key == 's' || key == 'S') && selected == winmaint_index() + 4) {
+            winmaint_stop_vm_row();
+            draw();
+        } else if (key == '\n' && selected == winmaint_conf_index()) {
+            winmaint_conf_row();
+            draw();
+        } else if (key == '\n' && selected >= vm_apps_index() && selected < vm_apps_index() + nvm_apps) {
+            vm_app_start_row(selected - vm_apps_index());
+            draw();
+        } else if ((key == 'e' || key == 'E') && selected >= vm_apps_index() && selected < vm_apps_index() + nvm_apps) {
+            vm_app_edit_row(selected - vm_apps_index());
+            draw();
+        } else if ((key == 's' || key == 'S') && selected >= vm_apps_index() && selected < vm_apps_index() + nvm_apps) {
+            vm_app_stop_row(selected - vm_apps_index());
+            draw();
+        } else if (key == K_DEL && selected >= vm_apps_index() && selected < vm_apps_index() + nvm_apps) {
+            vm_app_remove_row(selected - vm_apps_index());
+            draw();
+        } else if (key == '\n' && selected == vm_new_index()) {
+            vm_new_app_row();
+            draw();
+        } else if (key == '\n' && selected == winiso_index()) {
+            winiso_fetch_row();
+            draw();
+        } else if ((key == 'e' || key == 'E') && selected == winiso_index() + 1) {
+            winiso_prompt_lang();
+            draw();
+        } else if (key == '\n' && selected == winiso_index() + 2) {
+            winiso_check_service_row();
             draw();
         } else if (key == '\n' && selected == winmaint_mode_index()) {
             winmaint_default_row();

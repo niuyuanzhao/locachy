@@ -126,6 +126,10 @@ filename, Microsoft's published SHA-256 and the HTTP status:
 the ISO's contents. A refusal, unexpected status or unusable Microsoft response
 ends the check with status 4.
 
+## Settings integration
+
+**Settings → Compute & VMs → Windows Installation Media** displays the verified Windows 11 ISO (`path windows`) and `virtio-win.iso` (`path virtio-win`) status, lets you choose or type a language tag, submits the `winiso-fetch --lang` system job (kept running if Settings closes), and runs `locachy-winiso check --lang`.
+
 ## The system job
 
 On the running system `fetch` runs as the fixed system job `winiso-fetch`

@@ -1,4 +1,4 @@
-/* Isolated unit tests for Settings > System > Storage Volumes (settings.c).
+/* Isolated unit tests for Settings > Storage > Storage Volumes (settings.c).
  * Includes ../progs/settings.c with doubles, following test-settings-features.c.
  * Build with -ffunction-sections -fdata-sections -Wl,--gc-sections. */
 #ifndef _GNU_SOURCE
@@ -183,11 +183,11 @@ int main(void)
     load_storage_status();
     assert(nstorage_vols == 0 && nstorage_disks == 0);
     assert_unique_category_coverage();
-    assert(category_of(storage_compute_index()) == CAT_SYSTEM);
-    assert(category_of(storage_disks_index()) == CAT_SYSTEM);
+    assert(category_of(compute_index() + 3) == CAT_COMPUTE);
+    assert(category_of(storage_disks_index()) == CAT_STORAGE);
     assert(enter_row(storage_disks_index()));
-    item_text(storage_compute_index(), line, sizeof line);
-    assert(strstr(line, "Compute default storage") && strstr(line, "< none >"));
+    item_text(compute_index() + 3, line, sizeof line);
+    assert(strstr(line, "Compute storage volume") && strstr(line, "< root disk >"));
     item_text(storage_disks_index(), line, sizeof line);
     assert(strstr(line, "Unmanaged disks") && strstr(line, "not installed"));
     storage_manage_disks_row();
@@ -293,18 +293,15 @@ int main(void)
     assert(strcmp(storage_disks[0].path, "/dev/nvme1n1") == 0 && storage_disks[0].nparts == 1 &&
            strcmp(storage_disks[0].first_fstype, "ntfs") == 0);
     assert_unique_category_coverage();
-    assert(category_of(storage_vols_index()) == CAT_SYSTEM);
-    assert(category_of(storage_vols_index() + 2) == CAT_SYSTEM);
-    assert(category_of(storage_disks_index()) == CAT_SYSTEM);
+    assert(category_of(storage_vols_index()) == CAT_STORAGE);
+    assert(category_of(storage_vols_index() + 2) == CAT_STORAGE);
+    assert(category_of(storage_disks_index()) == CAT_STORAGE);
     assert(storage_disks_index() == storage_vols_index() + 3);
 
-    /* Compute Node category exposes the interactive compute storage row showing "data". */
-    assert(category_of(compute_index() + 3) == CAT_NETWORK);
+    /* Compute Node exposes the interactive compute storage row showing "< data >". */
+    assert(category_of(compute_index() + 3) == CAT_COMPUTE);
     item_text(compute_index() + 3, line, sizeof line);
-    assert(strstr(line, "Compute storage volume") && strstr(line, "data"));
-
-    item_text(storage_compute_index(), line, sizeof line);
-    assert(strstr(line, "Compute default storage") && strstr(line, "< data >"));
+    assert(strstr(line, "Compute storage volume") && strstr(line, "< data >"));
     item_text(storage_vols_index(), line, sizeof line);
     assert(strstr(line, "Volume: data") && strstr(line, "< shared >") && strstr(line, "ext4") &&
            strstr(line, "LUKS") && strstr(line, "auto") && strstr(line, "120 GiB / 2.0 TiB") &&
@@ -317,8 +314,8 @@ int main(void)
     assert(strstr(line, "1 unmanaged disk: /dev/nvme1n1 (1.8 TiB)"));
     puts("PASS status JSON parsing, dynamic row indexing, Compute Node note, and row formatting");
 
-    /* 4. Cycle Compute default storage: skips data-only volume "media" (only none, data, scratch). */
-    selected = storage_compute_index();
+    /* 4. Cycle Compute storage volume: skips data-only volume "media" (only none, data, scratch). */
+    selected = compute_index() + 3;
     jobs_double_ended = 0;
     jobs_double_last[0] = '\0';
     adjust(+1);

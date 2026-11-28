@@ -186,6 +186,112 @@ if shutil.which("zstd"):
 else:
     print("SKIP: image .tar.zst import: zstd not installed", flush=True)
 
+# 1c. Built-in image presets, manifest parsing, verified fetch with strip_components, and env set
+r_pre = run_cli(COMPUTE, "image", "presets", "--json")
+presets_list = json.loads(r_pre.stdout) if r_pre.returncode == 0 else []
+preset_ids = [p.get("id") for p in presets_list]
+check("image: presets lists ubuntu-24.04, ubuntu-22.04, arch-linux, alpine-stable",
+      r_pre.returncode == 0 and preset_ids == ["ubuntu-24.04", "ubuntu-22.04", "arch-linux", "alpine-stable"],
+      r_pre.stdout + r_pre.stderr)
+
+import hashlib as _hashlib
+import importlib.machinery as _imach0
+import importlib.util as _iutil0
+_cl0 = _imach0.SourceFileLoader("locachy_compute_fetch_mod", COMPUTE)
+_cm0 = _iutil0.module_from_spec(_iutil0.spec_from_loader("locachy_compute_fetch_mod", _cl0))
+_cl0.exec_module(_cm0)
+_p_by_id = {p["id"]: p for p in _cm0.IMAGE_PRESETS}
+_u_url, _u_sha = _cm0._resolve_preset_manifest(
+    _p_by_id["ubuntu-24.04"],
+    "11" * 32 + " *ubuntu-base-24.04.3-base-amd64.tar.gz\n"
+    + "22" * 32 + " *ubuntu-base-24.04.5-base-amd64.tar.gz\n"
+    + "33" * 32 + " *ubuntu-base-24.04.4-base-amd64.tar.gz\n",
+)
+_a_url, _a_sha = _cm0._resolve_preset_manifest(
+    _p_by_id["arch-linux"],
+    "aa" * 32 + "  archlinux-bootstrap-2026.11.01-x86_64.tar.zst\n"
+    + "bb" * 32 + "  archlinux-bootstrap-x86_64.tar.zst\n",
+)
+_l_url, _l_sha = _cm0._resolve_preset_manifest(
+    _p_by_id["alpine-stable"],
+    "-\n  flavor: alpine-minirootfs\n  file: alpine-minirootfs-3.24.4-x86_64.tar.gz\n  sha256: " + "cc" * 32 + "\n",
+)
+check("image: preset manifest parsers pick latest Ubuntu point release, Arch bootstrap, and Alpine minirootfs",
+      _u_url.endswith("ubuntu-base-24.04.5-base-amd64.tar.gz") and _u_sha == "22" * 32
+      and _a_url.endswith("archlinux-bootstrap-x86_64.tar.zst") and _a_sha == "bb" * 32
+      and _l_url.endswith("alpine-minirootfs-3.24.4-x86_64.tar.gz") and _l_sha == "cc" * 32,
+      f"u={_u_url} a={_a_url} l={_l_url}")
+
+# Verify image_fetch verifies SHA-256, strips root.x86_64/ for arch-linux, and rejects bad checksums & http://
+strip_tar = OUT / "arch-strip.tar.gz"
+strip_src = OUT / "arch-strip-src"
+(strip_src / "root.x86_64/etc").mkdir(parents=True, exist_ok=True)
+(strip_src / "root.x86_64/etc/arch-release").write_text("Arch Linux\n", encoding="utf-8")
+with tarfile.open(strip_tar, "w:gz") as tf:
+    tf.add(strip_src / "root.x86_64", arcname="root.x86_64")
+strip_sha = _hashlib.sha256(strip_tar.read_bytes()).hexdigest()
+
+os.environ["LOCACHY_COMPUTE_BASE"] = env["LOCACHY_COMPUTE_BASE"]
+def _fake_dl_ok(url, dest, *, progress=False):
+    if url.endswith("sha256sums.txt"):
+        Path(dest).write_text(f"{strip_sha}  archlinux-bootstrap-x86_64.tar.zst\n", encoding="utf-8")
+    else:
+        shutil.copyfile(strip_tar, dest)
+
+# Use strip=1 via preset url (rename fixture file to .tar.gz via custom --url and preset test with zstd if available)
+if shutil.which("zstd"):
+    raw_arch = OUT / "arch-strip.tar"
+    with tarfile.open(raw_arch, "w") as tf:
+        tf.add(strip_src / "root.x86_64", arcname="root.x86_64")
+    zst_arch = OUT / "arch-strip.tar.zst"
+    subprocess.run(["zstd", "-q", "-f", str(raw_arch), "-o", str(zst_arch)], check=True)
+    zst_arch_sha = _hashlib.sha256(zst_arch.read_bytes()).hexdigest()
+    def _fake_dl_arch(url, dest, *, progress=False):
+        if url.endswith("sha256sums.txt"):
+            Path(dest).write_text(f"{zst_arch_sha}  archlinux-bootstrap-x86_64.tar.zst\n", encoding="utf-8")
+        else:
+            shutil.copyfile(zst_arch, dest)
+    _cm0.image_fetch("arch-linux", name="arch-fetched", download_fn=_fake_dl_arch)
+    fetched_rel = Path(env["LOCACHY_COMPUTE_BASE"]) / "images/arch-fetched/rootfs/etc/arch-release"
+    check("image: fetch arch-linux verifies SHA-256 and strips leading root.x86_64/",
+          fetched_rel.is_file() and fetched_rel.read_text(encoding="utf-8") == "Arch Linux\n")
+    _cm0.image_remove("arch-fetched")
+
+bad_sha_err = ""
+try:
+    _cm0.image_fetch(
+        None, name="bad-sha-img", url="https://example.invalid/rootfs.tar.gz",
+        sha256="00" * 32, download_fn=lambda url, dest, *, progress=False: shutil.copyfile(strip_tar, dest),
+    )
+except _cm0.ComputeError as exc:
+    bad_sha_err = str(exc)
+check("image: fetch rejects SHA-256 mismatch and leaves no partial image",
+      "SHA-256 mismatch" in bad_sha_err
+      and not (Path(env["LOCACHY_COMPUTE_BASE"]) / "images/bad-sha-img").exists(), bad_sha_err)
+
+http_err = ""
+try:
+    _cm0.image_fetch(None, name="http-img", url="http://example.invalid/rootfs.tar.gz", download_fn=_fake_dl_ok)
+except _cm0.ComputeError as exc:
+    http_err = str(exc)
+check("image: fetch refuses non-HTTPS URL", "https://" in http_err, http_err)
+
+# env create --no-gpu + env set updates settings in place without wiping upperdir
+r_ng = run_cli(COMPUTE, "env", "create", "edit-me", "--image", "mini-ubuntu", "--no-gpu", "--net", "none")
+check("env: create accepts --no-gpu cleanly", r_ng.returncode == 0, r_ng.stderr)
+upper_keep = Path(env["LOCACHY_COMPUTE_BASE"]) / "envs/edit-me/upper/keep.txt"
+upper_keep.write_text("installed-venv\n", encoding="utf-8")
+r_set = run_cli(COMPUTE, "env", "set", "edit-me", "--gpu", "--net", "locachy-net",
+                "--memory", "16G", "--cpu", "800000 100000", "--workdir", "/root")
+r_st_tsv = run_cli(COMPUTE, "status", "--tsv")
+edit_line = next((l for l in r_st_tsv.stdout.splitlines() if l.startswith("env\tedit-me\t")), "")
+check("env: set updates gpu/net/memory/cpu/workdir in place, preserves upperdir, and status --tsv exposes all fields",
+      r_set.returncode == 0
+      and upper_keep.read_text(encoding="utf-8") == "installed-venv\n"
+      and edit_line == "env\tedit-me\tmini-ubuntu\t1\tlocachy-net\t\t\t16G\t800000 100000\t/root",
+      f"rc={r_set.returncode} err={r_set.stderr!r} line={edit_line!r}")
+run_cli(COMPUTE, "env", "remove", "edit-me", check_rc=True)
+
 # 2. Data mount outside /home + security rejection of sensitive host paths
 data_dir = OUT / "nvme-dataset"
 data_dir.mkdir(parents=True)

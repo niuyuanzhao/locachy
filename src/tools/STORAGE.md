@@ -116,6 +116,10 @@ locachy-storage remove pool [--wipe] [--delete-key]
 
 Freshly formatted `ext4` and `btrfs` root directories are chowned to uid/gid `1000:1000`.
 
+## Settings integration
+
+**Settings → Storage → Storage Volumes** lists the managed volumes and the unmanaged internal disks. The compute storage volume (`compute_storage`) is chosen under **Settings → Compute & VMs → Compute Node → Compute storage volume**.
+
 ## Tests
 
 ```sh

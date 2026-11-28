@@ -278,6 +278,10 @@ static const char *map_path(const char *path, char *out, size_t size)
         snprintf(out, size, "%s/level", root);
     else if (strcmp(path, "/var/lib/locachy/battery") == 0 || strncmp(path, "/var/lib/locachy/battery/", 25) == 0)
         snprintf(out, size, "%s/battery%s", root, path + 24);
+    else if (strcmp(path, VM_CONF_DIR) == 0 || strncmp(path, VM_CONF_DIR "/", strlen(VM_CONF_DIR) + 1) == 0)
+        snprintf(out, size, "%s/containers%s", root, path + strlen(VM_CONF_DIR));
+    else if (strcmp(path, VM_APPS_RUN_DIR) == 0 || strncmp(path, VM_APPS_RUN_DIR "/", strlen(VM_APPS_RUN_DIR) + 1) == 0)
+        snprintf(out, size, "%s/apps-run%s", root, path + strlen(VM_APPS_RUN_DIR));
     else if (strcmp(path, "/usr/share/hwdata") == 0 || strncmp(path, "/usr/share/hwdata/", 18) == 0)
         snprintf(out, size, "%s/hwdata%s", root, path + 17);
     else if (strcmp(path, "/sys") == 0 || strncmp(path, "/sys/", 5) == 0)
@@ -401,6 +405,7 @@ static int fixture_access(const char *path, int mode)
     if (!strcmp(path, "/usr/local/bin/locachy-tpm")) return fake_tpm_status ? 0 : -1;
     if (!strcmp(path, LOCACHY_DURESS)) return fake_duress_status ? 0 : -1;
     if (!strcmp(path, LOCACHY_STORAGE)) return fake_storage_status ? 0 : -1;
+    if (!strcmp(path, LOCACHY_WINISO)) return -1;
     if (!strcmp(path, SSH_ADMIN_CMD)) return -1;
     if (!strcmp(path, FWUPDMGR)) return fake_fwupd ? 0 : -1;
     if (!strcmp(path, NVIDIA_DRIVER)) return fake_nvidia ? 0 : -1;
@@ -764,11 +769,14 @@ static void test_circular(void)
            gpu_unlock_index() == gpu_gsp_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
            nvidia_powerd_index() == gpu_power_index() + 1 &&
            gpu_graphics_index() == nvidia_powerd_index() + 1 &&
-           storage_compute_index() == gpu_graphics_index() + 3 &&
-           storage_vols_index() == storage_compute_index() + 1 &&
+           storage_vols_index() == gpu_graphics_index() + 3 &&
            storage_disks_index() == storage_vols_index() + nstorage_vols &&
            ssh_index() == storage_disks_index() + 1 &&
-           num_hw_items() == ssh_index() + 5);
+           vm_apps_index() == ssh_index() + 5 &&
+           vm_new_index() == vm_apps_index() + nvm_apps &&
+           winmaint_conf_index() == vm_new_index() + 1 &&
+           winiso_index() == winmaint_conf_index() + 1 &&
+           num_hw_items() == winiso_index() + 3);
     on_rc("touchpad_circular", "0", NULL);
     assert(circular == 0);
     on_rc("touchpad_circular", "yes", NULL);
@@ -2120,7 +2128,7 @@ static void test_apps_rows(void)
                               "commit=\"89abcdef0123456789abcdef0123456789abcdef\"\ninstalled=\"2026-10-30 10:00\"\n");
     selected = upd_index() + 4; /* scrolled down to it: the source's rows above */
     draw();
-    assert(category == CAT_SYSTEM && canvas_has("Update repository") && canvas_has("App presets from") &&
+    assert(category == CAT_SOFTWARE && canvas_has("Update repository") && canvas_has("App presets from") &&
            canvas_has("App presets branch") && canvas_has("App presets installed") &&
            canvas_has("89abcde from the apps repository"));
     assert(item_row(upd_index() + 2) == item_row(upd_index() + 1) + 1 && item_row(upd_index() + 4) > 0);
@@ -2871,7 +2879,7 @@ static void test_colors(void)
     rc_read(on_rc, NULL);
     theme_reload();
     draw();
-    mouse = (struct pointer_event){ .col = 1, .row = PAGE_TOP + CAT_APPEARANCE,
+    mouse = (struct pointer_event){ .col = 1, .row = sidebar_row(CAT_APPEARANCE),
                                     .button = BTN_LEFT, .pressed = 1, .clicks = 1 };
     assert(settings_pointer() == -1);
     draw();
@@ -3114,10 +3122,10 @@ static void test_power_profile_zram_search(void)
     labwc_written(search_bind, labwc_out, sizeof labwc_out);
     assert(strstr(labwc_out, "key=\"A-space\"") && !strstr(labwc_out, "SEARCH-KEY"));
 
-    show_category(CAT_APPS, 1);
+    show_category(CAT_APPEARANCE, 1);
     selected = search_key_index();
     draw();
-    assert(category == CAT_APPS && canvas_has("Shortcuts") && canvas_has("Global search key") &&
+    assert(category == CAT_APPEARANCE && canvas_has("Shortcuts") && canvas_has("Global search key") &&
            canvas_has("Alt+Space") && canvas_has("Global Search") &&
            canvas_has("Search index service") && canvas_has("Document content indexing"));
 
@@ -3478,19 +3486,46 @@ int main(int argc, char **argv)
         for (int k = 0; k < nentries; k++) if (entries[k].idx >= 0) counted[entries[k].idx]++;
     }
     for (int i = 0; i < total; i++) assert(counted[i] == 1);
-    mouse = (struct pointer_event){ .col = 1, .row = PAGE_TOP + CAT_SYSTEM, .button = BTN_LEFT, .pressed = 1,
+    mouse = (struct pointer_event){ .col = 1, .row = sidebar_row(CAT_SYSTEM), .button = BTN_LEFT, .pressed = 1,
                                     .clicks = 1 };
     assert(settings_pointer() == -1 && category == CAT_SYSTEM && in_page && selected == host_index());
     draw();
     assert(canvas_has("About This System") && canvas_has("Hostname") && !canvas_has("Mouse & Touchpad"));
-    assert(colors[PAGE_TOP + CAT_SYSTEM][1] != BG); /* the category shown is marked */
+    assert(colors[sidebar_row(CAT_SYSTEM)][1] != BG); /* the category shown is marked */
+    /* Clicking a sidebar visual separator row does nothing. */
+    assert(sidebar_row(CAT_NETWORK) == sidebar_row(CAT_POWER) + 2);
+    assert(sidebar_cat_at(sidebar_row(CAT_NETWORK) - 1) == -1);
+    mouse = (struct pointer_event){ .col = 1, .row = sidebar_row(CAT_NETWORK) - 1, .button = BTN_LEFT, .pressed = 1,
+                                    .clicks = 1 };
+    assert(settings_pointer() == 0 && category == CAT_SYSTEM && in_page && selected == host_index());
+    /* Short screen (< 21 rows): sidebar omits gaps and maps every category consecutively. */
+    test_rows = 18;
+    assert(page_rows() < NCATS + 5 && sidebar_row(0) == PAGE_TOP);
+    for (int c = 0; c < NCATS; c++) {
+        if (c > 0) assert(sidebar_row(c) == sidebar_row(c - 1) + 1);
+        assert(sidebar_cat_at(sidebar_row(c)) == c);
+    }
+    assert(sidebar_cat_at(sidebar_row(NCATS - 1) + 1) == -1);
+    /* Tall screen (>= 24 rows): sidebar inserts all 5 group gaps and round-trips every category. */
+    test_rows = 24;
+    assert(page_rows() >= NCATS + 5 && sidebar_row(0) == PAGE_TOP);
+    assert(sidebar_row(NCATS - 1) - sidebar_row(0) == NCATS - 1 + 5);
+    for (int c = 0; c < NCATS; c++) {
+        assert(sidebar_cat_at(sidebar_row(c)) == c);
+        if (sidebar_has_gap_before(c)) assert(sidebar_cat_at(sidebar_row(c) - 1) == -1);
+    }
+    test_rows = 35;
+    draw();
     in_page = 0;
     sidebar_key(K_UP);
-    assert(category == CAT_TIME && !in_page && selected == lang_index());
+    assert(category == CAT_SOFTWARE && !in_page && selected == upd_index());
     draw();
-    assert(colors[PAGE_TOP + CAT_TIME][1] == ACCENT && canvas_has("Region & Language") && canvas_has("Date & Time"));
+    assert(colors[sidebar_row(CAT_SOFTWARE)][1] == ACCENT && canvas_has("Software Update") &&
+           canvas_has("Software Sources"));
     sidebar_key('\n');
     assert(in_page);
+    show_category(CAT_TIME, 1);
+    assert(selected == lang_index());
     page_move(1);
     assert(selected == tz_index());
     page_move(100);
@@ -3508,7 +3543,7 @@ int main(int argc, char **argv)
     search[0] = '\0';
     selected = fc_index() + 4;
     draw();
-    assert(category == CAT_SYSTEM && item_row(fc_index() + 4) >= PAGE_TOP && canvas_has("Camera for faces"));
+    assert(category == CAT_USERS && item_row(fc_index() + 4) >= PAGE_TOP && canvas_has("Camera for faces"));
     load_repos(); /* as settings starts: locachy-repos status, above */
     for (int c = 0; c < NCATS; c++) { /* each page as it is shown: ROOT/page-N.txt */
         snprintf(snapshot, sizeof snapshot, "page-%d", c);
@@ -3958,7 +3993,7 @@ int main(int argc, char **argv)
     fail_rc = 0;
     int category_before = category, page_before_rank = settings_page;
     settings_page = 1;
-    show_category(CAT_SYSTEM, 1);
+    show_category(CAT_SOFTWARE, 1);
     selected = rank_auto_index();
     draw();
     assert(canvas_has("Rank mirrors automatically") && canvas_has("< only by hand >") && canvas_has("next 2026-11-12 03:14"));
@@ -4059,11 +4094,14 @@ int main(int argc, char **argv)
            gpu_unlock_index() == gpu_gsp_index() + 1 && gpu_power_index() == gpu_unlock_index() + 1 &&
            nvidia_powerd_index() == gpu_power_index() + 1 &&
            gpu_graphics_index() == nvidia_powerd_index() + 1 &&
-           storage_compute_index() == gpu_graphics_index() + 3 &&
-           storage_vols_index() == storage_compute_index() + 1 &&
+           storage_vols_index() == gpu_graphics_index() + 3 &&
            storage_disks_index() == storage_vols_index() + nstorage_vols &&
            ssh_index() == storage_disks_index() + 1 &&
-           num_hw_items() == ssh_index() + 5);
+           vm_apps_index() == ssh_index() + 5 &&
+           vm_new_index() == vm_apps_index() + nvm_apps &&
+           winmaint_conf_index() == vm_new_index() + 1 &&
+           winiso_index() == winmaint_conf_index() + 1 &&
+           num_hw_items() == winiso_index() + 3);
     selected = extd_index();
     adjust(+1);
     assert(extd_decode == EXTD_HW);

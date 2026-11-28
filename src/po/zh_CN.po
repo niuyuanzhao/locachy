@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-27 18:54+0800\n"
+"POT-Creation-Date: 2026-11-28 10:00+0800\n"
 "PO-Revision-Date: 2026-11-09 14:16+0000\n"
 "Last-Translator: LOCachy\n"
 "Language-Team: Chinese (Simplified)\n"
@@ -379,7 +379,7 @@ msgstr "已连接"
 msgid "BT: %s"
 msgstr "蓝牙: %s"
 
-#: base/status.c
+#: base/status.c progs/settings-compute.inc
 msgid "enabled"
 msgstr "已启用"
 
@@ -876,7 +876,7 @@ msgstr "类型："
 msgid "Compression level:"
 msgstr "压缩级别："
 
-#: progs/archive.c progs/packages.c
+#: progs/archive.c progs/packages.c progs/settings-vm.inc
 msgid "(none)"
 msgstr "（无）"
 
@@ -1289,7 +1289,7 @@ msgstr "Enter: 打开"
 msgid "Up/Down: select   Enter: open   F: full screen   Esc: close"
 msgstr "Up/Down: 选择   Enter: 打开   F: 全屏运行   Esc: 关闭"
 
-#: progs/bar.c progs/home.c progs/packages.c
+#: progs/bar.c progs/home.c progs/packages.c progs/settings-compute.inc
 msgid "Containers"
 msgstr "容器"
 
@@ -5360,8 +5360,8 @@ msgstr "此处不能选择 %s：不是 %s*。"
 msgid "w makes an image the wallpaper; %s is not one."
 msgstr "按 w 可将图片设为壁纸；%s 不是图片。"
 
-#: progs/files.c progs/installer.c progs/packages.c progs/settings-power.inc
-#: progs/settings-theme.inc progs/settings.c
+#: progs/files.c progs/installer.c progs/packages.c progs/settings-compute.inc
+#: progs/settings-power.inc progs/settings-theme.inc progs/settings.c
 #, c-format
 msgid "Cannot write %s."
 msgstr "无法写入 %s。"
@@ -6393,7 +6393,8 @@ msgstr "LUKS2"
 msgid "auto (follow system)"
 msgstr "自动（跟随系统）"
 
-#: progs/installer.c progs/packages.c progs/settings.c
+#: progs/installer.c progs/packages.c progs/settings-compute.inc
+#: progs/settings.c
 msgid "none"
 msgstr "无"
 
@@ -8186,7 +8187,7 @@ msgstr "重新构建：%s (%s -> %s)"
 msgid "%s follows its new preset: %s"
 msgstr "%s 跟随新的预设模板：%s"
 
-#: progs/packages.c progs/settings-compute.inc
+#: progs/packages.c progs/settings-compute.inc progs/settings.c
 msgid "stopped"
 msgstr "已暂停"
 
@@ -9621,7 +9622,7 @@ msgstr "已将“%s”复制到剪贴板。"
 msgid "Clipboard service is not running."
 msgstr "剪贴板服务未运行。"
 
-#: progs/settings-compute.inc progs/settings.c
+#: progs/settings-compute.inc progs/settings-vm.inc progs/settings.c
 #, c-format
 msgid "%s is not installed."
 msgstr "%s 未安装。"
@@ -9639,20 +9640,113 @@ msgid "Closed client SSH config."
 msgstr "已关闭客户端 SSH 配置。"
 
 #: progs/settings-compute.inc
-msgid "Image name (e.g. pytorch-cu12): "
-msgstr "镜像名称（例如 pytorch-cu12）："
+#, c-format
+msgid "GPU test (nvidia-smi) succeeded in '%.40s'."
+msgstr "容器 '%.40s' 内 GPU 测试（nvidia-smi）通过。"
 
 #: progs/settings-compute.inc
-msgid "Image import cancelled."
-msgstr "已取消镜像导入。"
+#, c-format
+msgid "GPU test failed in '%.40s' (check driver & GPU passthrough)."
+msgstr "容器 '%.40s' 内 GPU 测试失败（请检查驱动与 GPU 直通设置）。"
+
+#: progs/settings-compute.inc
+msgid "Download / Import Base Rootfs Image"
+msgstr "下载 / 导入基础 Rootfs 镜像"
+
+#: progs/settings-compute.inc
+msgid ""
+"Native Linux base rootfs (no Docker daemon; downloads over HTTPS + SHA-256 "
+"check)."
+msgstr ""
+"原生 Linux 基础 rootfs（无需 Docker 守护进程；通过 HTTPS 下载并校验 "
+"SHA-256）。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Target storage: %s   (imported images: %d)"
+msgstr "目标存储：%s   （已有镜像：%d）"
+
+#: progs/settings-compute.inc
+msgid "root disk (/var/lib/locachy/compute)"
+msgstr "根盘（/var/lib/locachy/compute）"
+
+#: progs/settings-compute.inc
+msgid ""
+"Warning: compute storage volume is UNMOUNTED — mount it before downloading."
+msgstr "警告：计算存储卷尚未挂载——请先挂载后再下载。"
+
+#: progs/settings-compute.inc
+msgid ""
+"Pick an official distribution preset below, or import a custom URL / local "
+"archive."
+msgstr "在下方选择官方发行版预设，或从自定义 HTTPS 链接 / 本地归档导入。"
+
+#: progs/settings-compute.inc
+msgid "[ Download from custom HTTPS URL (.tar.gz / .tar.xz / .tar.zst)... ]"
+msgstr "[ 从自定义 HTTPS 链接下载（.tar.gz / .tar.xz / .tar.zst）... ]"
+
+#: progs/settings-compute.inc
+msgid "[ Import from local tarball or directory path... ]"
+msgstr "[ 从本地压缩包或目录路径导入... ]"
+
+#: progs/settings-compute.inc
+msgid "Up/Down: choose   Enter: download / import   Esc: back"
+msgstr "上下键：选择   Enter：下载 / 导入   Esc：返回"
+
+#: progs/settings-compute.inc
+msgid "Save image as (Enter for default): "
+msgstr "保存镜像名称（直接按 Enter 使用默认名）："
+
+#: progs/settings-compute.inc
+msgid "Download cancelled."
+msgstr "已取消下载。"
 
 #: progs/settings-compute.inc
 msgid "Invalid image name: letters, digits, . _ - only."
 msgstr "镜像名称无效：仅允许字母、数字及 . _ -。"
 
 #: progs/settings-compute.inc
-msgid "Source rootfs path (directory or .tar/.tar.zst): "
-msgstr "源 rootfs 路径（目录或 .tar/.tar.zst）："
+#, c-format
+msgid "Downloaded and verified image '%.40s'."
+msgstr "已下载并校验镜像 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Image download failed for '%.40s'."
+msgstr "下载镜像 '%.40s' 失败。"
+
+#: progs/settings-compute.inc
+msgid "Image name (e.g. debian-12): "
+msgstr "镜像名称（例如 debian-12）："
+
+#: progs/settings-compute.inc
+msgid "HTTPS rootfs tarball URL (https://...): "
+msgstr "HTTPS rootfs 压缩包链接（https://...）："
+
+#: progs/settings-compute.inc
+msgid "URL must start with https://."
+msgstr "链接必须以 https:// 开头。"
+
+#: progs/settings-compute.inc
+msgid "Expected SHA-256 (optional, Enter to skip): "
+msgstr "预期 SHA-256 校验值（可选，直接按 Enter 跳过）："
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Downloaded image '%.40s'."
+msgstr "已下载镜像 '%.40s'。"
+
+#: progs/settings-compute.inc
+msgid "Image name (e.g. ubuntu-custom): "
+msgstr "镜像名称（例如 ubuntu-custom）："
+
+#: progs/settings-compute.inc
+msgid "Import cancelled."
+msgstr "已取消导入。"
+
+#: progs/settings-compute.inc
+msgid "Local rootfs path (directory or .tar/.tar.gz/.tar.zst): "
+msgstr "本地 rootfs 路径（目录或 .tar/.tar.gz/.tar.zst）："
 
 #: progs/settings-compute.inc
 msgid "Source path must be an absolute path."
@@ -9660,51 +9754,231 @@ msgstr "源路径必须为绝对路径。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Image import failed for %.40s."
-msgstr "导入镜像 %.40s 失败。"
+msgid "Imported image '%.40s'."
+msgstr "已导入镜像 '%.40s'。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Imported image %.40s."
-msgstr "已导入镜像 %.40s。"
+msgid "Image import failed for '%.40s'."
+msgstr "导入镜像 '%.40s' 失败。"
 
 #: progs/settings-compute.inc
-msgid "Import a base rootfs image first (Images tab or Overview)."
-msgstr "请先导入基础 rootfs 镜像（镜像页或概览页）。"
-
-#: progs/settings-compute.inc
-msgid "Environment name (e.g. train-1): "
-msgstr "环境名称（例如 train-1）："
-
-#: progs/settings-compute.inc
-msgid "Environment creation cancelled."
-msgstr "已取消创建环境。"
-
-#: progs/settings-compute.inc
-msgid "Invalid environment name: letters, digits, . _ - only."
-msgstr "环境名称无效：仅允许字母、数字及 . _ -。"
-
-#: progs/settings-compute.inc
-msgid "Base image name: "
-msgstr "基础镜像名称："
-
-#: progs/settings-compute.inc
-msgid "Invalid image name."
-msgstr "镜像名称无效。"
+msgid "Download or import a base image first."
+msgstr "请先下载或导入一个基础镜像。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Created environment %.40s from %.40s."
-msgstr "已创建环境 %.40s（基于 %.40s）。"
+msgid "Container Settings: %.40s"
+msgstr "容器设置：%.40s"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Create env failed: %.120s"
-msgstr "创建环境失败：%.120s"
+msgid "New Compute Container"
+msgstr "新建计算容器"
 
 #: progs/settings-compute.inc
-msgid "check storage and image name"
-msgstr "请检查存储状态和镜像名称"
+#, c-format
+msgid "Host GPU: %s   NVIDIA: %s   (devs=%d, libs=%d)"
+msgstr "宿主机 GPU：%s   NVIDIA：%s   （设备=%d，库=%d）"
+
+#: progs/settings-compute.inc
+msgid "disabled"
+msgstr "已关闭"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"Editing container settings keeps all installed packages and files in its OS "
+"layer intact."
+msgstr "修改容器设置会保留系统层中已安装的软件包与全部文件。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"Configure one container below: pick image, GPU, network, and mounted storage "
+"volumes, then Save."
+msgstr "在下方配置容器：选择基础镜像、GPU、网络与挂载的存储卷，然后保存。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"Tip: Left/Right toggles options, Enter edits or runs action, d downloads "
+"another image."
+msgstr "提示：左右键切换选项，Enter 编辑或执行操作，d 下载其他基础镜像。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Name:               %.64s"
+msgstr "容器名称：          %.64s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Name:               %.64s  (fixed)"
+msgstr "容器名称：          %.64s  （固定）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Base rootfs image:  %.64s  (fixed)"
+msgstr "基础 rootfs 镜像：  %.64s  （固定）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Base rootfs image:  < %.48s >  (%d available, d: download)"
+msgstr "基础 rootfs 镜像：  < %.48s >  （共 %d 个可用，d：下载）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "GPU passthrough:    < %s >"
+msgstr "GPU 直通：          < %s >"
+
+#: progs/settings-compute.inc
+msgid "OFF (CPU only)"
+msgstr "关闭（仅 CPU）"
+
+#: progs/settings-compute.inc
+msgid "ON (NVIDIA devices + libs + nvidia-smi)"
+msgstr "开启（NVIDIA 设备 + 运行库 + nvidia-smi）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Network access:     < %s >"
+msgstr "网络访问：          < %s >"
+
+#: progs/settings-compute.inc
+msgid "locachy-net (Internet & Tailscale)"
+msgstr "locachy-net（互联网与 Tailscale）"
+
+#: progs/settings-compute.inc
+msgid "none (offline / isolated)"
+msgstr "none（离线 / 网络隔离）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Memory limit:       < %s >"
+msgstr "内存上限：          < %s >"
+
+#: progs/settings-compute.inc
+msgid "unlimited"
+msgstr "不限"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "CPU limit:          < %s >"
+msgstr "CPU 限额：          < %s >"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Working directory:  %.100s"
+msgstr "工作目录：          %.100s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage volume:     [%c] %-18.18s -> /volumes/%-18.18s (%s, %s)"
+msgstr "存储卷：            [%c] %-18.18s -> /volumes/%-18.18s（%s，%s）"
+
+#: progs/settings-compute.inc
+msgid "MOUNTED"
+msgstr "已挂载"
+
+#: progs/settings-compute.inc
+msgid "UNMOUNTED - m: mount"
+msgstr "未挂载 - m：挂载"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Host mount:         %.140s  (Delete: remove)"
+msgstr "宿主机目录挂载：    %.140s  （Delete：移除）"
+
+#: progs/settings-compute.inc
+msgid "[ + Add extra host directory mount (host:container:rw)... ]"
+msgstr "[ + 添加额外宿主机目录挂载（宿主路径:容器路径:rw）... ]"
+
+#: progs/settings-compute.inc
+msgid "[ Save & Create Container ]"
+msgstr "[ 保存并创建容器 ]"
+
+#: progs/settings-compute.inc
+msgid "[ Save Container Settings ]"
+msgstr "[ 保存容器设置 ]"
+
+#: progs/settings-compute.inc
+msgid ""
+"Up/Down: move   Left/Right: change   Enter: edit/save   d: download image   "
+"Esc: cancel"
+msgstr ""
+"上下键：移动   左右键：切换   Enter：编辑/保存   d：下载镜像   Esc：取消"
+
+#: progs/settings-compute.inc
+msgid "Removed extra mount (press Save to apply)."
+msgstr "已移除额外挂载（保存后生效）。"
+
+#: progs/settings-compute.inc
+msgid "Container name: "
+msgstr "容器名称："
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+msgid "Invalid name: letters, digits, . _ - only."
+msgstr "名称无效：仅允许字母、数字及 . _ -。"
+
+#: progs/settings-compute.inc
+msgid "Memory limit (e.g. 16G, empty = unlimited): "
+msgstr "内存上限（例如 16G，留空表示不限）："
+
+#: progs/settings-compute.inc
+msgid "CPU quota (e.g. '800000 100000', empty = unlimited): "
+msgstr "CPU 配额（例如 '800000 100000'，留空表示不限）："
+
+#: progs/settings-compute.inc
+msgid "Working directory inside container (absolute path): "
+msgstr "容器内工作目录（绝对路径）："
+
+#: progs/settings-compute.inc
+msgid "Working directory must start with '/'."
+msgstr "工作目录必须以 '/' 开头。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Volume '%.32s' is not mounted yet — press m to mount it before saving."
+msgstr "存储卷 '%.32s' 尚未挂载——请先按 m 挂载后再保存。"
+
+#: progs/settings-compute.inc
+msgid "Maximum extra mounts reached."
+msgstr "额外目录挂载数量已达上限。"
+
+#: progs/settings-compute.inc
+msgid "Mount spec (/host/path:/container/path[:ro|:rw]): "
+msgstr "挂载规则（/宿主机路径:/容器路径[:ro|:rw]）："
+
+#: progs/settings-compute.inc
+msgid "Expected /host/path:/container/path[:ro|:rw]."
+msgstr "格式应为 /宿主机路径:/容器路径[:ro|:rw]。"
+
+#: progs/settings-compute.inc
+msgid "Invalid container name."
+msgstr "容器名称无效。"
+
+#: progs/settings-compute.inc
+msgid "Select or download a base rootfs image first."
+msgstr "请先选择或下载一个基础 rootfs 镜像。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Saved settings for container '%.40s'."
+msgstr "已保存容器 '%.40s' 的设置。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Created compute container '%.40s'."
+msgstr "已创建计算容器 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Save failed: %.140s"
+msgstr "保存失败：%.140s"
+
+#: progs/settings-compute.inc
+msgid "check storage mount and inputs"
+msgstr "请检查存储挂载与输入参数"
 
 #: progs/settings-compute.inc
 msgid "Client peer name (e.g. macbook): "
@@ -9724,6 +9998,252 @@ msgstr "客户端配对未完成。"
 msgid "Paired compute client %.40s."
 msgstr "已配对计算客户端 %.40s。"
 
+#: progs/settings-compute.inc
+#, c-format
+msgid "Default working container set to '%.40s'."
+msgstr "默认工作容器已设为 '%.40s'。"
+
+#: progs/settings-compute.inc
+msgid "New Compute Micro-VM"
+msgstr "新建计算微型虚拟机"
+
+#: progs/settings-compute.inc
+msgid ""
+"KVM micro-VM with CoW qcow2 overlay over a read-only base disk (virtio-blk + "
+"virtiofs)."
+msgstr ""
+"KVM 微型虚拟机：基于只读基础盘的写时复制 qcow2 覆盖层（virtio-blk + "
+"virtiofs）。"
+
+#: progs/settings-compute.inc
+msgid ""
+"Supports loopback SSH forwarding (--net user) and optional export to Home "
+"desktop."
+msgstr "支持回环 SSH 转发（--net user），可选导出到 Home 桌面。"
+
+#: progs/settings-compute.inc
+msgid ""
+"Tip: Left/Right changes values, Enter edits or toggles, Delete removes a "
+"share."
+msgstr "提示：左右键切换数值，Enter 编辑或切换，Delete 删除挂载。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "VM name:            %.64s"
+msgstr "虚拟机名称：        %.64s"
+
+#: progs/settings-compute.inc
+msgid "(Enter: path to read-only .qcow2)"
+msgstr "（Enter：填写只读 .qcow2 路径）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Base qcow2 disk:    %.120s"
+msgstr "基础 qcow2 磁盘：    %.120s"
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+#, c-format
+msgid "Memory:             < %d MiB >"
+msgstr "内存：              < %d MiB >"
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+#, c-format
+msgid "vCPUs:              < %d >"
+msgstr "vCPU 数：           < %d >"
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+#, c-format
+msgid "Network:            < %s >"
+msgstr "网络：              < %s >"
+
+#: progs/settings-compute.inc
+msgid "user (loopback SSH forwarded)"
+msgstr "user（转发回环 SSH）"
+
+#: progs/settings-compute.inc
+msgid "(auto)"
+msgstr "（自动）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "SSH user (opt.):    %.64s"
+msgstr "SSH 用户（可选）：    %.64s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage volume:     [%c] %-18.18s (virtiofs tag: vol-%-14.14s, %s)"
+msgstr "存储卷：            [%c] %-18.18s （virtiofs 标签：vol-%-14.14s，%s）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Host share:         %.140s  (Delete: remove)"
+msgstr "宿主机目录挂载：    %.140s  （Delete：移除）"
+
+#: progs/settings-compute.inc
+msgid "[ + Add virtiofs directory share (/host/dir:tag[:ro|:rw])... ]"
+msgstr "[ + 添加 virtiofs 目录共享（/宿主目录:标签[:ro|:rw]）… ]"
+
+#: progs/settings-compute.inc
+msgid "[ Create Compute Micro-VM ]"
+msgstr "[ 创建计算微型虚拟机 ]"
+
+#: progs/settings-compute.inc
+msgid "Up/Down: move   Left/Right: change   Enter: edit/create   Esc: cancel"
+msgstr "上下键：移动   左右键：切换   Enter：编辑/创建   Esc：取消"
+
+#: progs/settings-compute.inc
+msgid "Removed share."
+msgstr "已移除挂载。"
+
+#: progs/settings-compute.inc
+msgid "VM name: "
+msgstr "虚拟机名称："
+
+#: progs/settings-compute.inc
+msgid "Absolute path to base qcow2 image: "
+msgstr "基础 qcow2 镜像的绝对路径："
+
+#: progs/settings-compute.inc
+msgid "Base disk path must be an absolute path starting with '/'."
+msgstr "基础磁盘路径必须是以 '/' 开头的绝对路径。"
+
+#: progs/settings-compute.inc
+msgid "Memory in MiB (256..262144): "
+msgstr "内存（MiB，256..262144）："
+
+#: progs/settings-compute.inc
+msgid "Memory must be between 256 and 262144 MiB."
+msgstr "内存必须在 256 到 262144 MiB 之间。"
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+msgid "vCPU count (1..128): "
+msgstr "vCPU 数量（1..128）："
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+msgid "vCPUs must be between 1 and 128."
+msgstr "vCPU 数必须在 1 到 128 之间。"
+
+#: progs/settings-compute.inc
+msgid "SSH login username (empty = auto): "
+msgstr "SSH 登录用户名（留空 = 自动）："
+
+#: progs/settings-compute.inc
+msgid "Maximum shares reached."
+msgstr "目录共享数量已达上限。"
+
+#: progs/settings-compute.inc
+msgid "Share spec (/host/dir:tag[:ro|:rw]): "
+msgstr "共享规则（/宿主目录:标签[:ro|:rw]）："
+
+#: progs/settings-compute.inc
+msgid "Expected /host/dir:tag[:ro|:rw]."
+msgstr "格式应为 /宿主目录:标签[:ro|:rw]。"
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+msgid "Invalid VM name."
+msgstr "虚拟机名称无效。"
+
+#: progs/settings-compute.inc
+msgid "Specify an absolute path to a base qcow2 disk first."
+msgstr "请先填写基础 qcow2 磁盘的绝对路径。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Created compute micro-VM '%.40s'."
+msgstr "已创建计算微型虚拟机 '%.40s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Create VM failed: %.140s"
+msgstr "创建虚拟机失败：%.140s"
+
+#: progs/settings-compute.inc
+msgid "check base disk path and storage"
+msgstr "请检查基础磁盘路径和存储"
+
+#: progs/settings-compute.inc
+msgid "Default working container"
+msgstr "默认工作容器"
+
+#: progs/settings-compute.inc
+msgid "Images"
+msgstr "镜像"
+
+#: progs/settings-compute.inc
+msgid "Micro-VMs"
+msgstr "微型虚拟机"
+
+#: progs/settings-compute.inc
+msgid "Jobs"
+msgstr "任务"
+
+#: progs/settings-compute.inc
+msgid "Storage and access"
+msgstr "存储与访问"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"> %-18.18s  img=%-18.18s  GPU:%-3s  net=%-11.11s  (Left/Right: switch "
+"default)"
+msgstr ""
+"> %-18.18s  镜像=%-18.18s  GPU:%-3s  网络=%-11.11s  （左右键：切换默认）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "> %-18.18s  img=%-18.18s  GPU:%-3s  net=%-11.11s"
+msgstr "> %-18.18s  镜像=%-18.18s  GPU:%-3s  网络=%-11.11s"
+
+#: progs/settings-compute.inc progs/settings-vm.inc progs/settings.c
+msgid "OFF"
+msgstr "关"
+
+#: progs/settings-compute.inc progs/settings-vm.inc progs/settings.c
+msgid "ON"
+msgstr "开"
+
+#: progs/settings-compute.inc
+msgid "+ Set up the default working container..."
+msgstr "+ 设置默认工作容器…"
+
+#: progs/settings-compute.inc
+msgid "+ New container..."
+msgstr "+ 新建容器…"
+
+#: progs/settings-compute.inc
+msgid "+ Download or import a rootfs image..."
+msgstr "+ 下载或导入根文件系统镜像…"
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "RUNNING"
+msgstr "运行中"
+
+#: progs/settings-compute.inc
+msgid "+ Create compute micro-VM..."
+msgstr "+ 创建计算微型虚拟机…"
+
+#: progs/settings-compute.inc
+msgid "Storage: root disk (configure under Storage > Storage Volumes)"
+msgstr "存储：根盘（可在 存储 > 存储卷 中配置）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage volume '%.32s' [MOUNTED]  (Enter: unmount)"
+msgstr "存储卷 '%.32s' [已挂载]  （Enter：卸载）"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage volume '%.32s' [UNMOUNTED]  (Enter: mount)"
+msgstr "存储卷 '%.32s' [未挂载]  （Enter：挂载）"
+
+#: progs/settings-compute.inc
+msgid "View / copy client SSH config"
+msgstr "查看 / 复制客户端 SSH 配置"
+
+#: progs/settings-compute.inc
+msgid "Pair a compute client (locachy-pair)..."
+msgstr "配对计算客户端（locachy-pair）…"
+
 #: progs/settings-compute.inc progs/settings.c
 msgid "Compute Node Manager"
 msgstr "计算节点管理"
@@ -9732,10 +10252,6 @@ msgstr "计算节点管理"
 #, c-format
 msgid "API: %s (port %d, %s)   Paired: %d   SSH: ssh %.32s -p %d"
 msgstr "API: %s（端口 %d，%s）  已配对: %d   SSH: ssh %.32s -p %d"
-
-#: progs/settings-compute.inc progs/settings.c
-msgid "OFF"
-msgstr "关"
 
 #: progs/settings-compute.inc
 msgid "ON / running"
@@ -9778,10 +10294,6 @@ msgstr "存储：%.32s [未挂载]  按 m 挂载"
 msgid "GPU: passthrough %s   NVIDIA %s   (%d devs, %d CUDA libs)"
 msgstr "GPU：直通 %s   NVIDIA %s   （%d 个设备，%d 个 CUDA 库）"
 
-#: progs/settings-compute.inc progs/settings.c
-msgid "ON"
-msgstr "开"
-
 #: progs/settings-compute.inc
 #, c-format
 msgid "GPU: passthrough %s   %d GPU device(s), %d NVIDIA libs"
@@ -9796,112 +10308,75 @@ msgstr "GPU：直通 %s   未加载 NVIDIA 驱动（见 输入与输出 > NVIDIA
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Inventory: %d images   %d envs   %d/%d jobs running   %d/%d VMs running"
+msgid ""
+"Default: %.24s   Inventory: %d images, %d envs, %d/%d jobs running, %d/%d "
+"VMs running"
 msgstr ""
-"清单：%d 个镜像   %d 个环境   %d/%d 个任务运行中   %d/%d 台虚拟机运行中"
-
-#: progs/settings-compute.inc progs/view.c
-msgid "Overview"
-msgstr "概览"
+"默认：%.24s   清单：%d 个镜像，%d 个容器，运行中任务 %d/%d，运行中虚拟机 %d/"
+"%d"
 
 #: progs/settings-compute.inc
-msgid "Envs"
-msgstr "环境"
-
-#: progs/settings-compute.inc
-msgid "Jobs"
-msgstr "任务"
-
-#: progs/settings-compute.inc
-msgid "VMs"
-msgstr "虚拟机"
-
-#: progs/settings-compute.inc
-msgid "Images"
-msgstr "镜像"
+#, c-format
+msgid ""
+"No default container yet.   Inventory: %d images, %d envs, %d/%d jobs "
+"running, %d/%d VMs running"
+msgstr ""
+"尚无默认容器。   清单：%d 个镜像，%d 个容器，运行中任务 %d/%d，运行中虚拟机 "
+"%d/%d"
 
 #: progs/settings-compute.inc
 msgid "No compute jobs recorded yet."
 msgstr "尚无计算任务记录。"
 
 #: progs/settings-compute.inc
-msgid "No compute micro-VMs created yet (locachy-compute vm create)."
-msgstr "尚未创建计算微虚拟机（locachy-compute vm create）。"
+#, c-format
+msgid "Container: %.24s%s   image=%.24s   memory=%s   cpu=%s   workdir=%.40s"
+msgstr "容器：%.24s%s   镜像=%.24s   内存=%s   CPU=%s   工作目录=%.40s"
 
 #: progs/settings-compute.inc
-msgid "Nothing here yet."
-msgstr "暂无内容。"
+msgid "  [default]"
+msgstr "  [默认]"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "[ Unmount compute storage volume '%.32s' ]"
-msgstr "[ 卸载计算存储卷 '%.32s' ]"
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "[ Mount compute storage volume '%.32s' ]"
-msgstr "[ 挂载计算存储卷 '%.32s' ]"
-
-#: progs/settings-compute.inc
-msgid "[ Storage: using root disk (configure under System > Storage Volumes) ]"
-msgstr "[ 存储：使用根盘（可在 系统 > 存储卷 中配置） ]"
-
-#: progs/settings-compute.inc
-msgid "[ + Import rootfs image (tarball or directory) ]"
-msgstr "[ + 导入 rootfs 镜像（压缩包或目录） ]"
-
-#: progs/settings-compute.inc
-msgid "[ + Create compute environment ]"
-msgstr "[ + 创建计算环境 ]"
-
-#: progs/settings-compute.inc
-msgid "[ + Pair remote client (mTLS token) ]"
-msgstr "[ + 配对远程客户端（mTLS 令牌） ]"
-
-#: progs/settings-compute.inc
-msgid "[ View / copy client SSH config ]"
-msgstr "[ 查看 / 复制客户端 SSH 配置 ]"
-
-#: progs/settings-compute.inc
-msgid "[ Manage paired devices (locachy-pair) ]"
-msgstr "[ 管理已配对设备（locachy-pair） ]"
-
-#: progs/settings-compute.inc
-msgid "RUNNING"
-msgstr "运行中"
+msgid "Volumes: %.80s   Extra mounts: %.80s"
+msgstr "存储卷：%.80s   额外挂载：%.80s"
 
 #: progs/settings-compute.inc
 msgid ""
-"1-5/Tab: tabs   Enter: shell/create   x: reset   Delete: remove   r: "
-"refresh   Esc: back"
-msgstr ""
-"1-5/Tab: 切换标签   Enter: 进入终端/新建   x: 重置   Delete: 删除   r: 刷"
-"新   Esc: 返回"
-
-#: progs/settings-compute.inc
-msgid "1-5/Tab: tabs   Enter: view log   s: stop job   r: refresh   Esc: back"
-msgstr ""
-"1-5/Tab: 切换标签   Enter: 查看日志   s: 停止任务   r: 刷新   Esc: 返回"
-
-#: progs/settings-compute.inc
-msgid ""
-"1-5/Tab: tabs   Enter: start/shell   s: stop   x: reset   Delete: remove   "
+"Left/Right: switch default   Enter: open shell   e: settings   t: GPU test   "
 "r: refresh   Esc: back"
 msgstr ""
-"1-5/Tab: 切换标签   Enter: 启动/终端   s: 停止   x: 重置   Delete: 删除   r: "
-"刷新   Esc: 返回"
-
-#: progs/settings-compute.inc
-msgid "1-5/Tab: tabs   Enter: import   Delete: remove   r: refresh   Esc: back"
-msgstr "1-5/Tab: 切换标签   Enter: 导入   Delete: 删除   r: 刷新   Esc: 返回"
+"左右键：切换默认   Enter：打开终端   e：设置   t：GPU 测试   r：刷新   Esc："
+"返回"
 
 #: progs/settings-compute.inc
 msgid ""
-"1-5/Tab: tabs   Enter: run action   m: mount storage   c: SSH config   r: "
-"refresh   Esc: back"
+"Enter: open shell   e: settings   p: make default   t: GPU test   x: reset   "
+"Del: remove   Esc: back"
 msgstr ""
-"1-5/Tab: 切换标签   Enter: 执行操作   m: 挂载存储   c: SSH 配置   r: 刷新   "
-"Esc: 返回"
+"Enter：打开终端   e：设置   p：设为默认   t：GPU 测试   x：重置   Del：删"
+"除   Esc：返回"
+
+#: progs/settings-compute.inc
+msgid ""
+"Enter: start or shell   s: stop   a: export to Home   x: reset   Del: "
+"remove   Esc: back"
+msgstr ""
+"Enter：启动或打开终端   s：停止   a：导出到 Home   x：重置   Del：删除   "
+"Esc：返回"
+
+#: progs/settings-compute.inc
+msgid "Enter: view log   s: stop job   r: refresh   Esc: back"
+msgstr "Enter：查看日志   s：停止任务   r：刷新   Esc：返回"
+
+#: progs/settings-compute.inc
+msgid "Enter: details   Del: remove unused image   Esc: back"
+msgstr "Enter：查看详情   Del：删除未使用的镜像   Esc：返回"
+
+#: progs/settings-compute.inc
+msgid "Up/Down: move   Enter: run action   r: refresh   Esc: back"
+msgstr "上下键：移动   Enter：执行操作   r：刷新   Esc：返回"
 
 #: progs/settings-compute.inc
 #, c-format
@@ -9914,42 +10389,23 @@ msgstr "已刷新计算节点状态。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Press x again to wipe upperdir and reset env '%.40s'."
-msgstr "再次按 x 清空 upperdir 并重置环境 '%.40s'。"
+msgid "Image '%.32s' (imported %.20s, from %.60s)."
+msgstr "镜像 '%.32s'（导入于 %.20s，来源 %.60s）。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Reset environment '%.40s'."
-msgstr "已重置环境 '%.40s'。"
+msgid "Start VM failed: %.120s"
+msgstr "启动虚拟机失败：%.120s"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Reset failed: %.120s"
-msgstr "重置失败：%.120s"
-
-#: progs/settings-compute.inc
-msgid "error"
-msgstr "错误"
+msgid "Started VM '%.32s'."
+msgstr "已启动虚拟机 '%.32s'。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Press Delete again to remove env '%.40s'."
-msgstr "再次按 Delete 删除环境 '%.40s'。"
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Removed environment '%.40s'."
-msgstr "已删除环境 '%.40s'。"
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Remove failed: %.120s"
-msgstr "删除失败：%.120s"
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Job Log: %.64s"
-msgstr "任务日志：%.64s"
+msgid "Compute Job Log: %.48s"
+msgstr "计算任务日志：%.48s"
 
 #: progs/settings-compute.inc
 msgid "(no log output)"
@@ -9961,28 +10417,40 @@ msgstr "任务日志"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Stopped job '%.48s'."
-msgstr "已停止任务 '%.48s'。"
+msgid ""
+"Press x again to reset '%.32s' (discards its writable changes; base image "
+"and volumes stay)."
+msgstr "再按一次 x 重置 '%.32s'（丢弃可写改动；基础镜像和存储卷保留）。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Stop job failed: %.120s"
-msgstr "停止任务失败：%.120s"
+msgid "Reset '%.32s'."
+msgstr "已重置 '%.32s'。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Started VM '%.40s'."
-msgstr "已启动虚拟机 '%.40s'。"
+msgid "Reset failed: %.120s"
+msgstr "重置失败：%.120s"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Start VM failed: %.120s"
-msgstr "启动虚拟机失败：%.120s"
+msgid "Stop VM '%.32s' (s) before removing it."
+msgstr "删除前请先停止虚拟机 '%.32s'（按 s）。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Stopped VM '%.40s'."
-msgstr "已停止虚拟机 '%.40s'。"
+msgid "Press Delete again to remove '%.32s'."
+msgstr "再按一次 Delete 删除 '%.32s'。"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Remove failed: %.120s"
+msgstr "删除失败：%.120s"
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Removed '%.32s'."
+msgstr "已删除 '%.32s'。"
 
 #: progs/settings-compute.inc
 #, c-format
@@ -9991,48 +10459,28 @@ msgstr "停止虚拟机失败：%.120s"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Press x again to reset CoW disk of VM '%.40s'."
-msgstr "再次按 x 重置虚拟机 '%.40s' 的 CoW 磁盘。"
+msgid "Stopped VM '%.32s'."
+msgstr "已停止虚拟机 '%.32s'。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Reset VM '%.40s'."
-msgstr "已重置虚拟机 '%.40s'。"
+msgid "Stop failed: %.120s"
+msgstr "停止失败：%.120s"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Reset VM failed: %.120s"
-msgstr "重置虚拟机失败：%.120s"
+msgid "Stopped compute job %.32s."
+msgstr "已停止计算任务 %.32s。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Press Delete again to remove VM '%.40s'."
-msgstr "再次按 Delete 删除虚拟机 '%.40s'。"
+msgid "Exported VM '%.32s' to Home (see Compute & VMs > Virtual Machines)."
+msgstr "已将虚拟机 '%.32s' 导出到 Home（见 计算与虚拟机 > 虚拟机）。"
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Removed VM '%.40s'."
-msgstr "已删除虚拟机 '%.40s'。"
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Remove VM failed: %.120s"
-msgstr "删除虚拟机失败：%.120s"
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Press Delete again to remove image '%.40s'."
-msgstr "再次按 Delete 删除镜像 '%.40s'。"
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Removed image '%.40s'."
-msgstr "已删除镜像 '%.40s'。"
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Remove image failed: %.120s"
-msgstr "删除镜像失败：%.120s"
+msgid "Export failed: %.120s"
+msgstr "导出失败：%.120s"
 
 #: progs/settings-hwinfo.inc
 msgid "Processor"
@@ -11331,6 +11779,481 @@ msgstr "自定义重点色（#RRGGBB）："
 msgid "Enter a color as #RRGGBB, for example #3478D4. Nothing was changed."
 msgstr "请输入 #RRGGBB 格式的颜色，例如 #3478D4。未作任何更改。"
 
+#: progs/settings-vm.inc
+#, c-format
+msgid "Windows 11 ISO (%s) downloaded and verified."
+msgstr "Windows 11 镜像（%s）已下载并核对。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Windows ISO download failed: %.120s"
+msgstr "Windows 镜像下载失败：%.120s"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Removed VM app '%.40s'."
+msgstr "已删除虚拟机应用 '%.40s'。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Remove VM app failed: %.120s"
+msgstr "删除虚拟机应用失败：%.120s"
+
+#: progs/settings-vm.inc
+msgid "invalid VM name"
+msgstr "虚拟机名称无效"
+
+#: progs/settings-vm.inc
+msgid "write error"
+msgstr "写入错误"
+
+#: progs/settings-vm.inc
+msgid "disk path is too long"
+msgstr "磁盘路径过长"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "disk already exists: %.100s"
+msgstr "磁盘已存在：%.100s"
+
+#: progs/settings-vm.inc
+msgid "qemu-img create failed"
+msgstr "qemu-img 创建失败"
+
+#: progs/settings-vm.inc
+msgid "Maintenance Windows VM Settings"
+msgstr "维护用 Windows 虚拟机设置"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "VM App Settings: %.40s (%s)"
+msgstr "虚拟机应用设置：%.40s（%s）"
+
+#: progs/settings-vm.inc
+msgid "New Virtual Machine App"
+msgstr "新建虚拟机应用"
+
+#: progs/settings-vm.inc
+msgid ""
+"Configures /etc/locachy/containers/winmaint.conf for the in-OS Maintenance "
+"Windows VM."
+msgstr ""
+"配置系统内维护用 Windows 虚拟机的 /etc/locachy/containers/winmaint.conf。"
+
+#: progs/settings-vm.inc
+msgid ""
+"Leave ISO fields empty to use locachy-winiso automatically when installing "
+"onto a blank partition."
+msgstr "ISO 项留空时，安装到空白分区会自动使用 locachy-winiso 提供的镜像。"
+
+#: progs/settings-vm.inc
+msgid ""
+"Managed KVM virtual machine app registered in Home (runs as uid 1000 in its "
+"own cgroup)."
+msgstr ""
+"在 Home 中注册的受管 KVM 虚拟机应用（以 uid 1000 运行，位于独立 cgroup）。"
+
+#: progs/settings-vm.inc
+msgid ""
+"Windows VMs automatically use verified Windows 11 & virtio-win ISOs when ISO "
+"paths are left blank."
+msgstr ""
+"ISO 路径留空时，Windows 虚拟机会自动使用已核对的 Windows 11 与 virtio-win 镜"
+"像。"
+
+#: progs/settings-vm.inc
+msgid "Desktop launcher settings for a compute micro-VM exported to Home."
+msgstr "导出到 Home 的计算型微型虚拟机的桌面启动设置。"
+
+#: progs/settings-vm.inc
+msgid ""
+"Hardware limits (memory/vCPU/disk) belong to Compute Node Manager > Micro-"
+"VMs."
+msgstr "硬件上限（内存/vCPU/磁盘）在 计算节点管理器 > 微型虚拟机 中设置。"
+
+#: progs/settings-vm.inc
+msgid "Tip: Left/Right toggles options, Enter edits or saves, Esc cancels."
+msgstr "提示：左右键切换选项，Enter 编辑或保存，Esc 取消。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "VM app name:        %.64s"
+msgstr "虚拟机应用名称：    %.64s"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "VM app name:        %.64s  (fixed)"
+msgstr "虚拟机应用名称：    %.64s  （固定）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Guest OS profile:   < %s >"
+msgstr "客户机系统：    < %s >"
+
+#: progs/settings-vm.inc
+msgid "Linux (virtio)"
+msgstr "Linux（virtio）"
+
+#: progs/settings-vm.inc
+msgid "Windows (UEFI + TPM + Hyper-V)"
+msgstr "Windows（UEFI + TPM + Hyper-V）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Disk mode:          < Create blank qcow2 (%d GiB) >"
+msgstr "磁盘方式：          < 新建空白 qcow2（%d GiB） >"
+
+#: progs/settings-vm.inc
+msgid "Disk mode:          < CoW overlay on read-only base (vm_base) >"
+msgstr "磁盘方式：          < 只读基础盘上的写时复制覆盖层（vm_base） >"
+
+#: progs/settings-vm.inc
+msgid "Disk mode:          < Direct writable disk image (vm_disk) >"
+msgstr "磁盘方式：          < 直接读写的磁盘镜像（vm_disk） >"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "New disk size:      < %d GiB >  (%.64s/%.32s.qcow2)"
+msgstr "新磁盘大小：        < %d GiB >  （%.64s/%.32s.qcow2）"
+
+#: progs/settings-vm.inc
+msgid "(Enter: path to read-only qcow2/raw)"
+msgstr "（Enter：填写只读 qcow2/raw 路径）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Base disk path:     %.120s"
+msgstr "基础磁盘路径：      %.120s"
+
+#: progs/settings-vm.inc
+msgid "(Enter: path to qcow2/raw disk)"
+msgstr "（Enter：填写 qcow2/raw 磁盘路径）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Writable disk path: %.120s"
+msgstr "可写磁盘路径：      %.120s"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Install ISO:        %.120s"
+msgstr "安装 ISO：          %.120s"
+
+#: progs/settings-vm.inc
+msgid "(auto from locachy-winiso / Enter: custom)"
+msgstr "（自动取自 locachy-winiso / Enter：自定义）"
+
+#: progs/settings-vm.inc
+msgid "(none / Enter: path to .iso)"
+msgstr "（无 / Enter：填写 .iso 路径）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "virtio-win ISO:     %.120s"
+msgstr "virtio-win ISO：    %.120s"
+
+#: progs/settings-vm.inc
+msgid "OFF (SeaBIOS)"
+msgstr "关闭（SeaBIOS）"
+
+#: progs/settings-vm.inc
+msgid "ON (OVMF)"
+msgstr "开启（OVMF）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "UEFI firmware:      < %s >"
+msgstr "UEFI 固件：         < %s >"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "TPM 2.0 (swtpm):    < %s >"
+msgstr "TPM 2.0（swtpm）：  < %s >"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Disk bus:           < %s >"
+msgstr "磁盘总线：          < %s >"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Network:            < %s >  (NIC: %s)"
+msgstr "网络：              < %s >  （网卡：%s）"
+
+#: progs/settings-vm.inc
+msgid "OFF (isolated)"
+msgstr "关闭（隔离）"
+
+#: progs/settings-vm.inc
+msgid "ON (locachy-net)"
+msgstr "开启（locachy-net）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "NIC model:          < %s >"
+msgstr "网卡型号：          < %s >"
+
+#: progs/settings-vm.inc
+msgid "ON (tag: home)"
+msgstr "开启（标签：home）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Share Home (virtiofs): < %s >"
+msgstr "共享 Home（virtiofs）：< %s >"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Graphics / Audio:   < %s > / audio %s  (Enter: toggle audio)"
+msgstr "图形 / 声音：       < %s > / 声音 %s  （Enter：切换声音）"
+
+#: progs/settings-vm.inc
+msgid "2D (virtio-vga)"
+msgstr "2D（virtio-vga）"
+
+#: progs/settings-vm.inc
+msgid "OpenGL (virgl)"
+msgstr "OpenGL（virgl）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Display / Freeze:   < %s > / freeze %s  (Enter: toggle freeze)"
+msgstr "显示 / 冻结：       < %s > / 冻结 %s  （Enter：切换冻结）"
+
+#: progs/settings-vm.inc
+msgid "[ Save & Register VM App in Home ]"
+msgstr "[ 保存并在 Home 中注册虚拟机应用 ]"
+
+#: progs/settings-vm.inc
+msgid "[ Save VM App Settings ]"
+msgstr "[ 保存虚拟机应用设置 ]"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Disk bus:           < %s >  (nvme recommended for bare-metal parity)"
+msgstr "磁盘总线：          < %s >  （与裸机一致建议用 nvme）"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Freeze on switch:   < %s >"
+msgstr "切换时冻结：        < %s >"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Display backend:    < %s >"
+msgstr "显示后端：          < %s >"
+
+#: progs/settings-vm.inc
+msgid "[ Save Maintenance Windows VM Settings ]"
+msgstr "[ 保存维护用 Windows 虚拟机设置 ]"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Compute VM app:     %.64s -> %.64s (fixed)"
+msgstr "计算型虚拟机应用：  %.64s -> %.64s（固定）"
+
+#: progs/settings-vm.inc
+msgid "[ Save Compute VM App Settings ]"
+msgstr "[ 保存计算型虚拟机应用设置 ]"
+
+#: progs/settings-vm.inc
+msgid "Up/Down: move   Left/Right: change   Enter: edit/save   Esc: cancel"
+msgstr "上下键：移动   左右键：切换   Enter：编辑/保存   Esc：取消"
+
+#: progs/settings-vm.inc
+msgid "OpenGL (virgl) is Linux guests only; press Enter to toggle audio."
+msgstr "OpenGL（virgl）仅适用于 Linux 客户机；按 Enter 切换声音。"
+
+#: progs/settings-vm.inc
+msgid "VM app name: "
+msgstr "虚拟机应用名称："
+
+#: progs/settings-vm.inc
+msgid "Base disk path (read-only qcow2/raw): "
+msgstr "基础磁盘路径（只读 qcow2/raw）："
+
+#: progs/settings-vm.inc
+msgid "Writable disk path (qcow2/raw): "
+msgstr "可写磁盘路径（qcow2/raw）："
+
+#: progs/settings-vm.inc
+msgid "Path must be absolute without '..' or quotes."
+msgstr "路径必须是绝对路径，不能含 '..' 或引号。"
+
+#: progs/settings-vm.inc
+msgid "Install ISO path (empty = auto/none): "
+msgstr "安装 ISO 路径（留空 = 自动/无）："
+
+#: progs/settings-vm.inc
+msgid "virtio-win ISO path (empty = auto/none): "
+msgstr "virtio-win ISO 路径（留空 = 自动/无）："
+
+#: progs/settings-vm.inc
+msgid "Memory in MiB (512..262144): "
+msgstr "内存（MiB，512..262144）："
+
+#: progs/settings-vm.inc
+msgid "Memory must be between 512 and 262144 MiB."
+msgstr "内存必须在 512 到 262144 MiB 之间。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Could not create disk: %.120s"
+msgstr "无法创建磁盘：%.120s"
+
+#: progs/settings-vm.inc
+msgid "Set a valid absolute base disk path first."
+msgstr "请先填写有效的基础磁盘绝对路径。"
+
+#: progs/settings-vm.inc
+msgid "Set a valid absolute writable disk path first."
+msgstr "请先填写有效的可写磁盘绝对路径。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Save VM config failed: %.120s"
+msgstr "保存虚拟机配置失败：%.120s"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Created VM app '%.40s' (now visible in Home)."
+msgstr "已创建虚拟机应用 '%.40s'（现已在 Home 中显示）。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Saved VM app '%.40s'."
+msgstr "已保存虚拟机应用 '%.40s'。"
+
+#: progs/settings-vm.inc
+msgid "Memory in MiB (1024..262144): "
+msgstr "内存（MiB，1024..262144）："
+
+#: progs/settings-vm.inc
+msgid "Custom Windows ISO path (empty = auto): "
+msgstr "自定义 Windows ISO 路径（留空 = 自动）："
+
+#: progs/settings-vm.inc
+msgid "Custom virtio-win ISO path (empty = auto): "
+msgstr "自定义 virtio-win ISO 路径（留空 = 自动）："
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Save winmaint.conf failed: %.120s"
+msgstr "保存 winmaint.conf 失败：%.120s"
+
+#: progs/settings-vm.inc
+msgid "Saved Maintenance Windows VM settings."
+msgstr "已保存维护用 Windows 虚拟机设置。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Save failed: %.120s"
+msgstr "保存失败：%.120s"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Opening VM app '%.40s' on desktop."
+msgstr "正在桌面上打开虚拟机应用 '%.40s'。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Cannot start VM app '%.40s': %.100s"
+msgstr "无法启动虚拟机应用 '%.40s'：%.100s"
+
+#: progs/settings-vm.inc progs/settings.c
+msgid "desktop session unavailable"
+msgstr "桌面会话不可用"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Requested graceful shutdown for VM '%.40s'."
+msgstr "已请求正常关闭虚拟机 '%.40s'。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Cannot stop VM '%.40s': %.100s"
+msgstr "无法停止虚拟机 '%.40s'：%.100s"
+
+#: progs/settings-vm.inc
+msgid "Wait: a VM removal job is already running."
+msgstr "请稍候：虚拟机删除任务仍在运行。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Stop VM '%.40s' (press s) before removing it."
+msgstr "删除前请先停止虚拟机 '%.40s'（按 s）。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid ""
+"Press Delete again to remove VM app '%.40s' (user base/disk files are kept)."
+msgstr ""
+"再按一次 Delete 删除虚拟机应用 '%.40s'（用户提供的基础盘和磁盘文件保留）。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Could not remove VM app '%.40s': %.100s"
+msgstr "无法删除虚拟机应用 '%.40s'：%.100s"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Removing VM app '%.40s'..."
+msgstr "正在删除虚拟机应用 '%.40s'…"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "%d MiB, %d vCPU, %s, %s, freeze:%s  (Enter)"
+msgstr "%d MiB，%d vCPU，%s，%s，冻结：%s  （Enter）"
+
+#: progs/settings-vm.inc
+msgid "Requested graceful QMP shutdown for Maintenance Windows VM."
+msgstr "已请求通过 QMP 正常关闭维护用 Windows 虚拟机。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Cannot stop Maintenance Windows VM: %.100s"
+msgstr "无法停止维护用 Windows 虚拟机：%.100s"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Windows 11 ISO download language set to %s."
+msgstr "Windows 11 镜像下载语言已设为 %s。"
+
+#: progs/settings-vm.inc
+msgid "Language tag (e.g. en-US, zh-CN): "
+msgstr "语言标签（如 en-US、zh-CN）："
+
+#: progs/settings-vm.inc
+msgid "Invalid tag: expected e.g. en-US or zh-CN."
+msgstr "标签无效：应为 en-US 或 zh-CN 这类格式。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Windows 11 ISO download is already running (job #%d)."
+msgstr "Windows 11 镜像正在下载（任务 #%d）。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Could not start Windows ISO download: %.120s"
+msgstr "无法开始下载 Windows 镜像：%.120s"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid ""
+"Started Windows 11 ISO download (%s, job #%d). Closing Settings keeps it "
+"running."
+msgstr "已开始下载 Windows 11 镜像（%s，任务 #%d）。关闭设置不会中断下载。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Microsoft download check succeeded for %s."
+msgstr "微软下载服务检查通过（%s）。"
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Microsoft download check failed for %s (exit %d)."
+msgstr "微软下载服务检查失败（%s，退出码 %d）。"
+
 #: progs/settings.c
 msgid "generic PC"
 msgstr "通用 PC"
@@ -12533,10 +13456,6 @@ msgid "Bluetooth devices: bluetui did not finish."
 msgstr "蓝牙设备：bluetui 未正常结束。"
 
 #: progs/settings.c
-msgid "Appearance"
-msgstr "外观"
-
-#: progs/settings.c
 msgid "Connected Devices"
 msgstr "已连接设备"
 
@@ -12553,16 +13472,32 @@ msgid "Power & Battery"
 msgstr "电源与电池"
 
 #: progs/settings.c
-msgid "Apps & Windows"
-msgstr "应用和窗口"
+msgid "Storage"
+msgstr "存储"
+
+#: progs/settings.c
+msgid "Appearance & Apps"
+msgstr "外观与应用"
+
+#: progs/settings.c
+msgid "Compute & VMs"
+msgstr "计算与虚拟机"
 
 #: progs/settings.c
 msgid "Language & Time"
 msgstr "语言和时间"
 
 #: progs/settings.c
+msgid "Users & Sign-in"
+msgstr "用户与登录"
+
+#: progs/settings.c
 msgid "Security & Privacy"
 msgstr "安全和隐私"
+
+#: progs/settings.c
+msgid "Software & Updates"
+msgstr "软件与更新"
 
 #: progs/settings.c
 msgid "Mouse & Touchpad"
@@ -12583,6 +13518,10 @@ msgstr "NVIDIA 独显"
 #: progs/settings.c
 msgid "Paired Devices"
 msgstr "已配对设备"
+
+#: progs/settings.c
+msgid "Debug Cable"
+msgstr "调试线缆"
 
 #: progs/settings.c
 msgid "Power Management"
@@ -12617,12 +13556,32 @@ msgid "Tor"
 msgstr "Tor"
 
 #: progs/settings.c
+msgid "Storage Volumes"
+msgstr "存储卷"
+
+#: progs/settings.c
+msgid "No extra storage volumes configured."
+msgstr "尚未配置额外的存储卷。"
+
+#: progs/settings.c
 msgid "Cloud Drives"
 msgstr "云盘"
 
 #: progs/settings.c
 msgid "Compute Node"
 msgstr "计算节点"
+
+#: progs/settings.c
+msgid "Virtual Machines"
+msgstr "虚拟机"
+
+#: progs/settings.c
+msgid "No virtual machine apps configured."
+msgstr "尚未配置虚拟机应用。"
+
+#: progs/settings.c
+msgid "Windows Installation Media"
+msgstr "Windows 安装介质"
 
 #: progs/settings.c
 msgid "Colors"
@@ -12648,6 +13607,23 @@ msgstr "快捷键"
 #: progs/settings.c
 msgid "Global Search"
 msgstr "全局搜索"
+
+#: progs/settings.c
+msgid "Region & Language"
+msgstr "区域和语言"
+
+#: progs/settings.c
+msgid "Date & Time"
+msgstr "日期和时间"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."
+msgstr "网络经由 Tor：不向 ipinfo.io 查询。Enter：选择时区。"
+
+#: progs/settings.c
+msgid "Users"
+msgstr "用户"
 
 #: progs/settings.c
 msgid "Screen Locking"
@@ -12682,31 +13658,6 @@ msgid "Host Security"
 msgstr "主机安全"
 
 #: progs/settings.c
-msgid "Region & Language"
-msgstr "区域和语言"
-
-#: progs/settings.c
-msgid "Date & Time"
-msgstr "日期和时间"
-
-#. TRANSLATORS: Enter is the Enter key; keep it.
-#: progs/settings.c
-msgid "Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."
-msgstr "网络经由 Tor：不向 ipinfo.io 查询。Enter：选择时区。"
-
-#: progs/settings.c
-msgid "About This System"
-msgstr "关于此系统"
-
-#: progs/settings.c
-msgid "Users"
-msgstr "用户"
-
-#: progs/settings.c
-msgid "Boot"
-msgstr "启动"
-
-#: progs/settings.c
 msgid "Software Update"
 msgstr "软件更新"
 
@@ -12719,16 +13670,12 @@ msgid "Optional Components"
 msgstr "可选组件"
 
 #: progs/settings.c
-msgid "Storage Volumes"
-msgstr "存储卷"
+msgid "About This System"
+msgstr "关于此系统"
 
 #: progs/settings.c
-msgid "No extra storage volumes configured."
-msgstr "尚未配置额外的存储卷。"
-
-#: progs/settings.c
-msgid "Debug Cable"
-msgstr "调试线缆"
+msgid "Boot"
+msgstr "启动"
 
 #: progs/settings.c
 msgid "Hostname (letters, digits, hyphens): "
@@ -13259,10 +14206,6 @@ msgstr "正在桌面上打开维护用 Windows（也可从主页打开）。"
 #, c-format
 msgid "Cannot open Maintenance Windows on the desktop: %.100s"
 msgstr "无法在桌面上打开维护用 Windows：%.100s"
-
-#: progs/settings.c
-msgid "desktop session unavailable"
-msgstr "桌面会话不可用"
 
 #: progs/settings.c
 msgid "Maintenance Windows partition created."
@@ -14044,6 +14987,10 @@ msgid "Windows partition size"
 msgstr "Windows 分区大小"
 
 #: progs/settings.c
+msgid "shrink plan armed (reboot to finish)"
+msgstr "缩容计划已就绪（重启后完成）"
+
+#: progs/settings.c
 #, c-format
 msgid "created, %d GiB"
 msgstr "已创建，%d GiB"
@@ -14071,6 +15018,10 @@ msgstr "Enter：保持 LOCachy 优先"
 #: progs/settings.c
 msgid "Windows virtual machine"
 msgstr "Windows 虚拟机"
+
+#: progs/settings.c
+msgid "RUNNING   (s: QMP stop)"
+msgstr "运行中   （s：通过 QMP 关机）"
 
 #: progs/settings.c
 msgid "Enter: open on the desktop"
@@ -14246,10 +15197,6 @@ msgid "NVIDIA Dynamic Boost (nvidia-powerd)"
 msgstr "NVIDIA Dynamic Boost（nvidia-powerd）"
 
 #: progs/settings.c
-msgid "Compute default storage"
-msgstr "默认计算存储"
-
-#: progs/settings.c
 msgid "mounted"
 msgstr "已挂载"
 
@@ -14343,6 +15290,58 @@ msgstr "尚未生成   （Enter: 生成）"
 #: progs/settings.c
 msgid "sshd host key"
 msgstr "sshd 主机密钥"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "New virtual machine app"
+msgstr "新建虚拟机应用"
+
+#: progs/settings.c
+msgid "Enter: create Windows or Linux VM for Home"
+msgstr "Enter：为 Home 创建 Windows 或 Linux 虚拟机"
+
+#: progs/settings.c
+msgid "Maintenance VM settings"
+msgstr "维护虚拟机设置"
+
+#: progs/settings.c
+#, c-format
+msgid "downloading (%s, job #%d)..."
+msgstr "正在下载（%s，任务 #%d）…"
+
+#: progs/settings.c
+#, c-format
+msgid "READY [%s, %s]   (Enter: re-download %s)"
+msgstr "已就绪 [%s，%s]   （Enter：重新下载 %s）"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "not downloaded   (Enter: download %s)"
+msgstr "未下载   （Enter：下载 %s）"
+
+#: progs/settings.c
+msgid "Windows 11 ISO"
+msgstr "Windows 11 镜像"
+
+#: progs/settings.c
+msgid "Windows 11 ISO language"
+msgstr "Windows 11 镜像语言"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "READY (%s)   (Enter: check Microsoft download)"
+msgstr "已就绪（%s）   （Enter：检查微软下载服务）"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "not installed (Optional Components > winmaint)   (Enter: check)"
+msgstr "未安装（可选组件 > winmaint）   （Enter：检查）"
+
+#: progs/settings.c
+msgid "virtio-win ISO & check"
+msgstr "virtio-win 镜像与检查"
 
 #: progs/settings.c
 msgid "Unlock with a fingerprint"
@@ -15579,6 +16578,31 @@ msgstr "Enter: 管理 sshd 授权公钥（添加或删除公钥）。"
 msgid "Enter, twice: regenerate sshd host key."
 msgstr "连续按两次 Enter：重新生成 sshd 主机密钥。"
 
+#. TRANSLATORS: Enter, e, s and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: open on desktop   e: settings   s: stop   Delete, twice: remove"
+msgstr "Enter：在桌面打开   e：设置   s：停止   连按两次 Delete：删除"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: create a new Windows or Linux VM app for Home."
+msgstr "Enter：为 Home 新建 Windows 或 Linux 虚拟机应用。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: configure Maintenance Windows VM hardware, ISO, and freeze."
+msgstr "Enter：配置维护用 Windows 虚拟机的硬件、ISO 与冻结方式。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: download and verify the Windows 11 ISO in the background."
+msgstr "Enter：在后台下载并核对 Windows 11 镜像。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: test the Microsoft Windows 11 download link without downloading."
+msgstr "Enter：检查微软 Windows 11 下载链接（不下载）。"
+
 #: progs/settings.c
 #, c-format
 msgid "Power profile: %s."
@@ -15728,7 +16752,9 @@ msgstr "已保存至 %s 并生效。"
 msgid ""
 "Choose Auto (by detected GPU), Open DKMS (new, RTX 20+), 580xx DKMS "
 "(legacy / GSP off), or Off; Enter applies."
-msgstr "选择自动（按检测到的显卡）、Open DKMS（新版，RTX 20+）、580xx DKMS（旧版 / 可关 GSP）或关闭；按 Enter 应用。"
+msgstr ""
+"选择自动（按检测到的显卡）、Open DKMS（新版，RTX 20+）、580xx DKMS（旧版 / 可"
+"关 GSP）或关闭；按 Enter 应用。"
 
 #: progs/settings.c
 msgid ""
@@ -15784,6 +16810,21 @@ msgid ""
 "Enter: view and copy generated OpenSSH client config for this compute node."
 msgstr "Enter: 查看并复制该计算节点生成的 OpenSSH 客户端配置。"
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: configure Maintenance Windows VM settings (winmaint.conf)."
+msgstr "Enter：配置维护用 Windows 虚拟机设置（winmaint.conf）。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: download official Windows 11 ISO with SHA-256 verification."
+msgstr "Enter：下载官方 Windows 11 镜像并进行 SHA-256 校验。"
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: check Microsoft Windows 11 download service (no download)."
+msgstr "Enter：检查微软 Windows 11 下载服务（不下载）。"
+
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Installed   Delete, twice: remove it"
@@ -15817,6 +16858,10 @@ msgid ""
 "detach"
 msgstr ""
 "Enter+Left/Right: 角色   m: 挂载/卸载   a: 自动挂载   连按两次 Delete: 解绑"
+
+#: progs/settings.c
+msgid "Enter+Left/Right: cycle language   e: enter custom tag (e.g. zh-CN)"
+msgstr "Enter/左右键：切换语言   e：输入自定义标签（如 zh-CN）"
 
 #. TRANSLATORS: Enter and Left/Right are key names; keep them.
 #: progs/settings.c
@@ -17088,6 +18133,10 @@ msgid "Facing Pages (Center First Page)"
 msgstr "对页（首页居中）"
 
 #: progs/view.c
+msgid "Overview"
+msgstr "概览"
+
+#: progs/view.c
 msgid "Continuous"
 msgstr "连续"
 
@@ -17650,6 +18699,142 @@ msgstr "显示较少详情"
 msgid "Show more details..."
 msgstr "显示更多详情..."
 
+#~ msgid "Apps & Windows"
+#~ msgstr "应用和窗口"
+
+#~ msgid "Compute default storage"
+#~ msgstr "默认计算存储"
+
+#, c-format
+#~ msgid ""
+#~ "Container: %.24s (img=%.24s, GPU:%s, net=%.12s%s%.40s)   [%d imgs, %d "
+#~ "envs, %d/%d jobs]"
+#~ msgstr ""
+#~ "容器：%.24s（镜像=%.24s，GPU:%s，网络=%.12s%s%.40s）  [%d 镜像，%d 容器，"
+#~ "%d/%d 任务]"
+
+#~ msgid "Envs"
+#~ msgstr "环境"
+
+#~ msgid "VMs"
+#~ msgstr "虚拟机"
+
+#~ msgid "No compute micro-VMs created yet (locachy-compute vm create)."
+#~ msgstr "尚未创建计算微虚拟机（locachy-compute vm create）。"
+
+#~ msgid "Nothing here yet."
+#~ msgstr "暂无内容。"
+
+#, c-format
+#~ msgid "[ > Open container shell: %.32s ]"
+#~ msgstr "[ > 进入容器终端：%.32s ]"
+
+#, c-format
+#~ msgid ""
+#~ "[ * Configure container settings: %.32s (GPU, net, volumes, limits) ]"
+#~ msgstr "[ * 配置容器设置：%.32s（GPU、网络、存储卷、资源限额） ]"
+
+#, c-format
+#~ msgid "[ ? Test GPU inside container (nvidia-smi): %.32s ]"
+#~ msgstr "[ ? 容器内 GPU 测试（nvidia-smi）：%.32s ]"
+
+#, c-format
+#~ msgid "[ ! Reset container OS layer: %.32s (keeps data volumes) ]"
+#~ msgstr "[ ! 重置容器系统层：%.32s（保留数据卷） ]"
+
+#~ msgid "[ + Download / import base rootfs image (Ubuntu / Arch / Alpine) ]"
+#~ msgstr "[ + 下载 / 导入基础 rootfs 镜像（Ubuntu / Arch / Alpine） ]"
+
+#, c-format
+#~ msgid "[ Unmount compute storage volume '%.32s' ]"
+#~ msgstr "[ 卸载计算存储卷 '%.32s' ]"
+
+#, c-format
+#~ msgid "[ Mount compute storage volume '%.32s' ]"
+#~ msgstr "[ 挂载计算存储卷 '%.32s' ]"
+
+#~ msgid "[ Pair remote client / manage paired devices ]"
+#~ msgstr "[ 配对远程客户端 / 管理已配对设备 ]"
+
+#~ msgid "[ + Create compute container (configure GPU, net, volumes, limits) ]"
+#~ msgstr "[ + 创建计算容器（配置 GPU、网络、存储卷与限额） ]"
+
+#~ msgid "[ + Pair remote client (mTLS token) ]"
+#~ msgstr "[ + 配对远程客户端（mTLS 令牌） ]"
+
+#~ msgid "[ Manage paired devices (locachy-pair) ]"
+#~ msgstr "[ 管理已配对设备（locachy-pair） ]"
+
+#~ msgid ""
+#~ "1-5/Tab: tabs   Enter/d: download/import   Delete: remove   r: refresh   "
+#~ "Esc: back"
+#~ msgstr ""
+#~ "1-5/Tab：切换标签   Enter/d：下载/导入   Delete：删除   r：刷新   Esc：返"
+#~ "回"
+
+#~ msgid ""
+#~ "1-5/Tab: tabs   Enter: run action   m: mount storage   c: SSH config   r: "
+#~ "refresh   Esc: back"
+#~ msgstr ""
+#~ "1-5/Tab: 切换标签   Enter: 执行操作   m: 挂载存储   c: SSH 配置   r: 刷"
+#~ "新   Esc: 返回"
+
+#, c-format
+#~ msgid "Press Enter again to wipe OS layer and reset container '%.40s'."
+#~ msgstr "再次按 Enter 清空系统层并重置容器 '%.40s'。"
+
+#, c-format
+#~ msgid "Press x again to wipe upperdir and reset env '%.40s'."
+#~ msgstr "再次按 x 清空 upperdir 并重置环境 '%.40s'。"
+
+#, c-format
+#~ msgid "Reset environment '%.40s'."
+#~ msgstr "已重置环境 '%.40s'。"
+
+#, c-format
+#~ msgid "Press Delete again to remove env '%.40s'."
+#~ msgstr "再次按 Delete 删除环境 '%.40s'。"
+
+#, c-format
+#~ msgid "Removed environment '%.40s'."
+#~ msgstr "已删除环境 '%.40s'。"
+
+#, c-format
+#~ msgid "Stop job failed: %.120s"
+#~ msgstr "停止任务失败：%.120s"
+
+#, c-format
+#~ msgid "Press x again to reset CoW disk of VM '%.40s'."
+#~ msgstr "再次按 x 重置虚拟机 '%.40s' 的 CoW 磁盘。"
+
+#, c-format
+#~ msgid "Press Delete again to remove image '%.40s'."
+#~ msgstr "再次按 Delete 删除镜像 '%.40s'。"
+
+#, c-format
+#~ msgid "Removed image '%.40s'."
+#~ msgstr "已删除镜像 '%.40s'。"
+
+#~ msgid "Import a base rootfs image first (Images tab or Overview)."
+#~ msgstr "请先导入基础 rootfs 镜像（镜像页或概览页）。"
+
+#~ msgid "Environment name (e.g. train-1): "
+#~ msgstr "环境名称（例如 train-1）："
+
+#~ msgid "Environment creation cancelled."
+#~ msgstr "已取消创建环境。"
+
+#~ msgid "Invalid environment name: letters, digits, . _ - only."
+#~ msgstr "环境名称无效：仅允许字母、数字及 . _ -。"
+
+#, c-format
+#~ msgid "Created environment %.40s from %.40s."
+#~ msgstr "已创建环境 %.40s（基于 %.40s）。"
+
+#, c-format
+#~ msgid "Reset VM failed: %.120s"
+#~ msgstr "重置虚拟机失败：%.120s"
+
 #~ msgid "SSH over Tailscale"
 #~ msgstr "通过 Tailscale 使用 SSH"
 
@@ -17679,9 +18864,6 @@ msgstr "显示更多详情..."
 
 #~ msgid "The cable link went down."
 #~ msgstr "线缆链路已断开。"
-
-#~ msgid "Windows virtual machine closed."
-#~ msgstr "Windows 虚拟机已关闭。"
 
 #~ msgid "Windows virtual machine did not finish."
 #~ msgstr "Windows 虚拟机未能正常结束。"

@@ -19,7 +19,7 @@ not required for NVIDIA experiments.
    operators/devices `tcp:22` to the node and check that no broader existing rule
    allows it. Keep Tailscale SSH disabled on the node: this is ordinary OpenSSH,
    and a Tailscale `ssh` rule does not enroll an OpenSSH user key.
-2. In Settings (**Network → SSH Server (sshd)**), choose **Tailscale only**
+2. In Settings (**Networking → SSH Server (sshd)**), choose **Tailscale only**
    (or **LAN & Tailscale** when LAN access is wanted). The opt-in
    `service_tailnet_ssh` runs OpenSSH inside `locachy-net` in its own cgroup
    (`locachy-tailnet-ssh`), following the addresses of `tailscale0` (and, in
@@ -35,7 +35,7 @@ not required for NVIDIA experiments.
    and user environments stay disabled, and internal SFTP (also used by current
    `scp`) is enabled.
 3. Enroll operator **public** keys for the local account either in Settings
-   (**Network → SSH Server (sshd) → sshd AuthorizedKeys**) or on the node
+   (**Networking → SSH Server (sshd) → sshd AuthorizedKeys**) or on the node
    console as an administrator (replace `USER` and the source filename):
 
    ```sh
@@ -87,15 +87,15 @@ In the examples, `locachy-gpu` is a client SSH config alias for the normal user
 and the node's tailnet IP or MagicDNS name. `service_compute`, `locachy-pair`,
 and a Thunderbolt cable are not needed for this workflow.
 
-### Settings TUI (`Network → Compute Node`)
+### Settings TUI (`Compute & VMs → Compute Node`)
 
-Settings exposes six rows under **Network → Compute Node**, backed by `locachy-compute status --tsv` (which never fails even when `compute_storage` is currently unmounted):
+Settings exposes six rows under **Compute & VMs → Compute Node**, backed by `locachy-compute status --tsv` (which never fails even when `compute_storage` is currently unmounted):
 
 1. **Compute HTTPS API (optional)** — toggles `service_compute`, showing live port and daemon state (`running` / `starting`).
 2. **Compute API over Thunderbolt** — toggles `compute_bind_tb` and runs `tb-sync`.
 3. **Compute GPU passthrough** — toggles `compute_gpu`, showing the detected host NVIDIA driver version and GPU device count.
 4. **Compute storage volume** — cycles the configured `compute_storage` volume (`Left`/`Right`) and shows `[MOUNTED]` free space or `[UNMOUNTED]`; press `m` to mount or unmount the selected volume directly.
-5. **Compute Node Manager** — opens an interactive 5-tab TUI (`1:Overview`, `2:Envs`, `3:Jobs`, `4:VMs`, `5:Images`) with a top live status region (API, storage mount/free space, GPU/CUDA state, inventory counts), storage mount/unmount, image import/remove, environment create/shell/reset/remove, job log viewer & stop, micro-VM start/shell/stop/reset/remove, and mTLS client pairing.
+5. **Compute Node Manager** — opens a single sectioned page (no tabs: **Default working container**, **Containers**, **Images**, **Micro-VMs**, **Jobs**, **Storage and access**) with a top live status region (API, storage mount/free space, GPU/CUDA state, default container and inventory). The default working container (`compute_default_env`) sits at the top: `Left`/`Right` on that row switches it when more than one container exists, and `p` on a container in **Containers** makes it the default. Its row opens a shell (`Enter`), the Container Settings form (`e`), a `nvidia-smi` GPU test (`t`), and a reset (`x`, pressed twice; discards the container's writable changes and keeps its image and volumes). The page also includes a built-in native base rootfs downloader/importer (`Ubuntu 24.04/22.04`, `Arch Linux`, `Alpine`, custom HTTPS URL, or local archive, with SHA-256 verification), the Container Settings form for creating or editing containers (`GPU`, `locachy-net`/`none`, memory/CPU limits, workdir, storage volume toggles, extra host mounts), micro-VM creation, start, shell, stop, reset, remove, and export to Home (`a`), job log viewer and stop, storage mount/unmount, the client SSH config viewer, and client pairing (`locachy-pair`).
 6. **Client SSH config** — opens a scrollable viewer for `locachy-compute ssh-config` (with a base host stanza fallback when `compute_storage` is unmounted) and copies it to the clipboard with `c`.
 
 ### Prepare storage, run, and retrieve
@@ -386,6 +386,7 @@ LOCachy workflows over real Tailscale and Thunderbolt remain unverified.
 | `compute_bind_tb="1"` | Also listen on Thunderbolt link-local addresses. |
 | `compute_gpu="0"` | Never pass GPUs to containers. |
 | `compute_storage="NAME"` | Store compute images/envs/jobs/VMs on `/srv/storage/NAME/locachy-compute` (requires `compute` or `shared` role; fails closed if unmounted). |
+| `compute_default_env="NAME"` | Default working container featured at the top of `Settings → Compute & VMs → Compute Node → Compute Node Manager` (unset: first container). |
 | `extdisplay_tb_shared="1"` or `"0"` | Shared link (default when compute binds Thunderbolt) or private session namespace. |
 | `extdisplay_paired_only="1"` | Accept only paired devices; no cleartext code is advertised or accepted. |
 

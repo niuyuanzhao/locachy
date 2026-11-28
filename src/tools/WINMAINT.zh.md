@@ -88,7 +88,7 @@
 - "模式已设置"在两侧的判断标准一致：该条目在固件启动顺序中排在 `LOCachy` 之前。模式记录期间，LOCachy 自己的开机检查 `boot-guard` 与 `heal-boot` 调用 `locachy-efi --ensure-first --keep-windows-first`，保持这一顺序。若该条目已不在 `LOCachy` 之前，则照常把 `LOCachy` 放到首位，并以 3 退出；`locachy-winmaint` 随后删除该条目、清除模式。模式设置期间 `boot-once` 不做任何操作，因为 Windows 本来就会先启动。
 - `locachy-winmaint boot-default locachy` 从 LOCachy 切回：先执行不带保持参数的 `--ensure-first`（LOCachy 回到首位，维护分区条目移出 `BootOrder`），再删除 `(default)` 条目（`--remove-entry --label "LOCachy Maintenance Windows (default)"`），最后清除模式。`reclaim` 会与该分区上的其他条目一并删除它。
 - **Windows 侧。** `locachy-win-shutdown.ps1` 与 `locachy-return.ps1` 按分块结构与不变值解析 `bcdedit /enum firmware /v` 的输出，不依赖随语言变化的字段名（如英文的 `identifier` / `displayorder` / `description` 或中文的 `标识符` / `显示顺序` / `描述`）：以空行或 `---` 分隔线划分区块；区块内第一条以 `{GUID}` 结尾的行即为该条目的编号，`{fwbootmgr}` 同时按短名和完整 GUID `{a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}` 识别；`{fwbootmgr}` 区块内紧跟在编号之后的首个键值行及其后缩进的 `{GUID}` 续行即为 `displayorder`；其余区块则通过右栏值与 `locachy-efi` 写入 NVRAM、不会被 Windows 翻译的三条精确 ASCII 描述（`LOCachy`、`LOCachy Maintenance Windows`、`LOCachy Maintenance Windows (default)`）逐字比对来识别条目。若描述为 `LOCachy Maintenance Windows (default)` 的条目在这一显示顺序中排在 `LOCachy` 之前，开机任务就不改动启动顺序，只执行存储步骤。全部用户桌面上的 **Return to LOCachy** 快捷方式运行 `locachy-return.ps1`：它自行提权（UAC），找到描述为 `LOCachy` 的条目，执行 `bcdedit /set {fwbootmgr} displayorder <编号> /addfirst`，把 `(default)` 条目移出显示顺序（`bcdedit /set {fwbootmgr} displayorder <编号> /remove`），立即运行一次守卫脚本让守卫重新生效，然后询问是否立即重启（`shutdown.exe /r /t 0`）。微软文档记载了这种写法：[BCD System Store Settings for UEFI](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/bcd-system-store-settings-for-uefi) 中的 `Bcdedit /set {fwbootmgr} displayorder {bootmgr} /addfirst`，以及 [BCDEdit Command-Line Options](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/bcdedit-command-line-options) 中对 `/displayorder` 的说明。`/remove` 的写法是守卫脚本原本就在用的，上述微软页面并未记载。下次 LOCachy 启动时，`boot-guard` 会发现已经解除，并清除模式。快捷方式与新脚本由种子盘的首次登录脚本写入，因此改动之前安装的 Windows 不会获得它们。
-- **设置 → 系统 → 维护 Windows**，位于 "Boot Windows once" 之后，行名为 `Start in Windows by default (until switched back)`：显示当前模式（`[OFF] LOCachy starts first`、`[ON] Windows from the next restart`、`[ON] Windows starts first`，或"LOCachy 被固件启动菜单选中"）。模式关闭时连按两次回车打开，再按一次回车即切回。`Reboot into Windows now` 连按两次回车即设置模式并重启。两者都通过系统任务 `winmaint-boot-default` 执行（参数为 `windows`、`windows --reboot` 或 `locachy`），与 `winmaint-boot-once` 的走法相同。
+- **设置 → 计算与虚拟机 → 维护用 Windows**，位于 "Boot Windows once" 之后，行名为 `Start in Windows by default (until switched back)`：显示当前模式（`[OFF] LOCachy starts first`、`[ON] Windows from the next restart`、`[ON] Windows starts first`，或"LOCachy 被固件启动菜单选中"）。模式关闭时连按两次回车打开，再按一次回车即切回。`Reboot into Windows now` 连按两次回车即设置模式并重启。两者都通过系统任务 `winmaint-boot-default` 执行（参数为 `windows`、`windows --reboot` 或 `locachy`），与 `winmaint-boot-once` 的走法相同。
 
 ## 安全启动与 TPM 兼容性
 
@@ -100,7 +100,8 @@
 
 设置界面的分区行与不带 `--size-gib` 的 `create` 使用的 `rc.conf` 配置键：
 
-- `winmaint_size_gib="48"` — 尾部 Windows 分区的首选容量（40–4096 GiB）。Windows 虚拟机的内存（`vm --memory`，4096 MiB）与虚拟核心数（`vm --cpus`，4）只能通过命令行参数指定，设置界面暂无对应行。
+- `winmaint_size_gib="48"` — 尾部 Windows 分区的首选容量（40–4096 GiB）。
+- **设置 → 计算与虚拟机 → 维护用 Windows → 维护虚拟机设置** 可直接编辑 `/etc/locachy/containers/winmaint.conf`（`vm_memory`、`vm_cpus`、`vm_disk_bus`、`vm_nic`、`network`、`vm_freeze`、`vm_display`、`vm_iso`、`vm_virtio_iso`）。维护虚拟机运行持有互斥锁时，`Windows 虚拟机` 一行会显示运行中，按 `s` 可发起 QMP 安全关机。
 
 ## 验证状态（请先阅读）
 

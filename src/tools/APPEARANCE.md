@@ -1,6 +1,6 @@
 # Appearance settings
 
-In **Settings → Appearance → Colors**, choose **LOCachy Dark** or **LOCachy Light** and, separately, an **Accent color**. **Scheme default** follows the current scheme. A preset or custom `#RRGGBB` stays selected when the scheme changes. Wallpaper is independent of both.
+In **Settings → Appearance & Apps → Colors**, choose **LOCachy Dark** or **LOCachy Light** and, separately, an **Accent color**. **Scheme default** follows the current scheme. A preset or custom `#RRGGBB` stays selected when the scheme changes. Wallpaper is independent of both.
 
 The system stores the choices in `/etc/locachy/rc.conf`:
 

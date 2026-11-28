@@ -309,7 +309,7 @@ makes Windows start first on every restart until it is switched back:
   `boot-guard` sees the release and clears the mode. The shortcut and the new
   scripts are written by the seed's first-logon script, so a Windows installed
   before this change does not get them.
-- **Settings → System → Maintenance Windows**, after "Boot Windows once":
+- **Settings → Compute & VMs → Maintenance Windows**, after "Boot Windows once":
   "Start in Windows by default (until switched back)" shows the mode
   (`[OFF] LOCachy starts first`, `[ON] Windows from the next restart`,
   `[ON] Windows starts first`, or that LOCachy was picked in the firmware menu).
@@ -335,8 +335,12 @@ The `rc.conf` key for the Settings row, and the default of `create` without
 `--size-gib`:
 
 - `winmaint_size_gib="48"` — preferred size (40–4096 GiB) of the tail Windows
-  partition. The Windows VM's RAM (`vm --memory`, 4096 MiB) and vCPUs
-  (`vm --cpus`, 4) are command-line options only; Settings has no row for them.
+  partition.
+- **Settings → Compute & VMs → Maintenance Windows → Maintenance VM settings** edits
+  `/etc/locachy/containers/winmaint.conf` (`vm_memory`, `vm_cpus`, `vm_disk_bus`,
+  `vm_nic`, `network`, `vm_freeze`, `vm_display`, `vm_iso`, `vm_virtio_iso`).
+  While the Maintenance Windows VM holds its lock, the `Windows virtual machine`
+  row reports `RUNNING` and accepts `s` for a clean QMP shutdown.
 
 ## Verification status (read first)
 

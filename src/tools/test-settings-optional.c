@@ -1,4 +1,4 @@
-/* Settings' optional components (Settings > System), run by
+/* Settings' optional components (Settings > Software & Updates), run by
  * test-interaction-regressions.sh. A component that names a program or a
  * service in rc.conf is installed only when those lines are there as well as
  * its packages: FFmpeg present for something else is not the extended display

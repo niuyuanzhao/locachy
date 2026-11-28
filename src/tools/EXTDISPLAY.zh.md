@@ -18,11 +18,11 @@
 
 ## 安装与硬件加速
 
-在 LOCachy 的 **设置 → 系统 → 可选组件** 中启用 **扩展屏 (extdisplay)**（依赖 FFmpeg、json-c、Avahi 与 OpenSSL）。
+在 LOCachy 的 **设置 → 软件与更新 → 可选组件** 中启用 **扩展屏 (extdisplay)**（依赖 FFmpeg、json-c、Avahi 与 OpenSSL）。
 
 - 在 Linux 上，`extdisplay-worker` 会在进入 Landlock + seccomp 沙箱前，通过预打开的 `/dev/dri/renderD*` 描述符向 `libva` 查询真实硬件 VLD 解码能力并初始化 `libgbm`；解码帧经 `VA-API VPP` 写入 `libgbm` 分配的扫描输出缓冲（`GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR`，以 `DRM_PRIME_2` 导入；导入被拒时回退至 VA 自管表面，该 `libgbm` 路径已在 Intel xe 上实测），并通过非阻塞 `DRM_IOCTL_MODE_PAGE_FLIP` 零拷贝直出（驱动拒绝翻页时记录日志并回退至 `SETCRTC`）。`hello.videoCaps` 精确声明硬件支持的档案（`h264`、具备 `VAProfileHEVCMain` VLD 时报 `hevc420`、仅当真正具备 `VAProfileHEVCMain444` VLD 时才报 `hevc444` 与旧字段 `hevc`），避免没有 4:4:4 硬解的显卡误入慢速 4:4:4 软件解码。运行在 `nouveau`、`nvidia-drm`、`simpledrm` 或无 VA-API 的虚拟机时，自动回退至沙箱 CPU 解码、FFmpeg `libswscale`（`SWS_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND`）、`MADV_HUGEPAGE` 只读 `memfd` 传递与双缓冲 `DRM_IOCTL_MODE_PAGE_FLIP` 扫描输出。
 - 在系统安装、组件安装及同步更新期间，`locachy-pkg` 会自动扫描 `/sys/class/drm` 与 PCI 显示设备，为本机硬件自动补全匹配的 Vulkan 与 VA-API 驱动（Intel Gen8+ 自动安装 `intel-media-driver`，Gen4–7.5 安装 `libva-intel-driver`，AMD/Nouveau 安装 `mesa`，专有 NVIDIA 安装 `libva-nvidia-driver`，并在双显卡 Optimus / MX 笔记本上按实际驱动各自匹配）。
-- 可在 **设置 → 输入与输出 → Extended display video**（`rc.conf` 的 `extdisplay_decode`：`"auto"` / `"hw"` / `"sw"`）中切换：自动选择硬件支持的最高编解码、优先硬件解码，或仅使用纯 CPU 沙箱解码。
+- 可在 **设置 → 输入和输出 → Extended display video**（`rc.conf` 的 `extdisplay_decode`：`"auto"` / `"hw"` / `"sw"`）中切换：自动选择硬件支持的最高编解码、优先硬件解码，或仅使用纯 CPU 沙箱解码。
 
 在 macOS 上通过 `niuyuanzhao/locachy` Homebrew tap 安装并启动后台发送端服务：
 

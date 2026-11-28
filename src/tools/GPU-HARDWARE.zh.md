@@ -4,7 +4,7 @@ LOCachy 将独立 NVIDIA GPU 的底层硬件能力直接并入系统的原生分
 
 ## 显示路由与独显开关
 
-**设置 → 输入与输出 → NVIDIA GPU** 下有三项独立控制：
+**设置 → 输入和输出 → NVIDIA GPU** 下有三项独立控制：
 
 - **混合显卡策略**对应 `gpu_graphics_policy="auto"`（默认）或 `"off"`。能确认是内置 NVIDIA 混合显卡、且内屏接在核显上时，原生界面优先使用内屏所在的卡，labwc 优先用核显渲染，同时保留两张卡的输出。不能确认拓扑、手动指定显示卡或关闭策略时，保留原有选择。此项不装驱动，不强制应用使用 NVIDIA，不改固件，也不影响 CUDA。下次启动图形界面时生效。
 - **固件显示路由**在内核 `asus-armoury` 驱动确实暴露 MUX 控制时，可选混合或 NVIDIA 独显直连。等待重启时显示的是固件里已设定的值，不是当前生效的路由；系统不会自动重启。
@@ -33,7 +33,7 @@ LOCachy 统一通过 **DKMS** 管理 NVIDIA 驱动（不使用绑定特定内核
 
 若机器同时存在多张 NVIDIA GPU，`locachy-nvidia` 会求各卡受支持分支的交集：全部卡都支持 `open` 与 `580xx` 时沿用单卡规则；仅有一个分支同时覆盖全部卡时推荐该分支；若出现一卡仅支持 `open`、另一卡仅支持 `580xx`（或含不受支持的旧卡）的冲突，`status` 会明确报告冲突且 `set auto` 会拒绝安装。
 
-「设置」在 **输入与输出 → NVIDIA GPU** 顶部提供两行控制：
+「设置」在 **输入和输出 → NVIDIA GPU** 顶部提供两行控制：
 
 - **NVIDIA driver (DKMS)**（`nvidia_driver="auto"|"open"|"580xx"|"off"`）：选择器行（`Enter` 进入 → `Left`/`Right` 切换 → 再次 `Enter` 通过 `gpu-driver-set` 应用），并展示 `locachy-nvidia status --tsv` 返回的 GPU 架构与推荐分支。
 - **NVIDIA GSP firmware**（`nvidia_gsp="auto"|"off"|"on"`）：作用于 `580xx`（通过 `gpu-driver-gsp`）。`auto` 在 `gpu_unlock_targets` 启用时自动写入 `options nvidia NVreg_EnableGpuFirmware=0`；`off` 强制关闭；`on` 强制开启。`open` 分支始终使用 GSP-RM，`locachy-nvidia` 因此保持 GSP 开启；若同时启用 `gpu-unlock`，`status` 会给出提示（GSP-RM 不会阻止 `gpu-unlock`；595 分支的回归由 `NVreg_GpuInitOnProbe` 默认值为 0 引起，615 及以上分支已恢复为探测时初始化。若在受影响的 595 版本或 GSP 不稳定的机器上出现问题，可设置 `NVreg_GpuInitOnProbe=1` 或手动切换到 `580xx`，见 `Zagitta/gpu-unlock` #135）。

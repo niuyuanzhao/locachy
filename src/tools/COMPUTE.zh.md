@@ -44,15 +44,15 @@
 
 以下示例中的 `locachy-gpu` 是客户端 SSH 配置中的别名，指向节点的 tailnet IP 或 MagicDNS 名称，并使用普通用户。这个工作流不需要 `service_compute`、`locachy-pair` 或 Thunderbolt 线缆。
 
-### 设置界面入口（**网络 → 计算节点**）
+### 设置界面入口（**计算与虚拟机 → 计算节点**）
 
-「设置」在 **网络 → 计算节点** 下提供 6 行直接管理入口，由 `locachy-compute status --tsv` 驱动（即使 `compute_storage` 当前未挂载也不会失败）：
+「设置」在 **计算与虚拟机 → 计算节点** 下提供 6 行直接管理入口，由 `locachy-compute status --tsv` 驱动（即使 `compute_storage` 当前未挂载也不会失败）：
 
 1. **Compute HTTPS API (optional)**：开关 `service_compute`，并实时显示端口与守护进程状态（`running` / `starting`）。
 2. **Compute API over Thunderbolt**：开关 `compute_bind_tb` 并同步雷电放行规则（`tb-sync`）。
 3. **Compute GPU passthrough**：开关 `compute_gpu`，并显示检测到的宿主机 NVIDIA 驱动版本与 GPU 设备数。
 4. **Compute storage volume**：按 `Left`/`Right` 切换 `compute_storage` 存储卷，直接显示 `[MOUNTED]` 剩余空间或 `[UNMOUNTED]` 状态；按 `m` 可直接挂载或卸载当前卷。
-5. **Compute Node Manager**：按 `Enter` 打开 5 标签页交互式管理界面（`1:Overview`、`2:Envs`、`3:Jobs`、`4:VMs`、`5:Images`），顶部独立状态区展示 API、存储挂载与空间、GPU/CUDA 状态和资源计数，支持挂载/卸载存储卷、导入/删除基础镜像、创建/进入 shell/重置/删除环境、查看作业日志与停止作业、启停/进入/重置/删除微型虚拟机，以及配对 mTLS 客户端。
+5. **计算节点管理（Compute Node Manager）**：按 `Enter` 打开单页分组管理界面（无标签页，依次为**默认工作容器**、**容器**、**镜像**、**微型虚拟机**、**任务**、**存储与访问**），顶部独立状态区展示 API、存储挂载与空间、GPU/CUDA 状态、默认容器与资源计数。默认工作容器（`compute_default_env`）置顶：该行按 `Left`/`Right` 可在多个容器间切换（多于一个容器时），**容器**列表中按 `p` 可将某容器设为默认；该行可进入终端（`Enter`）、打开容器配置表单（`e`）、运行容器内 `nvidia-smi` GPU 测试（`t`），并可重置（连按两次 `x`，丢弃容器的可写改动，保留镜像与存储卷）。页面还包括内置原生基础镜像下载与导入界面（Ubuntu 24.04/22.04、Arch Linux、Alpine 官方源带 SHA-256 校验，或自定义 HTTPS 链接与本地归档）、完整的容器配置表单（创建与在线修改 GPU、联网 `locachy-net`/`none`、内存/CPU 限额、工作目录、存储卷勾选与宿主目录挂载）、微型虚拟机创建、启动、进入、停止、重置、删除与导出到主屏幕（`a`）、任务日志查看与停止、存储卷挂载/卸载、客户端 SSH 配置查看，以及客户端配对（`locachy-pair`）。
 6. **Client SSH config**：按 `Enter` 打开可滚动的 `locachy-compute ssh-config` 预览（即使存储卷未挂载也会给出基础主机配置段），按 `c` 一键复制到剪贴板。
 
 ### 准备存储、运行并取回结果
@@ -316,6 +316,7 @@ LOCachy 通过真实 Tailscale 和 Thunderbolt 的完整工作流仍未验收。
 | `compute_bind_tb="1"` | 同时监听雷电链路本地地址。 |
 | `compute_gpu="0"` | 从不把 GPU 交给容器。 |
 | `compute_storage="卷名"` | 将计算镜像、环境、作业与虚拟机存放在 `/srv/storage/卷名/locachy-compute`（要求卷角色为 `compute` 或 `shared`，未挂载时报错中止）。 |
+| `compute_default_env="容器名"` | 在 `设置 → 计算与虚拟机 → 计算节点 → 计算节点管理` 顶部作为默认工作容器显示与直接进入的容器（未设置时默认取第一个容器）。 |
 | `extdisplay_tb_shared="1"` 或 `"0"` | 共享链路（计算绑定雷电时的默认值），或专用会话命名空间。 |
 | `extdisplay_paired_only="1"` | 只接受已配对设备；不广播也不接受明文配对码。 |
 

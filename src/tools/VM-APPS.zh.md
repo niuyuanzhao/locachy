@@ -4,7 +4,7 @@
 
 虚拟机应用指在 `/etc/locachy/containers/NAME.conf` 中声明 `vm="1"` 的 KVM 虚拟机。Home 会将它与容器一并列出，由 `locachy-app` 在共享的 `labwc` Wayland 合成器和独立的 `/sys/fs/cgroup/app_NAME` cgroup 中统一管理其启动、恢复、冻结、停止和移除。
 
-虚拟机应用没有 OverlayFS 层，也没有容器软件包构建流程。`locachy-app build`、`install` 和 `rollback` 会直接拒绝它；`locachy-pkg` 在规划容器更新时会跳过它；`packages` 界面也不会列出它。
+虚拟机应用没有 OverlayFS 层，也没有容器软件包构建流程。`locachy-app build`、`install` 和 `rollback` 会直接拒绝它；`locachy-pkg` 在规划容器更新时会跳过它；`packages` 界面也不会列出它。在 **设置 → 计算与虚拟机 → 虚拟机** 中可直接列出并管理非 `winmaint` 虚拟机应用（回车在桌面启动、`e` 打开设置表单、`s` 关机、连按两次 Delete 提交 `app-remove`），也可通过 **新建虚拟机应用** 在 `/var/lib/locachy/vm-disks/` 创建空白 qcow2 磁盘或挂载已有 `vm_base`/`vm_disk` 镜像。
 
 ## 配置键
 

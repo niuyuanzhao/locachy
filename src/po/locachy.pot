@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LOCachy\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-27 18:54+0800\n"
+"POT-Creation-Date: 2026-11-28 10:00+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -385,7 +385,7 @@ msgstr ""
 msgid "BT: %s"
 msgstr ""
 
-#: base/status.c
+#: base/status.c progs/settings-compute.inc
 msgid "enabled"
 msgstr ""
 
@@ -883,7 +883,7 @@ msgstr ""
 msgid "Compression level:"
 msgstr ""
 
-#: progs/archive.c progs/packages.c
+#: progs/archive.c progs/packages.c progs/settings-vm.inc
 msgid "(none)"
 msgstr ""
 
@@ -1297,7 +1297,7 @@ msgstr ""
 msgid "Up/Down: select   Enter: open   F: full screen   Esc: close"
 msgstr ""
 
-#: progs/bar.c progs/home.c progs/packages.c
+#: progs/bar.c progs/home.c progs/packages.c progs/settings-compute.inc
 msgid "Containers"
 msgstr ""
 
@@ -5318,8 +5318,8 @@ msgstr ""
 msgid "w makes an image the wallpaper; %s is not one."
 msgstr ""
 
-#: progs/files.c progs/installer.c progs/packages.c progs/settings-power.inc
-#: progs/settings-theme.inc progs/settings.c
+#: progs/files.c progs/installer.c progs/packages.c progs/settings-compute.inc
+#: progs/settings-power.inc progs/settings-theme.inc progs/settings.c
 #, c-format
 msgid "Cannot write %s."
 msgstr ""
@@ -6346,7 +6346,8 @@ msgstr ""
 msgid "auto (follow system)"
 msgstr ""
 
-#: progs/installer.c progs/packages.c progs/settings.c
+#: progs/installer.c progs/packages.c progs/settings-compute.inc
+#: progs/settings.c
 msgid "none"
 msgstr ""
 
@@ -8139,7 +8140,7 @@ msgstr ""
 msgid "%s follows its new preset: %s"
 msgstr ""
 
-#: progs/packages.c progs/settings-compute.inc
+#: progs/packages.c progs/settings-compute.inc progs/settings.c
 msgid "stopped"
 msgstr ""
 
@@ -9574,7 +9575,7 @@ msgstr ""
 msgid "Clipboard service is not running."
 msgstr ""
 
-#: progs/settings-compute.inc progs/settings.c
+#: progs/settings-compute.inc progs/settings-vm.inc progs/settings.c
 #, c-format
 msgid "%s is not installed."
 msgstr ""
@@ -9592,11 +9593,63 @@ msgid "Closed client SSH config."
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "Image name (e.g. pytorch-cu12): "
+#, c-format
+msgid "GPU test (nvidia-smi) succeeded in '%.40s'."
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "Image import cancelled."
+#, c-format
+msgid "GPU test failed in '%.40s' (check driver & GPU passthrough)."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Download / Import Base Rootfs Image"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"Native Linux base rootfs (no Docker daemon; downloads over HTTPS + SHA-256 "
+"check)."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Target storage: %s   (imported images: %d)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "root disk (/var/lib/locachy/compute)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"Warning: compute storage volume is UNMOUNTED — mount it before downloading."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"Pick an official distribution preset below, or import a custom URL / local "
+"archive."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ Download from custom HTTPS URL (.tar.gz / .tar.xz / .tar.zst)... ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ Import from local tarball or directory path... ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Up/Down: choose   Enter: download / import   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Save image as (Enter for default): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Download cancelled."
 msgstr ""
 
 #: progs/settings-compute.inc
@@ -9604,7 +9657,46 @@ msgid "Invalid image name: letters, digits, . _ - only."
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "Source rootfs path (directory or .tar/.tar.zst): "
+#, c-format
+msgid "Downloaded and verified image '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Image download failed for '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Image name (e.g. debian-12): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "HTTPS rootfs tarball URL (https://...): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "URL must start with https://."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Expected SHA-256 (optional, Enter to skip): "
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Downloaded image '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Image name (e.g. ubuntu-custom): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Import cancelled."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Local rootfs path (directory or .tar/.tar.gz/.tar.zst): "
 msgstr ""
 
 #: progs/settings-compute.inc
@@ -9613,50 +9705,229 @@ msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Image import failed for %.40s."
+msgid "Imported image '%.40s'."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Imported image %.40s."
+msgid "Image import failed for '%.40s'."
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "Import a base rootfs image first (Images tab or Overview)."
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "Environment name (e.g. train-1): "
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "Environment creation cancelled."
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "Invalid environment name: letters, digits, . _ - only."
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "Base image name: "
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "Invalid image name."
+msgid "Download or import a base image first."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Created environment %.40s from %.40s."
+msgid "Container Settings: %.40s"
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Create env failed: %.120s"
+msgid "New Compute Container"
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "check storage and image name"
+#, c-format
+msgid "Host GPU: %s   NVIDIA: %s   (devs=%d, libs=%d)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "disabled"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"Editing container settings keeps all installed packages and files in its OS "
+"layer intact."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"Configure one container below: pick image, GPU, network, and mounted storage "
+"volumes, then Save."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"Tip: Left/Right toggles options, Enter edits or runs action, d downloads "
+"another image."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Name:               %.64s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Name:               %.64s  (fixed)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Base rootfs image:  %.64s  (fixed)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Base rootfs image:  < %.48s >  (%d available, d: download)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "GPU passthrough:    < %s >"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "OFF (CPU only)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "ON (NVIDIA devices + libs + nvidia-smi)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Network access:     < %s >"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "locachy-net (Internet & Tailscale)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "none (offline / isolated)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Memory limit:       < %s >"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "unlimited"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "CPU limit:          < %s >"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Working directory:  %.100s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage volume:     [%c] %-18.18s -> /volumes/%-18.18s (%s, %s)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "MOUNTED"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "UNMOUNTED - m: mount"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Host mount:         %.140s  (Delete: remove)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ + Add extra host directory mount (host:container:rw)... ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ Save & Create Container ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ Save Container Settings ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"Up/Down: move   Left/Right: change   Enter: edit/save   d: download image   "
+"Esc: cancel"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Removed extra mount (press Save to apply)."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Container name: "
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+msgid "Invalid name: letters, digits, . _ - only."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Memory limit (e.g. 16G, empty = unlimited): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "CPU quota (e.g. '800000 100000', empty = unlimited): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Working directory inside container (absolute path): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Working directory must start with '/'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Volume '%.32s' is not mounted yet — press m to mount it before saving."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Maximum extra mounts reached."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Mount spec (/host/path:/container/path[:ro|:rw]): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Expected /host/path:/container/path[:ro|:rw]."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Invalid container name."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Select or download a base rootfs image first."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Saved settings for container '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Created compute container '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Save failed: %.140s"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "check storage mount and inputs"
 msgstr ""
 
 #: progs/settings-compute.inc
@@ -9677,6 +9948,249 @@ msgstr ""
 msgid "Paired compute client %.40s."
 msgstr ""
 
+#: progs/settings-compute.inc
+#, c-format
+msgid "Default working container set to '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "New Compute Micro-VM"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"KVM micro-VM with CoW qcow2 overlay over a read-only base disk (virtio-blk + "
+"virtiofs)."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"Supports loopback SSH forwarding (--net user) and optional export to Home "
+"desktop."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid ""
+"Tip: Left/Right changes values, Enter edits or toggles, Delete removes a "
+"share."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "VM name:            %.64s"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "(Enter: path to read-only .qcow2)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Base qcow2 disk:    %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+#, c-format
+msgid "Memory:             < %d MiB >"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+#, c-format
+msgid "vCPUs:              < %d >"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+#, c-format
+msgid "Network:            < %s >"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "user (loopback SSH forwarded)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "(auto)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "SSH user (opt.):    %.64s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage volume:     [%c] %-18.18s (virtiofs tag: vol-%-14.14s, %s)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Host share:         %.140s  (Delete: remove)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ + Add virtiofs directory share (/host/dir:tag[:ro|:rw])... ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "[ Create Compute Micro-VM ]"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Up/Down: move   Left/Right: change   Enter: edit/create   Esc: cancel"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Removed share."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "VM name: "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Absolute path to base qcow2 image: "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Base disk path must be an absolute path starting with '/'."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Memory in MiB (256..262144): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Memory must be between 256 and 262144 MiB."
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+msgid "vCPU count (1..128): "
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+msgid "vCPUs must be between 1 and 128."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "SSH login username (empty = auto): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Maximum shares reached."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Share spec (/host/dir:tag[:ro|:rw]): "
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Expected /host/dir:tag[:ro|:rw]."
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc
+msgid "Invalid VM name."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Specify an absolute path to a base qcow2 disk first."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Created compute micro-VM '%.40s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Create VM failed: %.140s"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "check base disk path and storage"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Default working container"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Images"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Micro-VMs"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Jobs"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Storage and access"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid ""
+"> %-18.18s  img=%-18.18s  GPU:%-3s  net=%-11.11s  (Left/Right: switch "
+"default)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "> %-18.18s  img=%-18.18s  GPU:%-3s  net=%-11.11s"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc progs/settings.c
+msgid "OFF"
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings-vm.inc progs/settings.c
+msgid "ON"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "+ Set up the default working container..."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "+ New container..."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "+ Download or import a rootfs image..."
+msgstr ""
+
+#: progs/settings-compute.inc progs/settings.c
+msgid "RUNNING"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "+ Create compute micro-VM..."
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Storage: root disk (configure under Storage > Storage Volumes)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage volume '%.32s' [MOUNTED]  (Enter: unmount)"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Storage volume '%.32s' [UNMOUNTED]  (Enter: mount)"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "View / copy client SSH config"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Pair a compute client (locachy-pair)..."
+msgstr ""
+
 #: progs/settings-compute.inc progs/settings.c
 msgid "Compute Node Manager"
 msgstr ""
@@ -9684,10 +10198,6 @@ msgstr ""
 #: progs/settings-compute.inc
 #, c-format
 msgid "API: %s (port %d, %s)   Paired: %d   SSH: ssh %.32s -p %d"
-msgstr ""
-
-#: progs/settings-compute.inc progs/settings.c
-msgid "OFF"
 msgstr ""
 
 #: progs/settings-compute.inc
@@ -9731,10 +10241,6 @@ msgstr ""
 msgid "GPU: passthrough %s   NVIDIA %s   (%d devs, %d CUDA libs)"
 msgstr ""
 
-#: progs/settings-compute.inc progs/settings.c
-msgid "ON"
-msgstr ""
-
 #: progs/settings-compute.inc
 #, c-format
 msgid "GPU: passthrough %s   %d GPU device(s), %d NVIDIA libs"
@@ -9749,27 +10255,16 @@ msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Inventory: %d images   %d envs   %d/%d jobs running   %d/%d VMs running"
-msgstr ""
-
-#: progs/settings-compute.inc progs/view.c
-msgid "Overview"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "Envs"
+msgid ""
+"Default: %.24s   Inventory: %d images, %d envs, %d/%d jobs running, %d/%d "
+"VMs running"
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "Jobs"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "VMs"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "Images"
+#, c-format
+msgid ""
+"No default container yet.   Inventory: %d images, %d envs, %d/%d jobs "
+"running, %d/%d VMs running"
 msgstr ""
 
 #: progs/settings-compute.inc
@@ -9777,75 +10272,47 @@ msgid "No compute jobs recorded yet."
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "No compute micro-VMs created yet (locachy-compute vm create)."
+#, c-format
+msgid "Container: %.24s%s   image=%.24s   memory=%s   cpu=%s   workdir=%.40s"
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "Nothing here yet."
+msgid "  [default]"
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "[ Unmount compute storage volume '%.32s' ]"
-msgstr ""
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "[ Mount compute storage volume '%.32s' ]"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "[ Storage: using root disk (configure under System > Storage Volumes) ]"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "[ + Import rootfs image (tarball or directory) ]"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "[ + Create compute environment ]"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "[ + Pair remote client (mTLS token) ]"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "[ View / copy client SSH config ]"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "[ Manage paired devices (locachy-pair) ]"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "RUNNING"
+msgid "Volumes: %.80s   Extra mounts: %.80s"
 msgstr ""
 
 #: progs/settings-compute.inc
 msgid ""
-"1-5/Tab: tabs   Enter: shell/create   x: reset   Delete: remove   r: "
-"refresh   Esc: back"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "1-5/Tab: tabs   Enter: view log   s: stop job   r: refresh   Esc: back"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid ""
-"1-5/Tab: tabs   Enter: start/shell   s: stop   x: reset   Delete: remove   "
+"Left/Right: switch default   Enter: open shell   e: settings   t: GPU test   "
 "r: refresh   Esc: back"
 msgstr ""
 
 #: progs/settings-compute.inc
-msgid "1-5/Tab: tabs   Enter: import   Delete: remove   r: refresh   Esc: back"
+msgid ""
+"Enter: open shell   e: settings   p: make default   t: GPU test   x: reset   "
+"Del: remove   Esc: back"
 msgstr ""
 
 #: progs/settings-compute.inc
 msgid ""
-"1-5/Tab: tabs   Enter: run action   m: mount storage   c: SSH config   r: "
-"refresh   Esc: back"
+"Enter: start or shell   s: stop   a: export to Home   x: reset   Del: "
+"remove   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Enter: view log   s: stop job   r: refresh   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Enter: details   Del: remove unused image   Esc: back"
+msgstr ""
+
+#: progs/settings-compute.inc
+msgid "Up/Down: move   Enter: run action   r: refresh   Esc: back"
 msgstr ""
 
 #: progs/settings-compute.inc
@@ -9859,41 +10326,22 @@ msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Press x again to wipe upperdir and reset env '%.40s'."
+msgid "Image '%.32s' (imported %.20s, from %.60s)."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Reset environment '%.40s'."
+msgid "Start VM failed: %.120s"
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Reset failed: %.120s"
-msgstr ""
-
-#: progs/settings-compute.inc
-msgid "error"
+msgid "Started VM '%.32s'."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Press Delete again to remove env '%.40s'."
-msgstr ""
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Removed environment '%.40s'."
-msgstr ""
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Remove failed: %.120s"
-msgstr ""
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Job Log: %.64s"
+msgid "Compute Job Log: %.48s"
 msgstr ""
 
 #: progs/settings-compute.inc
@@ -9906,27 +10354,39 @@ msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Stopped job '%.48s'."
+msgid ""
+"Press x again to reset '%.32s' (discards its writable changes; base image "
+"and volumes stay)."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Stop job failed: %.120s"
+msgid "Reset '%.32s'."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Started VM '%.40s'."
+msgid "Reset failed: %.120s"
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Start VM failed: %.120s"
+msgid "Stop VM '%.32s' (s) before removing it."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Stopped VM '%.40s'."
+msgid "Press Delete again to remove '%.32s'."
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Remove failed: %.120s"
+msgstr ""
+
+#: progs/settings-compute.inc
+#, c-format
+msgid "Removed '%.32s'."
 msgstr ""
 
 #: progs/settings-compute.inc
@@ -9936,47 +10396,27 @@ msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Press x again to reset CoW disk of VM '%.40s'."
+msgid "Stopped VM '%.32s'."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Reset VM '%.40s'."
+msgid "Stop failed: %.120s"
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Reset VM failed: %.120s"
+msgid "Stopped compute job %.32s."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Press Delete again to remove VM '%.40s'."
+msgid "Exported VM '%.32s' to Home (see Compute & VMs > Virtual Machines)."
 msgstr ""
 
 #: progs/settings-compute.inc
 #, c-format
-msgid "Removed VM '%.40s'."
-msgstr ""
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Remove VM failed: %.120s"
-msgstr ""
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Press Delete again to remove image '%.40s'."
-msgstr ""
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Removed image '%.40s'."
-msgstr ""
-
-#: progs/settings-compute.inc
-#, c-format
-msgid "Remove image failed: %.120s"
+msgid "Export failed: %.120s"
 msgstr ""
 
 #: progs/settings-hwinfo.inc
@@ -11273,6 +11713,476 @@ msgstr ""
 msgid "Enter a color as #RRGGBB, for example #3478D4. Nothing was changed."
 msgstr ""
 
+#: progs/settings-vm.inc
+#, c-format
+msgid "Windows 11 ISO (%s) downloaded and verified."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Windows ISO download failed: %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Removed VM app '%.40s'."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Remove VM app failed: %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "invalid VM name"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "write error"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "disk path is too long"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "disk already exists: %.100s"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "qemu-img create failed"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Maintenance Windows VM Settings"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "VM App Settings: %.40s (%s)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "New Virtual Machine App"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid ""
+"Configures /etc/locachy/containers/winmaint.conf for the in-OS Maintenance "
+"Windows VM."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid ""
+"Leave ISO fields empty to use locachy-winiso automatically when installing "
+"onto a blank partition."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid ""
+"Managed KVM virtual machine app registered in Home (runs as uid 1000 in its "
+"own cgroup)."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid ""
+"Windows VMs automatically use verified Windows 11 & virtio-win ISOs when ISO "
+"paths are left blank."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Desktop launcher settings for a compute micro-VM exported to Home."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid ""
+"Hardware limits (memory/vCPU/disk) belong to Compute Node Manager > Micro-"
+"VMs."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Tip: Left/Right toggles options, Enter edits or saves, Esc cancels."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "VM app name:        %.64s"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "VM app name:        %.64s  (fixed)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Guest OS profile:   < %s >"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Linux (virtio)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Windows (UEFI + TPM + Hyper-V)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Disk mode:          < Create blank qcow2 (%d GiB) >"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Disk mode:          < CoW overlay on read-only base (vm_base) >"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Disk mode:          < Direct writable disk image (vm_disk) >"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "New disk size:      < %d GiB >  (%.64s/%.32s.qcow2)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "(Enter: path to read-only qcow2/raw)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Base disk path:     %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "(Enter: path to qcow2/raw disk)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Writable disk path: %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Install ISO:        %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "(auto from locachy-winiso / Enter: custom)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "(none / Enter: path to .iso)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "virtio-win ISO:     %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "OFF (SeaBIOS)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "ON (OVMF)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "UEFI firmware:      < %s >"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "TPM 2.0 (swtpm):    < %s >"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Disk bus:           < %s >"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Network:            < %s >  (NIC: %s)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "OFF (isolated)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "ON (locachy-net)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "NIC model:          < %s >"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "ON (tag: home)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Share Home (virtiofs): < %s >"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Graphics / Audio:   < %s > / audio %s  (Enter: toggle audio)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "2D (virtio-vga)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "OpenGL (virgl)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Display / Freeze:   < %s > / freeze %s  (Enter: toggle freeze)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "[ Save & Register VM App in Home ]"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "[ Save VM App Settings ]"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Disk bus:           < %s >  (nvme recommended for bare-metal parity)"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Freeze on switch:   < %s >"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Display backend:    < %s >"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "[ Save Maintenance Windows VM Settings ]"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Compute VM app:     %.64s -> %.64s (fixed)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "[ Save Compute VM App Settings ]"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Up/Down: move   Left/Right: change   Enter: edit/save   Esc: cancel"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "OpenGL (virgl) is Linux guests only; press Enter to toggle audio."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "VM app name: "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Base disk path (read-only qcow2/raw): "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Writable disk path (qcow2/raw): "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Path must be absolute without '..' or quotes."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Install ISO path (empty = auto/none): "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "virtio-win ISO path (empty = auto/none): "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Memory in MiB (512..262144): "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Memory must be between 512 and 262144 MiB."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Could not create disk: %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Set a valid absolute base disk path first."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Set a valid absolute writable disk path first."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Save VM config failed: %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Created VM app '%.40s' (now visible in Home)."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Saved VM app '%.40s'."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Memory in MiB (1024..262144): "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Custom Windows ISO path (empty = auto): "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Custom virtio-win ISO path (empty = auto): "
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Save winmaint.conf failed: %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Saved Maintenance Windows VM settings."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Save failed: %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Opening VM app '%.40s' on desktop."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Cannot start VM app '%.40s': %.100s"
+msgstr ""
+
+#: progs/settings-vm.inc progs/settings.c
+msgid "desktop session unavailable"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Requested graceful shutdown for VM '%.40s'."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Cannot stop VM '%.40s': %.100s"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Wait: a VM removal job is already running."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Stop VM '%.40s' (press s) before removing it."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid ""
+"Press Delete again to remove VM app '%.40s' (user base/disk files are kept)."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Could not remove VM app '%.40s': %.100s"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Removing VM app '%.40s'..."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "%d MiB, %d vCPU, %s, %s, freeze:%s  (Enter)"
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Requested graceful QMP shutdown for Maintenance Windows VM."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Cannot stop Maintenance Windows VM: %.100s"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Windows 11 ISO download language set to %s."
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Language tag (e.g. en-US, zh-CN): "
+msgstr ""
+
+#: progs/settings-vm.inc
+msgid "Invalid tag: expected e.g. en-US or zh-CN."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Windows 11 ISO download is already running (job #%d)."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Could not start Windows ISO download: %.120s"
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid ""
+"Started Windows 11 ISO download (%s, job #%d). Closing Settings keeps it "
+"running."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Microsoft download check succeeded for %s."
+msgstr ""
+
+#: progs/settings-vm.inc
+#, c-format
+msgid "Microsoft download check failed for %s (exit %d)."
+msgstr ""
+
 #: progs/settings.c
 msgid "generic PC"
 msgstr ""
@@ -12470,10 +13380,6 @@ msgid "Bluetooth devices: bluetui did not finish."
 msgstr ""
 
 #: progs/settings.c
-msgid "Appearance"
-msgstr ""
-
-#: progs/settings.c
 msgid "Connected Devices"
 msgstr ""
 
@@ -12490,7 +13396,15 @@ msgid "Power & Battery"
 msgstr ""
 
 #: progs/settings.c
-msgid "Apps & Windows"
+msgid "Storage"
+msgstr ""
+
+#: progs/settings.c
+msgid "Appearance & Apps"
+msgstr ""
+
+#: progs/settings.c
+msgid "Compute & VMs"
 msgstr ""
 
 #: progs/settings.c
@@ -12498,7 +13412,15 @@ msgid "Language & Time"
 msgstr ""
 
 #: progs/settings.c
+msgid "Users & Sign-in"
+msgstr ""
+
+#: progs/settings.c
 msgid "Security & Privacy"
+msgstr ""
+
+#: progs/settings.c
+msgid "Software & Updates"
 msgstr ""
 
 #: progs/settings.c
@@ -12519,6 +13441,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Paired Devices"
+msgstr ""
+
+#: progs/settings.c
+msgid "Debug Cable"
 msgstr ""
 
 #: progs/settings.c
@@ -12554,11 +13480,31 @@ msgid "Tor"
 msgstr ""
 
 #: progs/settings.c
+msgid "Storage Volumes"
+msgstr ""
+
+#: progs/settings.c
+msgid "No extra storage volumes configured."
+msgstr ""
+
+#: progs/settings.c
 msgid "Cloud Drives"
 msgstr ""
 
 #: progs/settings.c
 msgid "Compute Node"
+msgstr ""
+
+#: progs/settings.c
+msgid "Virtual Machines"
+msgstr ""
+
+#: progs/settings.c
+msgid "No virtual machine apps configured."
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows Installation Media"
 msgstr ""
 
 #: progs/settings.c
@@ -12584,6 +13530,23 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Global Search"
+msgstr ""
+
+#: progs/settings.c
+msgid "Region & Language"
+msgstr ""
+
+#: progs/settings.c
+msgid "Date & Time"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."
+msgstr ""
+
+#: progs/settings.c
+msgid "Users"
 msgstr ""
 
 #: progs/settings.c
@@ -12619,31 +13582,6 @@ msgid "Host Security"
 msgstr ""
 
 #: progs/settings.c
-msgid "Region & Language"
-msgstr ""
-
-#: progs/settings.c
-msgid "Date & Time"
-msgstr ""
-
-#. TRANSLATORS: Enter is the Enter key; keep it.
-#: progs/settings.c
-msgid "Tor carries the network: ipinfo.io is not asked. Enter: choose a zone."
-msgstr ""
-
-#: progs/settings.c
-msgid "About This System"
-msgstr ""
-
-#: progs/settings.c
-msgid "Users"
-msgstr ""
-
-#: progs/settings.c
-msgid "Boot"
-msgstr ""
-
-#: progs/settings.c
 msgid "Software Update"
 msgstr ""
 
@@ -12656,15 +13594,11 @@ msgid "Optional Components"
 msgstr ""
 
 #: progs/settings.c
-msgid "Storage Volumes"
+msgid "About This System"
 msgstr ""
 
 #: progs/settings.c
-msgid "No extra storage volumes configured."
-msgstr ""
-
-#: progs/settings.c
-msgid "Debug Cable"
+msgid "Boot"
 msgstr ""
 
 #: progs/settings.c
@@ -13193,10 +14127,6 @@ msgstr ""
 #: progs/settings.c
 #, c-format
 msgid "Cannot open Maintenance Windows on the desktop: %.100s"
-msgstr ""
-
-#: progs/settings.c
-msgid "desktop session unavailable"
 msgstr ""
 
 #: progs/settings.c
@@ -13979,6 +14909,10 @@ msgid "Windows partition size"
 msgstr ""
 
 #: progs/settings.c
+msgid "shrink plan armed (reboot to finish)"
+msgstr ""
+
+#: progs/settings.c
 #, c-format
 msgid "created, %d GiB"
 msgstr ""
@@ -14005,6 +14939,10 @@ msgstr ""
 
 #: progs/settings.c
 msgid "Windows virtual machine"
+msgstr ""
+
+#: progs/settings.c
+msgid "RUNNING   (s: QMP stop)"
 msgstr ""
 
 #: progs/settings.c
@@ -14183,10 +15121,6 @@ msgid "NVIDIA Dynamic Boost (nvidia-powerd)"
 msgstr ""
 
 #: progs/settings.c
-msgid "Compute default storage"
-msgstr ""
-
-#: progs/settings.c
 msgid "mounted"
 msgstr ""
 
@@ -14280,6 +15214,58 @@ msgstr ""
 
 #: progs/settings.c
 msgid "sshd host key"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "New virtual machine app"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter: create Windows or Linux VM for Home"
+msgstr ""
+
+#: progs/settings.c
+msgid "Maintenance VM settings"
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "downloading (%s, job #%d)..."
+msgstr ""
+
+#: progs/settings.c
+#, c-format
+msgid "READY [%s, %s]   (Enter: re-download %s)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "not downloaded   (Enter: download %s)"
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows 11 ISO"
+msgstr ""
+
+#: progs/settings.c
+msgid "Windows 11 ISO language"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+#, c-format
+msgid "READY (%s)   (Enter: check Microsoft download)"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "not installed (Optional Components > winmaint)   (Enter: check)"
+msgstr ""
+
+#: progs/settings.c
+msgid "virtio-win ISO & check"
 msgstr ""
 
 #: progs/settings.c
@@ -15491,6 +16477,31 @@ msgstr ""
 msgid "Enter, twice: regenerate sshd host key."
 msgstr ""
 
+#. TRANSLATORS: Enter, e, s and Delete are key names; keep them.
+#: progs/settings.c
+msgid "Enter: open on desktop   e: settings   s: stop   Delete, twice: remove"
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: create a new Windows or Linux VM app for Home."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: configure Maintenance Windows VM hardware, ISO, and freeze."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: download and verify the Windows 11 ISO in the background."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: test the Microsoft Windows 11 download link without downloading."
+msgstr ""
+
 #: progs/settings.c
 #, c-format
 msgid "Power profile: %s."
@@ -15694,6 +16705,21 @@ msgid ""
 "Enter: view and copy generated OpenSSH client config for this compute node."
 msgstr ""
 
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: configure Maintenance Windows VM settings (winmaint.conf)."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: download official Windows 11 ISO with SHA-256 verification."
+msgstr ""
+
+#. TRANSLATORS: Enter is the Enter key; keep it.
+#: progs/settings.c
+msgid "Enter: check Microsoft Windows 11 download service (no download)."
+msgstr ""
+
 #. TRANSLATORS: Enter and Delete are key names; keep them.
 #: progs/settings.c
 msgid "Installed   Delete, twice: remove it"
@@ -15725,6 +16751,10 @@ msgstr ""
 msgid ""
 "Enter+Left/Right: role   m: mount/unmount   a: auto-mount   Delete, twice: "
 "detach"
+msgstr ""
+
+#: progs/settings.c
+msgid "Enter+Left/Right: cycle language   e: enter custom tag (e.g. zh-CN)"
 msgstr ""
 
 #. TRANSLATORS: Enter and Left/Right are key names; keep them.
@@ -16997,6 +18027,10 @@ msgstr ""
 
 #: progs/view.c
 msgid "Facing Pages (Center First Page)"
+msgstr ""
+
+#: progs/view.c
+msgid "Overview"
 msgstr ""
 
 #: progs/view.c

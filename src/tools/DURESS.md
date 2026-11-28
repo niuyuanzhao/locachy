@@ -18,7 +18,7 @@ Two separate settings, both in Security:
   the disk. Switching back to low restores the fingerprint and face switches as they
   were; the TPM has to be bound again. Threat level is changed in settings; the boot
   image is rebuilt, so the change takes effect at the next start.
-  Automatic locking is a separate switch (`auto_lock` in rc.conf, Security → Screen
+  Automatic locking is a separate switch (`auto_lock` in rc.conf, Security & Privacy → Screen
   Locking, on by default): at high it stays on, and settings does not turn it off.
 
 - **Duress** (`duress_enabled` in rc.conf, and a verifier in `/etc/locachy/duress`)
@@ -60,10 +60,10 @@ quick nor final.
 
 ## Setting it up
 
-1. Settings → Security → **Duress password** → Enter. Type it twice. It must be at
+1. Settings → Security & Privacy → **Duress password** → Enter. Type it twice. It must be at
    least eight characters, and different from the login password and the disk
    passphrase.
-2. Settings → Security → **Duress wipes the disk** → on. This adds
+2. Settings → Security & Privacy → **Duress wipes the disk** → on. This adds
    `auth optional pam_locachy_duress.so` to `/etc/pam.d/sudo`, before its first auth
    line (after `pam_locachy_any.so`'s, when a fingerprint or a face is on), and
    rebuilds the boot image, which then carries the verifier. The line has to come

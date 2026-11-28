@@ -44,6 +44,10 @@ locachy-winiso check [--lang L]
 
 确认 x64 链接以允许的微软 URL 前缀开头后，curl 只发送一次带 `Range: bytes=0-0` 的 GET 请求，使用 `winiso/1`，连接超时 20 秒，总超时 60 秒。有效的 HTTP 206 必须给出 `Content-Range: bytes 0-0/<size>`，且实际传输恰好一个字节。若服务器忽略范围返回 HTTP 200，curl 会限制体积，检查失败且不保存镜像。这一步不跟随重定向、不重试，也不换下载来源。成功时标准输出给出语言、镜像文件名、微软公布的 SHA-256 和 HTTP 状态，如 `ok: windows-11 en-US <filename> sha256=<64hex> range=206`。这并不核对镜像内容。遇到微软拒绝、意外的 HTTP 状态或无法解析的响应时，以退出码 4 结束。
 
+## 设置界面入口
+
+**设置 → 计算与虚拟机 → Windows 安装介质** 直接显示已核对的 Windows 11 镜像（`path windows`）与 `virtio-win.iso`（`path virtio-win`）状态，可切换或输入语言标签、提交 `winiso-fetch --lang` 系统任务在后台下载（关闭设置不中断），并可运行 `locachy-winiso check --lang` 检查微软下载服务。
+
 ## 系统任务
 
 在运行中的系统上，`fetch` 作为固定的系统任务 `winiso-fetch`（见 [JOBS.zh.md](JOBS.zh.md)，已登记在 `progs/locachy-jobs.c`）运行：执行 `locachy-winiso fetch windows --lang 语言`，语言在提交任务前就已确定。终端会跟随任务输出；关掉终端不会中断下载。若本身已在任务中，或处于离线环境（chroot），则直接在当前进程执行。任务服务拒绝或不在时一律算失败，绝不绕开队列直接执行。
