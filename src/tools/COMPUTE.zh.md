@@ -44,6 +44,8 @@
 
 以下示例中的 `locachy-gpu` 是客户端 SSH 配置中的别名，指向节点的 tailnet IP 或 MagicDNS 名称，并使用普通用户。这个工作流不需要 `service_compute`、`locachy-pair` 或 Thunderbolt 线缆。
 
+LOCachy 的交互式程序（`settings`、`packages`、`firmware`、`files`，以及构建时包含的 `edit` 和 `view`）和 `reboot`、`poweroff` 命令，即使本机物理屏幕正处于扩展显示（`extdisplay`）会话中，也可以直接通过 SSH 运行（见 [SSH-TUI.zh.md](SSH-TUI.zh.md)）。
+
 ### 设置界面入口（**计算与虚拟机 → 计算节点**）
 
 「设置」在 **计算与虚拟机 → 计算节点** 下提供 6 行直接管理入口，由 `locachy-compute status --tsv` 驱动（即使 `compute_storage` 当前未挂载也不会失败）：

@@ -2,13 +2,14 @@
 
 [English](WINDOW-BACKEND.md)
 
-基础库程序（term、settings、view、edit、archive、packages、firmware、files）都画在软件画布上。在自己的屏幕上时，它们经 DRM 显示，输入设备由进程 1 出借。同一程序也可以在共享桌面上以普通窗口显示。只有受信任的窗口启动器能选择这一方式，方法是设置 `LOCACHY_BACKEND=wayland`；其他取值以及未设置时，都走原来的直连路径，行为不变。
+基础库程序（term、settings、view、edit、archive、packages、firmware、files）都画在软件画布上。在自己的屏幕上时，它们经 DRM 显示，输入设备由进程 1 出借。同一程序也可以在共享桌面上以普通窗口显示。只有受信任的窗口启动器能选择这一方式，方法是设置 `LOCACHY_BACKEND=wayland`。SSH 或 PTY 终端会话是第三种传输方式，`LOCACHY_BACKEND=tty`（见 [SSH-TUI.zh.md](SSH-TUI.zh.md)）。其他取值以及未设置时，都走原来的直连路径，行为不变；但在没有进程 1 控制套接字的 SSH 或 PTY 会话中，未设置时会改用 `tty`。
 
 ## 选择是显式的，失败即关闭
 
-- `direct`（或未设置）：屏幕和设备与以前完全一样。
+- `direct`：屏幕和设备与以前完全一样。未设置时同样如此，但上述 SSH 或 PTY 会话改用 `tty`。
 - `wayland`：xdg-shell 窗口。不打开 DRM 节点或输入设备，也不使用租约或进程 1 控制通道。
-- 程序构建时未包含窗口后端，或变量取了其他值：退出状态 78。请求窗口时没有合成器，或合成器没给出窗口：退出状态 69。两种情况都不会改为打开 DRM 或输入设备。
+- `tty`：用于 SSH/PTY 会话的终端后端（在未设置 `LOCACHY_CONTROL` 且程序未调用 `screen_direct_only()` 的交互式 PTY 下也会自动启用，见 [SSH-TUI.zh.md](SSH-TUI.zh.md)）。
+- 程序构建时未包含所请求的后端，或变量取了其他值：退出状态 78。请求窗口时没有合成器或合成器没给出窗口，或请求 `tty` 时没有可用终端：退出状态 69。以上情况都不会改为打开 DRM 或输入设备。
 
 进程 1 和 initramfs 用 musl 构建，不含任何窗口代码。`make.sh` 只把窗口后端（`CONFIG_WAYLAND`）编进会开窗口的程序，而且只在已安装桌面模块的 Wayland 库时才编入。
 

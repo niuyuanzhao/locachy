@@ -19,6 +19,7 @@
 
 #include "clipboard.h"
 #include "include/wayland-data.h"
+#include "include/tty-backend.h"
 
 /* A program drawn in a Wayland window uses that window's standard data
  * device; everything else (and binaries without it) the host service. */
@@ -194,6 +195,11 @@ static int set_as(uint32_t operation, int primary, const void *text, size_t size
 
 int clipboard_set(int primary, const void *text, size_t size)
 {
+    if (tty_backend_active && tty_backend_active() && tty_backend_clipboard_set) {
+        int rc = tty_backend_clipboard_set((const char *)text, size);
+        (void)set_as(CLIPBOARD_SET, primary, text, size);
+        return rc == 0 ? CLIPBOARD_OK : CLIPBOARD_FAILED;
+    }
     if (wayland_selection()) {
         return wl_data_clipboard_set(primary, "text/plain;charset=utf-8", text, size);
     }

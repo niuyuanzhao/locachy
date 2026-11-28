@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,7 @@
 #include "internal.h"
 #include "session.h"
 #include "wayland-backend.h"
+#include "tty-backend.h"
 
 #ifndef MSG_CMSG_CLOEXEC
 #define MSG_CMSG_CLOEXEC 0
@@ -397,6 +399,9 @@ static int ask(const char *verb, char *const argv[], const char *const *want,
 
 int base_call(char *const argv[])
 {
+    if (tty_backend_active && tty_backend_active() && tty_backend_run) {
+        return tty_backend_run(argv);
+    }
     static const char *const want[] = { "returned", NULL };
     char msg[CONTROL_MAX], *f[3];
 
@@ -410,6 +415,10 @@ void base_open(char *const argv[], char *why, size_t size)
 
 static void ask_open(const char *verb, char *const argv[], char *why, size_t size)
 {
+    if (tty_backend_active && tty_backend_active()) {
+        snprintf(why, size, "cannot open a graphical task from a terminal session");
+        return;
+    }
     static const char *const want[] = { "back", "ended", "shown", NULL };
     char msg[CONTROL_MAX], *f[3];
     int n = ask(verb, argv, want, msg, sizeof msg, f, 3);
@@ -585,14 +594,42 @@ int open_in_home(const char *with, const char *target)
     return 0;
 }
 
+static void tty_power_action(const char *cmd, const char *name, int sig)
+{
+    if (tty_backend_close) tty_backend_close();
+    if (geteuid() != 0) {
+        execl(cmd, name, (char *)NULL);
+        fprintf(stderr, "%s: exec %s: %s\n", name, cmd, strerror(errno));
+        _exit(127);
+    }
+    fprintf(stderr, "%s: requested (if a system job is running, init waits for it to finish).\n", name);
+    fflush(stderr);
+    if (kill(1, sig) < 0) {
+        fprintf(stderr, "%s: signal init: %s\n", name, strerror(errno));
+        _exit(1);
+    }
+    _exit(0);
+}
+
+/* Whether a restart or power-off request can reach process 1 or a terminal session
+ * (over SSH, the session's own sudo runs the helper). */
+int base_power_ready(void)
+{
+    return control_fd() >= 0 || (tty_backend_active && tty_backend_active());
+}
+
+/* With neither, nothing is sent and the call returns: a window has no way to reach
+ * process 1, and the caller says so before asking. */
 void base_reboot(void)
 {
     static const char *const msg[] = { "reboot", NULL };
 
     if (control_fd() >= 0) {
         control_send_fields(ctl, msg);
+        pause();
+    } else if (tty_backend_active && tty_backend_active()) {
+        tty_power_action("/usr/local/bin/reboot", "reboot", SIGTERM);
     }
-    pause();
 }
 
 void base_poweroff(void)
@@ -601,6 +638,8 @@ void base_poweroff(void)
 
     if (control_fd() >= 0) {
         control_send_fields(ctl, msg);
+        pause();
+    } else if (tty_backend_active && tty_backend_active()) {
+        tty_power_action("/usr/local/bin/poweroff", "poweroff", SIGUSR2);
     }
-    pause();
 }

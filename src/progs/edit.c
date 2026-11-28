@@ -1588,6 +1588,9 @@ static void draw_caret(int col, int row, int overwrite, const char *glyph, uint3
     } else if (cell_px(&cw, &ch, &top)) {
         int pw = cw / 6 > 2 ? cw / 6 : 2;
         screen_fill_px(col * cw, top + row * ch, pw, ch, C_TEXT);
+    } else {
+        screen_fill(col, row, 1, 1, C_TEXT);
+        screen_text(col, row, glyph, bg, C_TEXT);
     }
 }
 

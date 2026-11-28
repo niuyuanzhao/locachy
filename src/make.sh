@@ -170,8 +170,14 @@ INPUT_CFLAGS="-DCONFIG_LIBINPUT $(pkg-config --cflags libinput)"
 INPUT_LIBS="$(pkg-config --libs libinput) -lm"
 GIO_CFLAGS="$(pkg-config --cflags gio-2.0)"
 GIO_LIBS="$(pkg-config --libs gio-2.0)"
-UI_CFLAGS="$FT_CFLAGS $NM_CFLAGS $INPUT_CFLAGS"
-UI_LIBS="$FT_LIBS $NM_LIBS $INPUT_LIBS"
+TTY_CFLAGS="-DCONFIG_TTY"
+ZLIB_LIBS=""
+if pkg-config --exists zlib; then
+    TTY_CFLAGS="$TTY_CFLAGS -DCONFIG_ZLIB $(pkg-config --cflags zlib)"
+    ZLIB_LIBS="$(pkg-config --libs zlib)"
+fi
+UI_CFLAGS="$FT_CFLAGS $NM_CFLAGS $INPUT_CFLAGS $TTY_CFLAGS"
+UI_LIBS="$FT_LIBS $NM_LIBS $INPUT_LIBS $ZLIB_LIBS"
 GCC_CORE="gcc -O2 -march=$cpu $SEC_CFLAGS $LTO_FLAGS -Wall -Wextra -D_GNU_SOURCE -I$src/base/include -I$src/base"
 GCC="$GCC_CORE $UI_CFLAGS"
 IME_CFLAGS=""
@@ -282,7 +288,7 @@ fi
 #   liblocachy-open.a   content-type rules and open-request spool (GIO)
 #   liblocachy-ime.a    input method (librime)
 CORE_MODS="rc say control duress jobs i18n key-action monitor-modes monitors backlight clipboard theme theme-desktop input-raw modload"
-UI_MODS="screen font fontmatch keys pointer ui help textsel panel"
+UI_MODS="screen font fontmatch keys pointer ui help textsel panel tty-backend"
 
 for m in $CORE_MODS; do
     $GCC_CORE -c -o "$b/base-$m.o" "$src/base/$m.c"
@@ -304,7 +310,7 @@ $GCC_CORE $IME_CFLAGS -c -o "$b/base-ime.o" "$src/base/ime.c"
     "$b/base-screen.o" "$b/base-font.o" "$b/base-fontmatch.o" \
     "$b/base-keys.o" "$b/base-pointer.o" "$b/base-ui.o" \
     "$b/base-help.o" "$b/base-textsel.o" "$b/base-panel.o" \
-    "$b/base-wayland-data.o"
+    "$b/base-tty-backend.o" "$b/base-wayland-data.o"
 "$AR_BIN" rcs "$b/liblocachy-status.a" "$b/base-status.o"
 "$AR_BIN" rcs "$b/liblocachy-open.a" "$b/base-open.o"
 "$AR_BIN" rcs "$b/liblocachy-ime.a" "$b/base-ime.o"
@@ -325,7 +331,8 @@ HOOK_OPEN="-Wl,-u,open_request_publish"
 # Weak hooks of the base, resolved by pulling their archive members (see build-check.sh).
 HOOK_RAW="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_exclusive -Wl,-u,base_raw_pending"
 HOOK_DATA="-Wl,-u,wl_data_active -Wl,-u,wl_data_clipboard_get -Wl,-u,wl_data_clipboard_set -Wl,-u,wl_data_clipboard_clear -Wl,-u,wl_data_drag_active -Wl,-u,wl_data_drag_start -Wl,-u,wl_data_drag_start_key -Wl,-u,wl_data_press_serial"
-HOOK_BASE="$HOOK_RAW $HOOK_DATA"
+HOOK_TTY="-Wl,-u,tty_backend_wanted -Wl,-u,tty_backend_active -Wl,-u,tty_backend_run -Wl,-u,tty_backend_close -Wl,-u,tty_backend_clipboard_set"
+HOOK_BASE="$HOOK_RAW $HOOK_DATA $HOOK_TTY"
 HOOK_WIN=""
 
 # The programs that also open as windows on the shared display (term, settings,
@@ -353,7 +360,7 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
         "$b/win-screen.o" "$b/win-font.o" "$b/win-fontmatch.o" \
         "$b/win-keys.o" "$b/win-pointer.o" "$b/win-ui.o" \
         "$b/win-help.o" "$b/win-textsel.o" "$b/win-panel.o" \
-        "$b/win-wayland-backend.o" "$b/win-wayland-data.o" $WIN_PROTO_OBJS
+        "$b/win-tty-backend.o" "$b/win-wayland-backend.o" "$b/win-wayland-data.o" $WIN_PROTO_OBJS
     LIB_WIN="$b/liblocachy-win.a"
     WIN_LIBS="$(pkg-config --libs wayland-client wayland-cursor xkbcommon) -lm"
     HOOK_WIN="-Wl,-u,wl_data_init -Wl,-u,wl_data_active"
@@ -568,14 +575,14 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
         "$b/proto-fractional-scale-v1.o" "$b/proto-viewporter.o" "$b/proto-relative-pointer-unstable-v1.o" \
         $HOOK_THEME $HOOK_BASE $HOOK_BAR $HOOK_OPEN \
         -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" "$LIB_OPEN" "$LIB_IME" -Wl,--end-group \
-        $IME_LIBS $FT_LIBS $NM_LIBS $GIO_LIBS $WL_CLIENT_LIBS -lm
+        $IME_LIBS $FT_LIBS $NM_LIBS $GIO_LIBS $WL_CLIENT_LIBS $ZLIB_LIBS -lm
     $GCC_CORE $GC_LDFLAGS $FT_CFLAGS -I"$b" -o /usr/local/bin/locachy-overview "$src/progs/overview.c" \
         "$b/proto-wlr-layer-shell-unstable-v1.o" "$b/proto-wlr-foreign-toplevel-management-unstable-v1.o" \
         "$b/proto-ext-foreign-toplevel-list-v1.o" "$b/proto-ext-image-capture-source-v1.o" \
         "$b/proto-ext-image-copy-capture-v1.o" "$b/proto-fractional-scale-v1.o" "$b/proto-viewporter.o" \
         "$b/proto-xdg-shell.o" $HOOK_THEME_WATCH $HOOK_BASE \
         -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
-        $FT_LIBS $WL_CLIENT_LIBS -lm
+        $FT_LIBS $WL_CLIENT_LIBS $ZLIB_LIBS -lm
     $GCC_CORE $GC_LDFLAGS $FT_CFLAGS -I"$b" -o /usr/local/bin/locachy-shot "$src/progs/shot.c" \
         "$b/proto-wlr-layer-shell-unstable-v1.o" "$b/proto-wlr-foreign-toplevel-management-unstable-v1.o" \
         "$b/proto-wlr-output-management-unstable-v1.o" "$b/proto-ext-foreign-toplevel-list-v1.o" \
@@ -583,7 +590,7 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
         "$b/proto-fractional-scale-v1.o" "$b/proto-viewporter.o" \
         "$b/proto-xdg-shell.o" $HOOK_THEME_WATCH $HOOK_BASE $HOOK_OPEN \
         -Wl,--start-group "$LIB_CORE" "$LIB_UI" "$LIB_STATUS" "$LIB_OPEN" -Wl,--end-group \
-        $FT_LIBS $WL_CLIENT_LIBS -lpng -lm
+        $FT_LIBS $WL_CLIENT_LIBS $ZLIB_LIBS -lpng -lm
 else
     rm -f "$lib/clipboard" "$lib/labwc-control" "$lib/appearance-portal" "$lib/locachy-foot" \
         /usr/local/bin/locachy-bar /usr/local/bin/locachy-overview /usr/local/bin/locachy-shot
@@ -944,7 +951,10 @@ fi
 # run without supplementary groups (app-init), so %wheel would not match there.
 user=$(getent passwd 1000 | cut -d: -f1 || true)
 if [ -n "$user" ]; then
-    printf '%s ALL=(ALL:ALL) ALL\n' "$user" >/etc/sudoers.d/10-locachy-user.new # a dot: not read yet
+    {
+        printf 'Defaults env_keep += "COLORTERM LOCACHY_TTY_MODE"\n'
+        printf '%s ALL=(ALL:ALL) ALL\n' "$user"
+    } >/etc/sudoers.d/10-locachy-user.new # a dot: not read yet
     chmod 0440 /etc/sudoers.d/10-locachy-user.new
     if visudo -cqf /etc/sudoers.d/10-locachy-user.new; then
         mv /etc/sudoers.d/10-locachy-user.new /etc/sudoers.d/10-locachy-user

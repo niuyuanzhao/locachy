@@ -8,7 +8,28 @@ if [ "$(id -u)" -ne 0 ]; then
     exec sudo /usr/local/bin/reboot "$@"
 fi
 case "$*" in
-    '') exec kill -TERM 1 ;;
-    -f | --force) exec kill -s 49 1 ;;
+    '')
+        active=""
+        for ev in /sys/fs/cgroup/locachy-jobs/job-*/cgroup.events; do
+            [ -r "$ev" ] || continue
+            if grep -qx 'populated 1' "$ev" 2>/dev/null; then
+                jid=${ev#/sys/fs/cgroup/locachy-jobs/job-}
+                jid=${jid%/cgroup.events}
+                kind=$(sed -n 's/^kind=//p' "/run/locachy/jobs/$jid.state" 2>/dev/null | head -n 1)
+                active="job $jid${kind:+ ($kind)}"
+                break
+            fi
+        done
+        if [ -n "$active" ]; then
+            echo "reboot: queued; init will wait for $active to finish (use reboot --force to reboot now)." >&2
+        else
+            echo "reboot: requested." >&2
+        fi
+        exec kill -TERM 1
+        ;;
+    -f | --force)
+        echo "reboot: immediate reboot requested." >&2
+        exec kill -s 49 1
+        ;;
     *) echo 'usage: reboot [--force]' >&2; exit 2 ;;
 esac

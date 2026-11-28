@@ -53,6 +53,7 @@
 #include "include/monitor-mode.h"
 #include "include/monitor-profile.h"
 #include "include/wayland-backend.h"
+#include "include/tty-backend.h"
 
 /* Optional in standalone screen unit tests that do not link status.c or rc.c. */
 extern void base_status_fields(struct status_fields *out) __attribute__((weak));
@@ -1610,11 +1611,75 @@ static double screen_time(void)
  * rows are never shown. */
 static int window_mode;
 static uint32_t window_hidden; /* the top bar's pixel rows, above the window */
+static int tty_mode;           /* TTY_MODE_* when running on a terminal (SSH/PTY) */
+
+static inline int tty_pixel_mode(void)
+{
+    return tty_mode == TTY_MODE_PIXEL_KITTY || tty_mode == TTY_MODE_PIXEL_SIXEL;
+}
+
+static inline int tty_cell_mode(void)
+{
+    return tty_mode == TTY_MODE_CELL;
+}
+
+void screen_direct_only(void)
+{
+#ifdef CONFIG_TTY
+    tty_backend_forbid_auto();
+#endif
+}
 
 int screen_window_top(void)
 {
     return window_mode ? (int)window_hidden : 0;
 }
+
+#ifdef CONFIG_TTY
+static int tty_pixel_resize(int w, int h, double s)
+{
+    if (w < 1 || h < 1 || w > 16384 || h > 16384) return -1;
+    if (s < 0.5 || s > 8) s = 1.0;
+    if ((font == NULL || s < scale - 0.001 || s > scale + 0.001) && scaled_font(s) != NULL && font == NULL) {
+        return -1;
+    }
+    uint32_t *picture = calloc((size_t)w * (size_t)h, sizeof *picture);
+    if (picture == NULL) {
+        layout();
+        return -1;
+    }
+    free(shadow);
+    shadow = picture;
+    width = (uint32_t)w;
+    height = (uint32_t)h;
+    window_hidden = 0;
+    scale = s;
+    drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
+    layout();
+    mark_all();
+    return 0;
+}
+
+static int tty_cell_resize(int c, int r)
+{
+    if (c < 1 || r < 1) return -1;
+    free(shadow);
+    shadow = NULL;
+    drop_presented(&presented, &presented_w, &presented_h, &presented_valid);
+    width = (uint32_t)c;
+    height = (uint32_t)r;
+    window_hidden = 0;
+    glyph_w = 0;
+    glyph_h = 0;
+    top = 0;
+    bar_h = 0;
+    scale = 1.0;
+    cols = c;
+    rows = r;
+    active_bar.valid = 0;
+    return 0;
+}
+#endif
 
 #ifdef CONFIG_WAYLAND
 static int window_new_size;
@@ -2178,8 +2243,25 @@ int screen_open(const char *font_path)
     ft_init();
 #endif
 
-    /* An explicit window request is met or ends the program: it never falls
-     * back to opening DRM or the input devices itself. */
+    /* An explicit backend request (wayland or tty) is met or ends the program:
+     * it never falls back to opening DRM or the input devices itself. */
+    const char *env_backend = getenv("LOCACHY_BACKEND");
+    if (env_backend && strcmp(env_backend, "tty") == 0) {
+#ifdef CONFIG_TTY
+        if (tty_backend_open(tty_pixel_resize, tty_cell_resize) == 0) {
+            tty_mode = tty_backend_active();
+            say("screen: terminal backend (%s), %ux%u, %dx%d cells",
+                tty_pixel_mode() ? "pixel-fb" : "ansi-cell", width, height, cols, rows);
+            return 1;
+        }
+        say("screen: LOCACHY_BACKEND=tty, but stdin/stdout is not a usable terminal");
+        exit(WL_EXIT_UNAVAILABLE);
+#else
+        say("screen: LOCACHY_BACKEND=tty, but this program is built without the terminal backend");
+        exit(WL_EXIT_CONFIG);
+#endif
+    }
+
     int backend = wl_backend_requested();
     if (backend != 0) {
 #ifdef CONFIG_WAYLAND
@@ -2196,9 +2278,22 @@ int screen_open(const char *font_path)
         }
 #endif
         if (backend > 0) say("screen: LOCACHY_BACKEND=wayland, but this program is built without the window backend");
-        else say("screen: LOCACHY_BACKEND=%s is not a backend (direct or wayland)", getenv("LOCACHY_BACKEND"));
+        else say("screen: LOCACHY_BACKEND=%s is not a backend (direct, wayland or tty)", getenv("LOCACHY_BACKEND"));
         exit(WL_EXIT_CONFIG);
     }
+
+#ifdef CONFIG_TTY
+    if (tty_backend_wanted()) {
+        if (tty_backend_open(tty_pixel_resize, tty_cell_resize) == 0) {
+            tty_mode = tty_backend_active();
+            say("screen: terminal backend (%s), %ux%u, %dx%d cells",
+                tty_pixel_mode() ? "pixel-fb" : "ansi-cell", width, height, cols, rows);
+            return 1;
+        }
+        say("screen: terminal session detected, but could not open terminal backend");
+        exit(WL_EXIT_UNAVAILABLE);
+    }
+#endif
 
     if (why == NULL && control_fd() >= 0) {
         control_wait_take(); /* screen_take does the rest */
@@ -2717,7 +2812,7 @@ int screen_refresh(void)
 int screen_extended(int on)
 {
     on = !!on;
-    if (window_mode) return on ? -1 : 0; /* a window is one canvas */
+    if (window_mode || tty_mode) return on ? -1 : 0; /* a window or terminal is one canvas */
     if (on == extended) return 0;
     for (uint32_t i = 0; i < noutputs; i++) soft_cursor_flush(&outputs[i], 0);
     if (on) {
@@ -2748,22 +2843,22 @@ int screen_is_extended(void)
 
 int screen_output_current(void)
 {
-    if (window_mode) return 0;
+    if (window_mode || tty_mode) return 0;
     return noutputs ? extended ? selected_output : 0 : -1;
 }
 
 int screen_output_count(void)
 {
-    if (window_mode) return 1;
+    if (window_mode || tty_mode) return 1;
     return extended ? (int)noutputs : noutputs ? 1 : 0;
 }
 
 int screen_output_get(int index, struct screen_output *out)
 {
     if (!out || index < 0 || index >= screen_output_count()) return -1;
-    if (window_mode) {
+    if (window_mode || tty_mode) {
         memset(out, 0, sizeof *out);
-        snprintf(out->name, sizeof out->name, "window");
+        snprintf(out->name, sizeof out->name, "%s", window_mode ? "window" : "tty");
         out->width = out->pixel_width = (int)width;
         out->height = out->pixel_height = (int)height;
         out->scale = scale;
@@ -2827,7 +2922,7 @@ int screen_output_at(int x, int y, int *local_x, int *local_y)
         if (x < 0 || y < 0 || x >= (int)width || y >= (int)height) return -1;
         if (local_x) *local_x = x;
         if (local_y) *local_y = y;
-        return noutputs || window_mode ? 0 : -1;
+        return noutputs || window_mode || tty_mode ? 0 : -1;
     }
     for (uint32_t i = 0; i < noutputs; i++) {
         struct output *o = &outputs[i];
@@ -2934,6 +3029,28 @@ static void touch(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1)
  * scanout drivers ignore DIRTYFB. Keep logical damage while lent/released. */
 void screen_flush(void)
 {
+#ifdef CONFIG_TTY
+    if (tty_mode) {
+        if (tty_cell_mode()) {
+            tty_cell_flush();
+            return;
+        }
+        if (shadow == NULL || dirty.x1 == dirty.x2 || width == 0 || height == 0) return;
+        struct drm_clip_rect diff;
+        if (!present_diff(shadow, width, height, dirty,
+                          presented, presented_w, presented_h, presented_valid, &diff)) {
+            dirty.x2 = dirty.x1;
+            return;
+        }
+        if (tty_backend_flush_pixels(shadow, (int)width, (int)height,
+                                     diff.x1, diff.y1, diff.x2, diff.y2) == 0) {
+            present_commit(shadow, width, height, diff,
+                           &presented, &presented_w, &presented_h, &presented_valid);
+            dirty.x2 = dirty.x1;
+        }
+        return;
+    }
+#endif
 #ifdef CONFIG_WAYLAND
     if (window_mode) {
         /* Held back while the compositor shows the last one: drawn again
@@ -3238,6 +3355,12 @@ int screen_desk_foreign(int gx, int gy)
 
 void screen_fill(int col, int row, int ncols, int nrows, uint32_t rgb)
 {
+#ifdef CONFIG_TTY
+    if (tty_cell_mode()) {
+        tty_cell_fill(col, row, ncols, nrows, rgb);
+        return;
+    }
+#endif
     if (shadow == NULL || col < 0 || row < 0 || col >= cols || row >= rows || ncols <= 0 || nrows <= 0) {
         return;
     }
@@ -3313,6 +3436,15 @@ __attribute__((optimize("O3")))
 #endif
 void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
 {
+#ifdef CONFIG_TTY
+    if (tty_cell_mode()) {
+        /* Support full-canvas clears from files.c/search.c (screen_pixels -> screen_fill_px). */
+        if (x <= 0 && y <= 0 && x + w >= cols && y + h >= rows) {
+            tty_cell_fill(0, 0, cols, rows, rgb);
+        }
+        return;
+    }
+#endif
     int sx, sy;
     if (!clip_px(&x, &y, &w, &h, &sx, &sy)) {
         return;
@@ -3346,7 +3478,7 @@ void screen_fill_px(int x, int y, int w, int h, uint32_t rgb)
 int screen_render_node(char *path, size_t size)
 {
     struct stat st;
-    if (!path || size == 0 || window_mode || card < 0 || fstat(card, &st) < 0) return -1;
+    if (!path || size == 0 || window_mode || tty_mode || card < 0 || fstat(card, &st) < 0) return -1;
     char drvlink[128], drv[64];
     snprintf(drvlink, sizeof drvlink, "/sys/dev/char/%u:%u/device/driver",
              (unsigned)major(st.st_rdev), (unsigned)minor(st.st_rdev));
@@ -3411,7 +3543,7 @@ static int open_card_name(char *out, size_t size)
 
 int screen_render_node_for(const char *selector, char *path, size_t size)
 {
-    if (!path || size == 0 || window_mode) return -1;
+    if (!path || size == 0 || window_mode || tty_mode) return -1;
     if (card >= 0) {
         /* A PRIME dma-buf imports only on the device it scans out from: with a
          * scanout card open, its own render node is the only one used. Another
@@ -3437,13 +3569,13 @@ int screen_render_node_for(const char *selector, char *path, size_t size)
 
 int screen_flip_fd(void)
 {
-    if (card < 0 || noutputs != 1 || lent || window_mode || extended) return -1;
+    if (card < 0 || noutputs != 1 || lent || window_mode || tty_mode || extended) return -1;
     return (outputs[0].dmabuf_flip_pending || outputs[0].shm_flip_pending) ? card : -1;
 }
 
 int screen_flip_complete(void)
 {
-    if (card < 0 || noutputs != 1 || lent || window_mode || extended) return 0;
+    if (card < 0 || noutputs != 1 || lent || window_mode || tty_mode || extended) return 0;
     struct output *o = &outputs[0];
     int flags = fcntl(card, F_GETFL);
     if (flags >= 0 && !(flags & O_NONBLOCK)) (void)fcntl(card, F_SETFL, flags | O_NONBLOCK);
@@ -3495,7 +3627,7 @@ int screen_flip_complete(void)
 
 void screen_flip_reset(void)
 {
-    if (card < 0 || noutputs != 1 || lent || window_mode || extended) return;
+    if (card < 0 || noutputs != 1 || lent || window_mode || tty_mode || extended) return;
     struct output *o = &outputs[0];
     if (!o->dmabuf_flip_pending && !o->shm_flip_pending) return;
     if (screen_flip_complete() > 0) return;
@@ -3507,7 +3639,7 @@ void screen_flip_reset(void)
 
 int screen_present_dmabuf_planes(const struct screen_dmabuf_planes *p, uint32_t w, uint32_t h)
 {
-    if (!p || window_mode || extended) {
+    if (!p || window_mode || tty_mode || extended) {
         errno = EINVAL;
         return -1;
     }
@@ -3702,7 +3834,7 @@ int screen_present_dmabuf(int dmabuf_fd, uint32_t w, uint32_t h, uint32_t fourcc
  * Never writes into the currently scanned-out front buffer. */
 int screen_present_shm_flip(const uint32_t *pixels, uint32_t w, uint32_t h)
 {
-    if (!pixels || w == 0 || h == 0 || window_mode || extended) {
+    if (!pixels || w == 0 || h == 0 || window_mode || tty_mode || extended) {
         errno = EINVAL;
         return -1;
     }
@@ -3858,6 +3990,12 @@ static void glyph(int col, int row, uint32_t cp, uint32_t fg, uint32_t bg)
 
 void screen_text(int col, int row, const char *s, uint32_t fg, uint32_t bg)
 {
+#ifdef CONFIG_TTY
+    if (tty_cell_mode()) {
+        tty_cell_text(col, row, s, fg, bg);
+        return;
+    }
+#endif
     if (shadow == NULL || row < 0 || row >= rows || s == NULL) {
         return;
     }
@@ -3927,12 +4065,23 @@ static int cell_index(int64_t px, uint32_t step)
 
 void screen_cell_at(int x, int y, int *col, int *row)
 {
+    if (tty_cell_mode()) {
+        *col = x;
+        *row = y;
+        return;
+    }
     *col = cell_index(x, glyph_w);
     *row = cell_index((int64_t)y - top, glyph_h);
 }
 
 void screen_bar(const char *title, const char *ime)
 {
+#ifdef CONFIG_TTY
+    if (tty_cell_mode()) {
+        tty_cell_bar(title, ime);
+        return;
+    }
+#endif
     unsigned long long ram;
     char sub[32] = "";
     int x0, x1;

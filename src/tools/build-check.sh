@@ -50,8 +50,14 @@ input_cflags="$(pkg-config --cflags libinput) -DCONFIG_LIBINPUT"
 input_libs="$(pkg-config --libs libinput) -lm"
 gio_cflags="$(pkg-config --cflags gio-2.0)"
 gio_libs="$(pkg-config --libs gio-2.0)"
-ui_cflags="$ft_cflags $nm_cflags $input_cflags"
-ui_libs="$ft_libs $nm_libs $input_libs"
+tty_cflags="-DCONFIG_TTY"
+zlib_libs=
+if pkg-config --exists zlib; then
+    tty_cflags="$tty_cflags -DCONFIG_ZLIB $(pkg-config --cflags zlib)"
+    zlib_libs="$(pkg-config --libs zlib)"
+fi
+ui_cflags="$ft_cflags $nm_cflags $input_cflags $tty_cflags"
+ui_libs="$ft_libs $nm_libs $input_libs $zlib_libs"
 
 # Base modules partitioned into isolated static archives:
 #   liblocachy-core.a   zero external shared libraries (rc, say, control, theme, ...)
@@ -60,7 +66,7 @@ ui_libs="$ft_libs $nm_libs $input_libs"
 #   liblocachy-open.a   content-type rules and open-request spool (GIO)
 #   liblocachy-ime.a    input method (librime, when installed)
 core_mods="rc say control duress jobs i18n key-action monitor-modes monitors backlight clipboard theme theme-desktop input-raw modload"
-ui_mods="screen font fontmatch keys pointer ui help textsel panel"
+ui_mods="screen font fontmatch keys pointer ui help textsel panel tty-backend"
 
 for name in $core_mods; do
     gcc $core_cflags -I"$src/base/include" -I"$src/base" \
@@ -97,7 +103,7 @@ rm -f "$out/obj/liblocachy-core.a" "$out/obj/liblocachy-ui.a" \
     "$out/obj/base-screen.o" "$out/obj/base-font.o" "$out/obj/base-fontmatch.o" \
     "$out/obj/base-keys.o" "$out/obj/base-pointer.o" "$out/obj/base-ui.o" \
     "$out/obj/base-help.o" "$out/obj/base-textsel.o" "$out/obj/base-panel.o" \
-    "$out/obj/base-wayland-data.o"
+    "$out/obj/base-tty-backend.o" "$out/obj/base-wayland-data.o"
 "$ar_bin" rcs "$out/obj/liblocachy-status.a" "$out/obj/base-status.o"
 "$ar_bin" rcs "$out/obj/liblocachy-open.a" "$out/obj/base-open.o"
 "$ar_bin" rcs "$out/obj/liblocachy-ime.a" "$out/obj/ime.o"
@@ -120,7 +126,8 @@ hook_win="-Wl,-u,wl_data_init -Wl,-u,wl_data_active"
 # (keys.c, pointer.c, the window transport) and the data device (clipboard.c, files.c).
 hook_raw="-Wl,-u,base_raw_cancel -Wl,-u,base_raw_emit -Wl,-u,base_raw_exclusive -Wl,-u,base_raw_pending"
 hook_data="-Wl,-u,wl_data_active -Wl,-u,wl_data_clipboard_get -Wl,-u,wl_data_clipboard_set -Wl,-u,wl_data_clipboard_clear -Wl,-u,wl_data_drag_active -Wl,-u,wl_data_drag_start -Wl,-u,wl_data_drag_start_key -Wl,-u,wl_data_press_serial"
-hook_base="$hook_raw $hook_data"
+hook_tty="-Wl,-u,tty_backend_wanted -Wl,-u,tty_backend_active -Wl,-u,tty_backend_run -Wl,-u,tty_backend_close -Wl,-u,tty_backend_clipboard_set"
+hook_base="$hook_raw $hook_data $hook_tty"
 
 # Headless services: zero UI/NM/GIO/FreeType shared dependencies.
 gcc $core_cflags $gc_ldflags -I"$src/base/include" -I"$src/base" \
@@ -306,7 +313,7 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
             wlr-foreign-toplevel-management-unstable-v1 fractional-scale-v1 viewporter relative-pointer-unstable-v1) \
         $hook_theme $hook_base $hook_bar $hook_open \
         -Wl,--start-group "$lib_core" "$lib_ui" "$lib_status" "$lib_open" "$lib_ime" -Wl,--end-group \
-        $ime_libs $ft_libs $nm_libs $gio_libs $wl_libs -lm -o "$out/locachy-bar"
+        $ime_libs $ft_libs $nm_libs $gio_libs $wl_libs $zlib_libs -lm -o "$out/locachy-bar"
     gcc $core_cflags $gc_ldflags \
         -I"$src/base/include" -I"$src/base" -I"$out" "$src/progs/labwc-control.c" \
         $(proto security-context-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 \
@@ -319,7 +326,7 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
             ext-image-capture-source-v1 ext-image-copy-capture-v1 fractional-scale-v1 viewporter xdg-shell) \
         $hook_theme_watch $hook_base \
         -Wl,--start-group "$lib_core" "$lib_ui" "$lib_status" "$lib_open" -Wl,--end-group \
-        $ft_libs $wl_libs -lm -o "$out/locachy-overview"
+        $ft_libs $wl_libs $zlib_libs -lm -o "$out/locachy-overview"
     gcc $core_cflags $gc_ldflags $ft_cflags \
         -I"$src/base/include" -I"$src/base" -I"$out" "$src/progs/shot.c" \
         $(proto wlr-layer-shell-unstable-v1 wlr-foreign-toplevel-management-unstable-v1 wlr-output-management-unstable-v1 \
@@ -327,7 +334,7 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
             fractional-scale-v1 viewporter xdg-shell) \
         $hook_theme_watch $hook_base $hook_open \
         -Wl,--start-group "$lib_core" "$lib_ui" "$lib_status" "$lib_open" -Wl,--end-group \
-        $ft_libs $wl_libs -lpng -lm -o "$out/locachy-shot"
+        $ft_libs $wl_libs $zlib_libs -lpng -lm -o "$out/locachy-shot"
     # The programs that also open as windows (make.sh's liblocachy-win.a):
     # UI + window transport (wayland-backend.c, wayland-data.c, protocols);
     # direct-only builds above stay on liblocachy-ui.a.
@@ -351,7 +358,7 @@ if command -v wayland-scanner >/dev/null 2>&1 && pkg-config --exists wayland-cli
         "$out/obj/win-screen.o" "$out/obj/win-font.o" "$out/obj/win-fontmatch.o" \
         "$out/obj/win-keys.o" "$out/obj/win-pointer.o" "$out/obj/win-ui.o" \
         "$out/obj/win-help.o" "$out/obj/win-textsel.o" "$out/obj/win-panel.o" \
-        "$out/obj/win-wayland-backend.o" "$out/obj/win-wayland-data.o" $win_proto_objs
+        "$out/obj/win-tty-backend.o" "$out/obj/win-wayland-backend.o" "$out/obj/win-wayland-data.o" $win_proto_objs
     lib_win="$out/obj/liblocachy-win.a"
     gcc $core_cflags $gc_ldflags $ime_flags $ui_cflags -I"$src/base/include" -I"$out" \
         "$src/progs/term.c" $hook_theme_watch $hook_base $hook_bar $hook_win \

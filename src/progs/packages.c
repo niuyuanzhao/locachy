@@ -64,6 +64,10 @@
 #include "files.h"
 #include "jobs.h"
 #include "textsel.h"
+#include "tty-backend.h"
+
+__attribute__((weak)) void base_reboot(void);
+__attribute__((weak)) int base_power_ready(void);
 
 #define FG           theme_rgb(THEME_FG, 0xD0D0D0)
 #define BG           theme_rgb(THEME_BG, 0x101820)
@@ -1770,6 +1774,7 @@ static const struct ui_help_line packages_keys[] = {
     { "Space", N_("Updates: mark a row to apply") },
     { "c, a", N_("Updates: check again (on the network); apply the marked rows") },
     { "u", N_("Updates: update LOCachy source and updater alone (without checking repositories)") },
+    { "R", N_("Updates: reboot the machine cleanly (waits for any running system job)") },
     { "n, b, r, Delete", N_("Containers: new, build, roll back, remove") },
     { "/, Ctrl+F", N_("Search and install (Containers, Host)") },
     { "i, Delete, s", N_("Host: add a package, remove the selected one, bring the system to the manifest") },
@@ -3580,6 +3585,13 @@ static void updates_key(int key)
     } else if (key == 'u' && yes(_("Update LOCachy source and updater now (without host packages)?"))) {
         char *argv[] = { PKG, "source-update", NULL };
         start_job(_("update LOCachy source"), argv);
+    } else if (key == 'R') {
+        if (!base_reboot || !base_power_ready || !base_power_ready()) {
+            /* TRANSLATORS: Home and SSH reach process 1; a window of this program cannot. */
+            say_notice(1, "%s", _("Restart from home or over SSH: this window cannot reach the system."));
+        } else if (yes(_("Reboot the machine now? (If a system job is running, init waits for it to finish.)"))) {
+            base_reboot();
+        }
     }
 }
 
@@ -3631,8 +3643,24 @@ static int pointer_key(int n, int *mods)
     return 0;
 }
 
+static void maybe_sudo_tty(void)
+{
+    /* An explicit LOCACHY_BACKEND is kept as given: sudo drops it (sudoers keeps only
+     * COLORTERM and LOCACHY_TTY_MODE), and root would then pick the physical display. */
+    const char *forced = getenv("LOCACHY_BACKEND");
+    if (geteuid() == 0 || (forced && *forced) || !tty_backend_wanted || !tty_backend_wanted() || getenv("LOCACHY_NO_SUDO")) {
+        return;
+    }
+    if (access("/usr/bin/sudo", X_OK) != 0) return;
+    char self[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    const char *prog = (n > 0) ? (self[n] = '\0', self) : "/usr/local/bin/packages";
+    execl("/usr/bin/sudo", "sudo", prog, (char *)NULL);
+}
+
 int main(void)
 {
+    maybe_sudo_tty();
     screen_open(BASE_FONT);
     keys_open();
     load_all();
@@ -3779,7 +3807,7 @@ int main(void)
             }
             dirty = 1;
         } else if (key > 0 && page == UPDATES) {
-            if (key == 'c' || key == ' ' || key == '\n' || key == 'a' || key == 'u') {
+            if (key == 'c' || key == ' ' || key == '\n' || key == 'a' || key == 'u' || key == 'R') {
                 updates_key(key);
                 dirty = 1;
             }

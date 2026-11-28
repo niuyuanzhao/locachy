@@ -87,6 +87,11 @@ In the examples, `locachy-gpu` is a client SSH config alias for the normal user
 and the node's tailnet IP or MagicDNS name. `service_compute`, `locachy-pair`,
 and a Thunderbolt cable are not needed for this workflow.
 
+Interactive LOCachy programs (`settings`, `packages`, `firmware`, `files`, and
+`edit` and `view` where they are built) and the `reboot` and `poweroff` commands
+also work over SSH while an extended display (`extdisplay`) is active on the
+physical screen (see [SSH-TUI.md](SSH-TUI.md)).
+
 ### Settings TUI (`Compute & VMs → Compute Node`)
 
 Settings exposes six rows under **Compute & VMs → Compute Node**, backed by `locachy-compute status --tsv` (which never fails even when `compute_storage` is currently unmounted):

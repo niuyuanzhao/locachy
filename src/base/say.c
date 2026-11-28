@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "base.h"
+#include "tty-backend.h"
 
 static int kmsg = -1;
 
@@ -36,6 +37,10 @@ void say(const char *fmt, ...)
         kmsg = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
     }
     if (kmsg >= 0 && write(kmsg, line, (size_t)n) == n) {
+        return;
+    }
+    /* While the terminal backend draws on a TTY, stderr on that TTY would corrupt the screen. */
+    if (tty_backend_active && tty_backend_active() && isatty(2)) {
         return;
     }
     write(2, line + 3, (size_t)n - 3);

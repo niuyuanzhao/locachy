@@ -96,5 +96,12 @@ int pointer_window_touch_fd(void);
 void pointer_window_touch_timer(void);
 #else
 static inline int wl_backend_active(void) { return 0; }
+#ifdef CONFIG_TTY
+void pointer_window_motion(int x, int y);
+void pointer_window_button(int code, int pressed);
+void pointer_window_scroll(int source, double v, double h, int axes);
+void pointer_window_present(int on);
+void pointer_window_leave(void);
+#endif
 #endif
 #endif

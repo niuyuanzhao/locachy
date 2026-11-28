@@ -291,6 +291,7 @@ int main(void)
             ways[i].on = 0;
         }
     }
+    screen_direct_only();
     if (!screen_open(BASE_FONT)) {
         return 1;
     }

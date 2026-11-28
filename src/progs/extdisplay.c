@@ -1302,6 +1302,7 @@ int main(int argc, char **argv)
             temp_card_env = 1;
         }
     }
+    screen_direct_only();
     int opened = screen_open(BASE_FONT);
     if (temp_card_env) unsetenv("LOCACHY_DRM_CARD");
     if (!opened) return 1;

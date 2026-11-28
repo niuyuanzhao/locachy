@@ -53,6 +53,7 @@
 #include "monitor-layout.h"
 #include "monitor-profile.h"
 #include "theme.h"
+#include "tty-backend.h"
 
 __attribute__((weak)) int base_brightness_get(int *cur, int *max_val);
 __attribute__((weak)) int base_brightness_set(int target, int max_ref);
@@ -2178,6 +2179,9 @@ static int in_term_wayland(char *const call[]);
  * running under LOCACHY_BACKEND=wayland) until it ends: its status. */
 static int in_term(char *const argv[])
 {
+    if (tty_backend_active && tty_backend_active() && tty_backend_run) {
+        return tty_backend_run(argv);
+    }
     char *call[12] = { TERM_BIN };
     int n = 1;
     for (; argv[n - 1] && n < 11; n++) {
@@ -12294,10 +12298,33 @@ static int in_term_wayland(char *const call[])
     return result;
 }
 
+static void maybe_sudo_tty(int argc, char **argv)
+{
+    /* An explicit LOCACHY_BACKEND is kept as given: sudo drops it (sudoers keeps only
+     * COLORTERM and LOCACHY_TTY_MODE), and root would then pick the physical display. */
+    const char *forced = getenv("LOCACHY_BACKEND");
+    if (geteuid() == 0 || (forced && *forced) || !tty_backend_wanted || !tty_backend_wanted() || getenv("LOCACHY_NO_SUDO")) {
+        return;
+    }
+    if (access("/usr/bin/sudo", X_OK) != 0) return;
+    char self[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    const char *prog = (n > 0) ? (self[n] = '\0', self) : argv[0];
+    char **sargv = calloc((size_t)argc + 2, sizeof *sargv);
+    if (!sargv) return;
+    sargv[0] = "/usr/bin/sudo";
+    sargv[1] = (char *)prog;
+    for (int i = 1; i < argc; i++) sargv[i + 1] = argv[i];
+    sargv[argc + 1] = NULL;
+    execv("/usr/bin/sudo", sargv);
+    free(sargv);
+}
+
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN); /* an answer to a PAM child that has ended (auth.c) */
     int applying = argc > 1 && strcmp(argv[1], "--apply") == 0;
+    if (!applying) maybe_sudo_tty(argc, argv);
     double t0 = applying ? uptime() : 0;
     if (applying) say("settings: applying at %.3f s", t0);
     tp_present = detect_pointing_stick();

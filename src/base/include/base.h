@@ -124,6 +124,9 @@ int monitor_internal(const char *name);
  * logs why. BASE_FONT is Terminus 16 bold (the initramfs has only that). */
 #define BASE_FONT "/usr/local/share/locachy/font.psf"
 int screen_open(const char *font_path);
+/* Prevent automatic terminal (SSH/PTY) backend selection for programs that
+ * always drive physical DRM outputs (extdisplay, lock). Call before screen_open. */
+void screen_direct_only(void);
 /* Extended mode is opt-in; existing programs keep the mirrored canvas. Each
  * selected output is drawn in its native pixels and its own text scale. */
 struct screen_output {
@@ -751,8 +754,10 @@ int open_in_home(const char *with, const char *target);
  * published whole without replacement; consumers claim by rename. */
 int open_request_publish(const char *with, const char *target);
 
-/* Ask process 1 to reboot or power off. */
+/* Ask process 1 to reboot or power off. Without a way to reach it (a window) they return. */
 void base_reboot(void);
 void base_poweroff(void);
+/* Whether base_reboot / base_poweroff can reach process 1 or a terminal session. */
+int base_power_ready(void);
 
 #endif

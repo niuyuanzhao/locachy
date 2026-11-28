@@ -37,6 +37,7 @@
 #include "base.h"
 #include "files.h"
 #include "jobs.h"
+#include "tty-backend.h"
 
 #define FG           theme_rgb(THEME_FG, 0xD0D0D0)
 #define BG           theme_rgb(THEME_BG, 0x101820)
@@ -1015,8 +1016,24 @@ static int pointer_to_key(int *mods)
     return 0;
 }
 
+static void maybe_sudo_tty(void)
+{
+    /* An explicit LOCACHY_BACKEND is kept as given: sudo drops it (sudoers keeps only
+     * COLORTERM and LOCACHY_TTY_MODE), and root would then pick the physical display. */
+    const char *forced = getenv("LOCACHY_BACKEND");
+    if (geteuid() == 0 || (forced && *forced) || !tty_backend_wanted || !tty_backend_wanted() || getenv("LOCACHY_NO_SUDO")) {
+        return;
+    }
+    if (access("/usr/bin/sudo", X_OK) != 0) return;
+    char self[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    const char *prog = (n > 0) ? (self[n] = '\0', self) : "/usr/local/bin/firmware";
+    execl("/usr/bin/sudo", "sudo", prog, (char *)NULL);
+}
+
 int main(void)
 {
+    maybe_sudo_tty();
     load_all();
     screen_open(BASE_FONT);
     keys_open();

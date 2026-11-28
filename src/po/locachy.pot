@@ -18598,3 +18598,15 @@ msgstr ""
 #: progs/view.c
 msgid "Show more details..."
 msgstr ""
+
+#: progs/packages.c
+msgid "Updates: reboot the machine cleanly (waits for any running system job)"
+msgstr ""
+
+#: progs/packages.c
+msgid "Reboot the machine now? (If a system job is running, init waits for it to finish.)"
+msgstr ""
+
+#: progs/packages.c
+msgid "Restart from home or over SSH: this window cannot reach the system."
+msgstr ""

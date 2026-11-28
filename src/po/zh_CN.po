@@ -18946,3 +18946,15 @@ msgstr "显示更多详情..."
 #~ msgid ""
 #~ "Tor off, but its firewall is still there: nothing goes out (%s remove)."
 #~ msgstr "Tor 已关闭，但其防火墙仍在：所有外联已阻断（%s remove）。"
+
+#: progs/packages.c
+msgid "Updates: reboot the machine cleanly (waits for any running system job)"
+msgstr "更新：干净地重启本机（等待正在运行的系统任务结束）"
+
+#: progs/packages.c
+msgid "Reboot the machine now? (If a system job is running, init waits for it to finish.)"
+msgstr "现在重启本机？（若有系统任务正在运行，init 会等它结束。）"
+
+#: progs/packages.c
+msgid "Restart from home or over SSH: this window cannot reach the system."
+msgstr "重启请在 home 中或经 SSH 进行，本窗口无法通向系统。"

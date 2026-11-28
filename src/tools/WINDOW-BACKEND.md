@@ -6,18 +6,24 @@ The base's programs (term, settings, view, edit, archive, packages, firmware, fi
 On a screen of their own they show it through DRM, with input devices lent by
 process 1. The same programs can instead show it as an ordinary window on the
 shared display. Only the trusted window launcher chooses this, by setting
-`LOCACHY_BACKEND=wayland`; anything else, including an unset variable, is the
-direct path, unchanged.
+`LOCACHY_BACKEND=wayland`. A terminal session is a third transport,
+`LOCACHY_BACKEND=tty` ([SSH-TUI.md](SSH-TUI.md)). Any other value, or an unset
+variable, takes the direct path, unless the session is an SSH or PTY one with no
+process-1 control socket.
 
 ## The choice is explicit and fails closed
 
-- `direct` (or unset): screens and devices exactly as before.
+- `direct`: screens and devices exactly as before. Unset means the same, except
+  on an SSH or PTY session with no process-1 control socket, which uses `tty`.
 - `wayland`: an xdg-shell window. No DRM node, input device, lease or
   process-1 control channel is used.
-- A program built without the window transport, or any other value of the
+- `tty`: the terminal transport for SSH/PTY sessions (also selected
+  automatically on an interactive PTY when `LOCACHY_CONTROL` is unset and the
+  program did not call `screen_direct_only()`; see [SSH-TUI.md](SSH-TUI.md)).
+- A program built without the requested transport, or any other value of the
   variable, ends with status 78. A window request with no compositor (or no
-  window from it) ends with status 69. Neither falls back to opening DRM or the
-  input devices.
+  window from it), or a `tty` request without a usable terminal, ends with
+  status 69. None falls back to opening DRM or the input devices.
 
 Process 1 and the initramfs are built with musl and contain no window code.
 `make.sh` builds the window transport (`CONFIG_WAYLAND`) only into the

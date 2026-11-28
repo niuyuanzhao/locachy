@@ -1491,10 +1491,10 @@ int pointer_present(void)
     return npointers > 0;
 }
 
-#ifdef CONFIG_WAYLAND
-/* A window's pointer (wayland-backend.c): the seat's events, already in
- * pixels of the picture, become this program's as a device's would; the
- * compositor draws the cursor. */
+#if defined(CONFIG_WAYLAND) || defined(CONFIG_TTY)
+/* A window's or terminal's pointer (wayland-backend.c, tty-backend.c): events
+ * in canvas coordinates become this program's as a device's would; the
+ * compositor or remote terminal draws the cursor. */
 static int window_y(int y)
 {
     /* Above the window stays off the canvas, not in the hidden bar. */
@@ -1532,7 +1532,9 @@ void pointer_window_leave(void)
     /* End hover even if no button or scroll gesture was active. */
     pointer_window_motion(-1, -1);
 }
+#endif
 
+#ifdef CONFIG_WAYLAND
 /* Wayland gives contact IDs, not contiguous libinput slots. */
 static int32_t touch_ids[TOUCHES];
 

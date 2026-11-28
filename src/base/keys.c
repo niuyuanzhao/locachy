@@ -26,6 +26,7 @@
 
 #include "internal.h"
 #include "include/wayland-backend.h"
+#include "include/tty-backend.h"
 
 /* The input devices as sysfs has them (eventN/device), for the keyboards'
  * list of a program that holds none (keys_keyboards). */
@@ -540,6 +541,11 @@ const char *keys_text(void)
         return wl_backend_text();
 #endif
     }
+#ifdef CONFIG_TTY
+    if (tty_backend_active()) {
+        return tty_backend_text();
+    }
+#endif
     return typed_text;
 }
 
@@ -770,9 +776,16 @@ int keys_alone_action(int code)
 int keys_open(void)
 {
     load_keybindings(&tables[0]);
-    /* A window's keys and pointer are its seat's (wayland-backend.c): no
-     * keyboard or pointer device of its own, no lease from process 1. */
+    /* A window's or terminal's keys and pointer come from its transport: no
+     * evdev device of its own, no lease from process 1. */
     if (wl_backend_active()) return 1;
+#ifdef CONFIG_TTY
+    if (tty_backend_active()) return 1;
+    if (tty_backend_explicit() || tty_backend_wanted()) {
+        say("keys: terminal backend requested, but none is open; no input devices are opened");
+        exit(WL_EXIT_UNAVAILABLE);
+    }
+#endif
     if (wl_backend_requested() != 0) {
         say("keys: a window was asked for (LOCACHY_BACKEND), but there is none; no input devices are opened");
         exit(WL_EXIT_UNAVAILABLE);
@@ -1302,6 +1315,11 @@ int keys_modifiers(void)
         return wl_backend_modifiers();
 #endif
     }
+#ifdef CONFIG_TTY
+    if (tty_backend_active()) {
+        return tty_backend_modifiers();
+    }
+#endif
     return kq_has_mods ? kq_mods : live_modifiers();
 }
 
@@ -1585,6 +1603,34 @@ static int window_poll(struct pollfd *extra, size_t nextra, int timeout_ms)
 }
 #endif
 
+#ifdef CONFIG_TTY
+static int tty_poll(struct pollfd *extra, size_t nextra, int timeout_ms)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    long long deadline = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000 + (timeout_ms > 0 ? timeout_ms : 0);
+    for (size_t i = 0; i < nextra; i++) extra[i].revents = 0;
+    for (;;) {
+        if (tty_backend_shown()) return K_SHOWN;
+        if (pointer_next()) return K_POINTER;
+        int key = tty_backend_next_key();
+        if (key) return key;
+        int left = -1;
+        if (timeout_ms >= 0) {
+            clock_gettime(CLOCK_MONOTONIC, &t);
+            long long now = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+            left = now >= deadline ? 0 : (int)(deadline - now);
+        }
+        int r = tty_backend_wait(extra, nextra, left);
+        if (r < 0) {
+            say("keys: terminal closed (EOF/HUP)");
+            exit(0);
+        }
+        if (r == 0 || r == 2) return 0;
+    }
+}
+#endif
+
 static long long keys_now_ms(void)
 {
     struct timespec ts;
@@ -1618,6 +1664,9 @@ int key_poll_many(struct pollfd *extra, size_t nextra, int timeout_ms)
 {
 #ifdef CONFIG_WAYLAND
     if (wl_backend_active()) return window_poll(extra, nextra, timeout_ms);
+#endif
+#ifdef CONFIG_TTY
+    if (tty_backend_active()) return tty_poll(extra, nextra, timeout_ms);
 #endif
     size_t size = MAX_KEYBOARDS + 2 + nextra;
     struct pollfd stack_p[64];
