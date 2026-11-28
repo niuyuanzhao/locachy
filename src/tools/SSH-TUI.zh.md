@@ -54,6 +54,6 @@ src/tools/test-tty-backend.sh [BUILD_CHECK_OUT_DIR]
 - `settings`：ANSI 字符网格、Kitty 像素帧缓冲和 Sixel 像素帧缓冲三种模式；
 - `settings`：Kitty 模式但终端未报告像素尺寸，必须回退到字符网格模式；
 - `packages`：字符网格和 Kitty 像素帧缓冲两种模式；
-- `firmware`：字符网格模式。
+- `firmware` 与 `home`：字符网格模式（`home` 在终端会话里按 `Ctrl+Q` 干净退出，在物理屏幕上仍保持不退出）。
 
-每次运行都验证 `SIGWINCH` 实时缩放和 `Ctrl+Q` 干净退出，并检查 `/proc/<pid>/fd`，确认不会打开任何 `/dev/dri/*` 或 `/dev/input/*` 设备。像素模式需要 `/usr/local/share/locachy/` 下的 Terminus 字体。主机上没有这些字体时，脚本会把 `/usr/share/kbd/consolefonts` 中的字体解压到私有挂载命名空间，不需要主机 root 权限。
+每次运行都验证 `SIGWINCH` 实时缩放和 `Ctrl+Q` 干净退出，并检查 `/proc/<pid>/fd`，确认不会打开任何 `/dev/input/*` 或可写的 `/dev/dri/*` 设备。像素模式需要 `/usr/local/share/locachy/` 下的 Terminus 字体。主机上没有这些字体时，脚本会把 `/usr/share/kbd/consolefonts` 中的字体解压到私有挂载命名空间，不需要主机 root 权限。

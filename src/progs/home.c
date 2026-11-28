@@ -48,6 +48,7 @@
 #include "program-sections.h"
 #include "textsel.h"
 #include "tor-browser.h"
+#include "tty-backend.h"
 
 #ifndef HOME_APP_RUN
 #define HOME_APP_RUN "/run/locachy/apps"
@@ -1991,6 +1992,9 @@ int main(void)
             continue;
         }
         int ka = key_action(key, keys_modifiers()); /* the key's meaning in every program */
+        if (ka == ACT_QUIT && tty_backend_active && tty_backend_active()) {
+            return 0; /* over SSH, home is an interactive session that must be able to exit */
+        }
         int cleared_sel = 0;
         if (key > 0 && ka != ACT_COPY && ka != ACT_SELECT_ALL && key != K_ACT_HOME) {
             cleared_sel = textsel_active();
@@ -2001,7 +2005,7 @@ int main(void)
         if (confirming != CONF_NONE) {
             confirm_key(key);
         } else if (ka == ACT_HELP) {
-            ui_help(_("Home keys"), home_help); /* home does not quit: Ctrl+Q there is nothing */
+            ui_help(_("Home keys"), home_help); /* on the shared display home never quits: Ctrl+Q does nothing there */
             invalidate_grid_cache();
         } else if (ka == ACT_COPY) {
             copy_log(log_shown && log_all_selected);

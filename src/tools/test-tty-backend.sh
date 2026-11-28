@@ -140,16 +140,29 @@ def run_pty(prog, mode, expect_marker, label, send_px=None):
 
         if not checked_fds and b"\x1b[?1049h" in out and expect_marker in out:
             checked_fds = True
-            # Verify no /dev/dri/* or /dev/input/* descriptors are held open.
+            # Forbidden: input devices, and any writable DRM open (DRM master or modeset).
+            # A brief O_RDONLY /dev/dri/card* open is the connector probe behind settings' display list.
             fd_dir = f"/proc/{proc.pid}/fd"
             try:
-                for entry in os.listdir(fd_dir):
-                    target = os.readlink(os.path.join(fd_dir, entry))
-                    if target.startswith("/dev/dri/") or target.startswith("/dev/input/"):
-                        proc.kill()
-                        raise AssertionError(f"{label}: opened forbidden device {target}")
+                entries = os.listdir(fd_dir)
             except FileNotFoundError:
-                pass
+                entries = []
+            for entry in entries:
+                bad = None
+                try:
+                    target = os.readlink(os.path.join(fd_dir, entry))
+                    if target.startswith("/dev/input/"):
+                        bad = target
+                    elif target.startswith("/dev/dri/"):
+                        with open(f"/proc/{proc.pid}/fdinfo/{entry}") as fi:
+                            flags = next(int(line.split()[1], 8) for line in fi if line.startswith("flags:"))
+                        if flags & 3:
+                            bad = target
+                except (FileNotFoundError, StopIteration):
+                    pass  # closed while we looked
+                if bad:
+                    proc.kill()
+                    raise AssertionError(f"{label}: opened forbidden device {bad}")
             # Trigger a live resize via TIOCSWINSZ + SIGWINCH.
             if not sent_resize:
                 sent_resize = True
@@ -200,6 +213,7 @@ run_pty("settings", "kitty", b"LOCachy", "real PTY: settings Kitty mode with 0x0
 run_pty("packages", "cell", b"packages", "real PTY: packages in ANSI cell mode + resize + Ctrl+Q + zero DRM/evdev fds")
 run_pty("packages", "kitty", b"\x1b_Ga=T,f=24,", "real PTY: packages in Kitty pixel framebuffer mode + resize + Ctrl+Q + zero DRM/evdev fds")
 run_pty("firmware", "cell", b"firmware", "real PTY: firmware in ANSI cell mode + resize + Ctrl+Q + zero DRM/evdev fds")
+run_pty("home", "cell", b"LOCachy", "real PTY: home in ANSI cell mode + resize + Ctrl+Q + zero DRM/evdev fds")
 PY
 fi
 

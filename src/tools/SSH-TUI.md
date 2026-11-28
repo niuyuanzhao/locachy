@@ -117,11 +117,12 @@ the real binaries on a Linux PTY, answering the terminal probe itself:
 - `settings` in ANSI cell, Kitty pixel framebuffer and Sixel pixel framebuffer modes;
 - `settings` in Kitty mode on a terminal that reports no pixel size, which must fall back to cell mode;
 - `packages` in cell and Kitty pixel framebuffer modes;
-- `firmware` in cell mode.
+- `firmware` and `home` in cell mode (`home` exits cleanly on `Ctrl+Q` in a
+  terminal session while staying non-quitting on the physical display).
 
 Each run tests live `SIGWINCH` resizing and `Ctrl+Q` exit, and checks
-`/proc/<pid>/fd` to confirm zero `/dev/dri/*` or `/dev/input/*` descriptors are
-opened. The pixel runs need the Terminus fonts under `/usr/local/share/locachy/`.
+`/proc/<pid>/fd` to confirm zero `/dev/input/*` or writable `/dev/dri/*`
+descriptors are opened. The pixel runs need the Terminus fonts under `/usr/local/share/locachy/`.
 On a host without them, the script copies the fonts from
 `/usr/share/kbd/consolefonts` into a private mount namespace, which needs no root
 privilege on the host.
